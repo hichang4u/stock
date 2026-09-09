@@ -9,13 +9,18 @@
     채워진 쌍은 호출 없이 건너뛰므로 여러 번 돌려도 안전하고, 중단해도
     재실행하면 이어서 채운다.
 
+    백필이 성공하면 이어서 data\ 백업을 뜬다(하루 한 번). 20260903에
+    f1_snapshots와 backtest_bars를 통째로 잃은 사고의 대응이며, 표본이
+    새로 생긴 날이 곧 백업할 이유가 가장 큰 날이다. -NoBackup 으로 끈다.
+
     왜 사람이 돌려야 하는지는
     docs/TRACK_B_UNIVERSE_REANALYSIS_20260831.md 제10절에 있다 — 실시간 봉
     수집은 트랙 A가 고른 종목만 따라가므로, 랭크 1 표본은 이 백필로만 쌓인다.
 #>
 [CmdletBinding()]
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$NoBackup
 )
 
 $ErrorActionPreference = "Stop"
@@ -122,4 +127,50 @@ if ($summary) {
     }
 }
 Write-Ok "완료"
+
+if ($DryRun) {
+    Write-Host "  (계획 확인이므로 백업은 뜨지 않습니다)"
+    exit 0
+}
+if ($NoBackup) {
+    Write-Warn "-NoBackup 이 지정돼 백업을 건너뜁니다."
+    exit 0
+}
+
+Write-Section "백업"
+
+$backupScript = Join-Path $repoRoot "scripts\backup_data.py"
+if (-not (Test-Path $backupScript)) {
+    Write-Fail "백업 스크립트가 없습니다: $backupScript"
+    exit 2
+}
+
+# 백필 로그에 이어 붙인다. 백업이 조용히 안 도는 것이 이 장치의 가장 나쁜 실패다.
+$appender = [System.IO.StreamWriter]::new(
+    $logPath,
+    $true,
+    [System.Text.UTF8Encoding]::new($false)
+)
+$appender.AutoFlush = $true
+$backupCode = 0
+Push-Location -LiteralPath $repoRoot
+try {
+    & $venvPython "-u" $backupScript "--skip-if-today" 2>&1 | ForEach-Object {
+        $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
+        Write-Host "  $line"
+        $appender.WriteLine($line)
+    }
+    $backupCode = $LASTEXITCODE
+} finally {
+    Pop-Location
+    $appender.Dispose()
+}
+
+if ($backupCode -ne 0) {
+    Write-Fail "백업이 종료 코드 $backupCode 로 끝났습니다."
+    Write-Host "    백필 자체는 성공했습니다 - 채워진 봉은 그대로입니다."
+    Write-Host "    되돌릴 수 없는 손실을 막는 장치이므로 원인을 확인하세요."
+    exit 2
+}
+Write-Ok "백업"
 exit 0
