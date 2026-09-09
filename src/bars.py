@@ -50,6 +50,9 @@ _dirty: set[tuple[str, str]] = set()
 # 아직 봉이 열리지 않은 분에서 걸러진 스파이크 수. (날짜, 종목, 분) → 개수.
 # 그 분의 첫 정상 틱이 봉을 열 때 옮겨 담는다.
 _pending_spikes: dict[tuple[str, str, str], int] = {}
+# 지금 정정이 막혀 있는 (날짜, 종목) → 사유. 에피소드가 시작·종료할 때만
+# 로그를 남기려고 둔다. 매분 남기면 하루 수백 줄이 된다.
+_correction_blocked: dict[tuple[str, str], str] = {}
 # 지금 틱이 들어오고 있는 (날짜, 종목). 바뀌면 이전 계열을 마감한다.
 _active: tuple[str, str] | None = None
 
@@ -70,6 +73,7 @@ def reset() -> None:
     _filters.clear()
     _dirty.clear()
     _pending_spikes.clear()
+    _correction_blocked.clear()
     _active = None
 
 
@@ -340,15 +344,51 @@ def _is_complete_session(rows: list[dict]) -> bool:
     return warmup.covers_session(rows)
 
 
-def should_correct(now: datetime, *, a_holding: bool, ws_stale: bool) -> bool:
-    """분봉 API를 지금 호출해도 되는가.
+def correction_block_reason(
+    now: datetime, *, a_holding: bool, ws_stale: bool
+) -> str | None:
+    """분봉 API 호출을 막는 이유. 막지 않으면 None.
 
     두 창에서 막는다. 09:00~09:11은 A의 진입 창이고, A가 보유 중인데 WS가
     끊긴 구간은 A의 REST 백업이 PAPER 초당 1건 예산을 쓰고 있는 때다.
+
+    둘이 겹치면 금지창을 먼저 답한다 — 그쪽이 먼저 막는다.
     """
     if kis_minute_bars.in_forbidden_window(now):
-        return False
-    return not (a_holding and ws_stale)
+        return "ENTRY_WINDOW"
+    if a_holding and ws_stale:
+        return "A_HOLDING_WS_DOWN"
+    return None
+
+
+def should_correct(now: datetime, *, a_holding: bool, ws_stale: bool) -> bool:
+    """분봉 API를 지금 호출해도 되는가."""
+    return correction_block_reason(
+        now, a_holding=a_holding, ws_stale=ws_stale
+    ) is None
+
+
+def _note_correction_block(key: tuple[str, str], reason: str) -> None:
+    """A 보유 + WS 끊김으로 막힌 에피소드의 시작을 한 번만 남긴다.
+
+    금지창은 남기지 않는다 — 매일 09:00~09:11에 걸리는 설계대로의 동작이라
+    소음이다. 남길 값어치가 있는 것은 다른 쪽이다: 08-27 실장 이후 8거래일에서
+    한 번도 성립하지 않았고(A가 매번 09:11 전에 청산했다), 그래서 이 분기가
+    실제로 도는 것을 아직 아무도 본 적이 없다. 전체 39건 중 13건은 09:11
+    이후까지 보유했으므로 죽은 분기는 아니다.
+    """
+    if reason == "ENTRY_WINDOW":
+        return
+    if _correction_blocked.get(key) == reason:
+        return
+    _correction_blocked[key] = reason
+    log("TRACK_B_CORRECTION_BLOCKED", date=key[0], ticker=key[1], reason=reason)
+
+
+def _clear_correction_block(key: tuple[str, str]) -> None:
+    reason = _correction_blocked.pop(key, None)
+    if reason:
+        log("TRACK_B_CORRECTION_RESUMED", date=key[0], ticker=key[1], reason=reason)
 
 
 async def ensure_warmup(
@@ -452,8 +492,13 @@ async def correct_once(
     """공식 분봉 한 페이지로 당일 봉을 정정한다. 정정한 봉 수를 돌려준다."""
     when = now or datetime.now(KST)
     a_holding = state.get().position_status == "HOLDING"
-    if not should_correct(when, a_holding=a_holding, ws_stale=not live.ws_connected):
+    blocked = correction_block_reason(
+        when, a_holding=a_holding, ws_stale=not live.ws_connected
+    )
+    if blocked:
+        _note_correction_block((date, ticker), blocked)
         return 0
+    _clear_correction_block((date, ticker))
 
     try:
         response = await kis_minute_bars.fetch_minute_bars(ticker)
@@ -544,8 +589,12 @@ async def restore_day(
     """
     when = now or datetime.now(KST)
     a_holding = state.get().position_status == "HOLDING"
-    if not should_correct(when, a_holding=a_holding, ws_stale=not live.ws_connected):
-        log("TRACK_B_RESTORE_DEFERRED", level="INFO", ticker=ticker, date=date)
+    deferred = correction_block_reason(
+        when, a_holding=a_holding, ws_stale=not live.ws_connected
+    )
+    if deferred:
+        log("TRACK_B_RESTORE_DEFERRED", level="INFO", ticker=ticker, date=date,
+            reason=deferred)
         return 0
 
     try:

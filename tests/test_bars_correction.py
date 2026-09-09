@@ -384,3 +384,87 @@ async def test_a_late_tick_lands_on_a_bar_the_correction_created(monkeypatch):
     assert bar["tick_count"] == 1
     assert bar["tick_derived"] is not None
     assert bar["tick_derived"]["cttr"] == 120.5
+
+
+# ---------------------------------------------------------------------------
+# 가드가 막을 때 흔적을 남긴다.
+#
+# 08-27 실장 이후 8거래일에서 "A 보유 + WS 끊김"이 동시에 성립한 적이 한 번도
+# 없다. A가 매번 09:11 전에 청산했기 때문이다(최장 9분 13초). 그런데 전체
+# 39건 중 13건은 09:11 이후까지 보유했으므로 죽은 분기가 아니다 -- 언젠가
+# 발동한다. 조용히 return 0 하면 그날이 와도 우리는 모른다.
+# ---------------------------------------------------------------------------
+
+
+def test_block_reason_names_which_guard_fired():
+    inside = datetime(2026, 9, 10, 9, 5, tzinfo=bars.KST)
+    outside = datetime(2026, 9, 10, 10, 0, tzinfo=bars.KST)
+    assert bars.correction_block_reason(
+        inside, a_holding=False, ws_stale=False) == "ENTRY_WINDOW"
+    assert bars.correction_block_reason(
+        outside, a_holding=True, ws_stale=True) == "A_HOLDING_WS_DOWN"
+    assert bars.correction_block_reason(
+        outside, a_holding=True, ws_stale=False) is None
+    assert bars.correction_block_reason(
+        outside, a_holding=False, ws_stale=True) is None
+
+
+def test_block_reason_puts_the_entry_window_first():
+    """두 조건이 겹치면 금지창이 이유다 — 그쪽이 먼저 막는다."""
+    inside = datetime(2026, 9, 10, 9, 5, tzinfo=bars.KST)
+    assert bars.correction_block_reason(
+        inside, a_holding=True, ws_stale=True) == "ENTRY_WINDOW"
+
+
+def _capture_logs(monkeypatch):
+    seen = []
+    monkeypatch.setattr(bars, "log", lambda ev, **kw: seen.append((ev, kw)))
+    return seen
+
+
+async def test_a_holding_block_is_logged_once_per_episode(monkeypatch):
+    seen = _capture_logs(monkeypatch)
+    monkeypatch.setattr(bars.state, "get", lambda: type("S", (), {
+        "position_status": "HOLDING"})())
+    monkeypatch.setattr(bars.live, "ws_connected", False)
+    now = datetime(2026, 9, 10, 10, 0, tzinfo=bars.KST)
+
+    assert await bars.correct_once("20260910", "005930", now=now) == 0
+    assert await bars.correct_once("20260910", "005930", now=now) == 0
+
+    blocked = [kw for ev, kw in seen if ev == "TRACK_B_CORRECTION_BLOCKED"]
+    assert len(blocked) == 1
+    assert blocked[0]["reason"] == "A_HOLDING_WS_DOWN"
+    assert blocked[0]["ticker"] == "005930"
+
+
+async def test_the_entry_window_block_is_not_logged(monkeypatch):
+    """매일 09:00~09:11에 걸린다. 남기면 소음이고 이미 알고 있는 사실이다."""
+    seen = _capture_logs(monkeypatch)
+    monkeypatch.setattr(bars.state, "get", lambda: type("S", (), {
+        "position_status": "IDLE"})())
+    monkeypatch.setattr(bars.live, "ws_connected", True)
+    now = datetime(2026, 9, 10, 9, 5, tzinfo=bars.KST)
+
+    assert await bars.correct_once("20260910", "005930", now=now) == 0
+    assert [ev for ev, _ in seen if "BLOCKED" in ev] == []
+
+
+async def test_recovery_is_logged_so_the_episode_can_be_measured(monkeypatch):
+    seen = _capture_logs(monkeypatch)
+    holding = type("S", (), {"position_status": "HOLDING"})()
+    monkeypatch.setattr(bars.state, "get", lambda: holding)
+    monkeypatch.setattr(bars.live, "ws_connected", False)
+    now = datetime(2026, 9, 10, 10, 0, tzinfo=bars.KST)
+    await bars.correct_once("20260910", "005930", now=now)
+
+    async def fake_fetch(ticker, **kwargs):
+        return {"output2": []}
+
+    monkeypatch.setattr(bars.kis_minute_bars, "fetch_minute_bars", fake_fetch)
+    monkeypatch.setattr(bars.live, "ws_connected", True)
+    await bars.correct_once("20260910", "005930", now=now)
+
+    events = [ev for ev, _ in seen]
+    assert "TRACK_B_CORRECTION_BLOCKED" in events
+    assert "TRACK_B_CORRECTION_RESUMED" in events
