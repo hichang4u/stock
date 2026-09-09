@@ -18,6 +18,7 @@ from scripts.track_b_rules import (
     r1_high_reclaim,
     r2_vwap_reclaim,
     r3_indicator,
+    r4_pullback,
     resolve_exit,
     simulate_exit,
 )
@@ -185,9 +186,18 @@ def test_r3_waits_for_histogram_maturity():
         assert r3_indicator(bars, i, ctx, DEFAULT_PARAMS) is False
 
 
-def test_rules_registry_has_exactly_three_axes():
-    """등록은 닫혀 있다. 축을 추가하면 그리드 서치가 된다 (스펙 §4.2)."""
-    assert sorted(RULES) == ["R1", "R2", "R3"]
+def test_rules_registry_is_closed_at_four_axes():
+    """등록은 닫혀 있다. 축을 추가하면 그리드 서치가 된다 (스펙 §4.2).
+
+    R4는 이 금지의 예외가 아니라 **새 사전 등록**이다. §4.2가 막는 것은 "결과를
+    본 뒤 같은 표본에 축을 더하는 것"인데, R1~R3을 판정한 22거래일 표본은
+    2026-09-03에 소멸했다(`68549c7`). R4는 그 표본에 얹히지 않는다 — 판정은
+    백필로 새로 쌓는 표본에서만 하고, 관문은 돌리기 전에 선언한다.
+
+    이 테스트를 다시 고쳐 R5를 넣으려는 사람은 위 조건이 그때도 성립하는지
+    먼저 확인해야 한다. 성립하지 않으면 그것이 바로 그리드 서치다.
+    """
+    assert sorted(RULES) == ["R1", "R2", "R3", "R4"]
 
 
 def test_gap_block_suppresses_signals_after_missing_minutes():
@@ -309,3 +319,110 @@ def test_warmup_none_reproduces_the_old_context_exactly():
     assert (track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS)
             == track_b_rules.build_context(day, track_b_rules.DEFAULT_PARAMS,
                                            warmup=[]))
+
+
+# ---------------------------------------------------------------------------
+# R4 눌림목 — 지지 도달·거래량 급감·방어 캔들·반등 확인 넷을 봉으로만 판정한다.
+# 가이드의 4단계(호가창 대량 매수 유입)는 봉에 없다. 분봉 API가 OHLCV만 주므로
+# 백테스트에 영영 들어올 수 없고, 규칙에 넣으면 실시간과 백테스트가 다른 것을
+# 본다. 그래서 "반등 확인 봉"으로 옮겼다.
+# ---------------------------------------------------------------------------
+
+
+def _ohlcv(time_: str, *, open_: float, high: float, low: float,
+           close: float, volume: float) -> dict:
+    return {
+        "date": "20260820", "time": time_,
+        "open": open_, "high": high, "low": low, "close": close, "volume": volume,
+    }
+
+
+def _pullback_series(*, support: dict | None = None,
+                     confirm: dict | None = None,
+                     lead_high: float = 120.0) -> list[dict]:
+    """선행 급등 → 평탄 구간(SMA20 = 100) → 지지 캔들 → 반등 확인 봉.
+
+    평탄하게 두는 이유는 SMA20을 100.0으로 고정해 지지 터치를 정확히 겨냥하기
+    위해서다. 분은 건너뛰지 않는다 — 건너뛰면 gap_block이 신호를 막는다.
+    """
+    bars = [_ohlcv("093500", open_=100, high=lead_high, low=100,
+                   close=100, volume=1000.0)]
+    for i in range(1, 22):
+        minute = 35 + i
+        bars.append(_ohlcv(f"{9 + minute // 60:02d}{minute % 60:02d}00",
+                           open_=100, high=100, low=100, close=100, volume=1000.0))
+    bars.append(support or _ohlcv("095700", open_=100.2, high=100.3, low=99.5,
+                                  close=100.1, volume=300.0))
+    bars.append(confirm or _ohlcv("095800", open_=100.1, high=100.6, low=100.1,
+                                  close=100.5, volume=1500.0))
+    return bars
+
+
+def test_r4_fires_on_support_touch_dry_volume_defense_and_confirmation():
+    """네 조건이 모두 성립한 반등 확인 봉에서 발화한다."""
+    bars = _pullback_series()
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r4_pullback(bars, 23, ctx, DEFAULT_PARAMS) is True
+    # 지지 캔들 자체에서는 아직 발화하지 않는다 — 확인 봉을 기다린다.
+    assert r4_pullback(bars, 22, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r4_requires_confirmation_bar_to_clear_support_high():
+    """확인 봉 종가가 지지 캔들 고가를 넘지 못하면 반등이 아니다."""
+    bars = _pullback_series(
+        confirm=_ohlcv("095800", open_=100.1, high=100.29, low=100.0,
+                       close=100.2, volume=1500.0),
+    )
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r4_pullback(bars, 23, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r4_requires_volume_to_dry_up():
+    """매도세 소진이 전제다. 거래량이 안 마르면 눌림목이 아니라 하락이다."""
+    bars = _pullback_series(
+        support=_ohlcv("095700", open_=100.2, high=100.3, low=99.5,
+                       close=100.1, volume=900.0),
+    )
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r4_pullback(bars, 23, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r4_requires_defensive_candle():
+    """아래꼬리도 도지도 아닌 봉은 방어가 아니다."""
+    bars = _pullback_series(
+        support=_ohlcv("095700", open_=100.3, high=100.35, low=100.0,
+                       close=100.05, volume=300.0),
+    )
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r4_pullback(bars, 23, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r4_accepts_doji_as_defense():
+    """몸통이 없는 십자 캔들도 방어로 친다 — 아래꼬리 조건과 OR다."""
+    bars = _pullback_series(
+        support=_ohlcv("095700", open_=100.0, high=100.4, low=99.9,
+                       close=100.02, volume=300.0),
+        confirm=_ohlcv("095800", open_=100.02, high=100.7, low=100.0,
+                       close=100.6, volume=1500.0),
+    )
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r4_pullback(bars, 23, ctx, DEFAULT_PARAMS) is True
+
+
+def test_r4_requires_prior_run_up():
+    """급등이 없었으면 눌림목도 없다. 그냥 흘러내리는 종목과 구분한다."""
+    bars = _pullback_series(lead_high=100.0)
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r4_pullback(bars, 23, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r4_requires_price_to_reach_support():
+    """지지선 근처까지 내려오지 않았으면 판정하지 않는다 — 예측 매수 금지."""
+    bars = _pullback_series(
+        support=_ohlcv("095700", open_=101.5, high=101.6, low=101.0,
+                       close=101.4, volume=300.0),
+        confirm=_ohlcv("095800", open_=101.4, high=101.9, low=101.3,
+                       close=101.8, volume=1500.0),
+    )
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r4_pullback(bars, 23, ctx, DEFAULT_PARAMS) is False
