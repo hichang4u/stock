@@ -145,6 +145,11 @@ if (-not (Test-Path $backupScript)) {
     exit 2
 }
 
+# 백필 구간과 같은 이유로 콘솔 인코딩을 다시 UTF-8로 둔다. 백필의 finally 가
+# 이미 원래대로 되돌려 놓았기 때문에, 여기서 다시 걸지 않으면 작업 스케줄러처럼
+# 콘솔 코드페이지가 CP949 인 환경에서 백업 출력만 깨진다.
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
 # 백필 로그에 이어 붙인다. 백업이 조용히 안 도는 것이 이 장치의 가장 나쁜 실패다.
 $appender = [System.IO.StreamWriter]::new(
     $logPath,
@@ -164,6 +169,7 @@ try {
 } finally {
     Pop-Location
     $appender.Dispose()
+    [Console]::OutputEncoding = $previousOutputEncoding
 }
 
 if ($backupCode -ne 0) {
