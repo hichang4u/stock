@@ -101,6 +101,32 @@ async def test_fetch_day_bars_stops_when_cursor_makes_no_progress(monkeypatch):
     assert calls["n"] == 2         # 두 번째 페이지에서 새 봉 0 → 중단
 
 
+async def test_fetch_day_bars_walks_the_cursor_backwards(monkeypatch):
+    """가짜 응답이 커서를 실제로 존중하게 두고 다중 페이지를 확인한다.
+
+    위 테스트의 가짜는 커서와 무관하게 같은 행을 돌려주므로, 커서가 페이지마다
+    제대로 넘어가는지는 암묵적으로만 검증됐다 (스펙 §17.3). 여기서는 커서보다
+    이른 봉만 돌려주게 해서, 커서가 틀리면 봉이 빠지거나 무한히 돈다.
+    """
+    session = ["093500", "093600", "093700", "093800", "093900"]
+    cursors = []
+
+    async def fake_get(path, **kwargs):
+        cursor = kwargs["params"]["FID_INPUT_HOUR_1"]
+        cursors.append(cursor)
+        earlier = [t for t in session if not cursor or t < cursor]
+        page = earlier[-2:]        # 한 페이지에 2봉씩, 최신 것부터
+        return {"rt_cd": "0",
+                "output2": [_row(t, 1, 2, 1, 2, 10) for t in page]}
+
+    monkeypatch.setattr(mb.kis_rest, "get", fake_get)
+
+    bars, _ = await mb.fetch_day_bars("006340", max_pages=10)
+
+    assert [b["time"] for b in bars] == session
+    assert cursors == ["", "093800", "093600", "093500"]
+
+
 async def test_fetch_session_drops_bars_from_another_date(monkeypatch):
     """KIS는 휴장일 요청을 가장 가까운 거래일로 조용히 대체한다.
 

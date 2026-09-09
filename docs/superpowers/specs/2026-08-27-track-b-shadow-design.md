@@ -922,16 +922,21 @@ VI로 봉이 빠지면 봉 인덱스와 벽시계가 어긋난다. 08-28처럼 2
 ### 17.3 검토에서 미룬 사소한 것들
 
 리뷰 과정에서 나왔지만 고치지 않고 남겨둔 것들이다. 잃어버리지 않도록 여기 적는다.
+**2026-09-09에 세 항목을 정리했다.**
 
-- `tests/test_kis_minute_bars.py` — 페이지네이션 테스트의 가짜 응답이 시(hour) 커서를
-  무시한다. 실제 다중 페이지 호출에서 커서가 제대로 넘어가는지는 암묵적으로만 검증된다
-- `tests/test_tick_fanout.py` — 예외를 던지는 리스너 테스트가 캡처를 붙이지 않는다.
-  "리스너가 예외를 던져도 `cap.enqueue`는 계속 도는가"는 코드를 눈으로 읽어 확인한 것이지
-  assert로 검증한 것이 아니다
-- `docs/html/assets/bars_chart.js`와 `tests/js/bars_chart_checks.js`가
-  `BARS_MIN_CANDLE_PX`·`BARS_DOMAIN_PAD`를 각자 중복 정의한다. 둘이 소리 없이 어긋날 수
-  있다 — `price_flow_checks.js`의 기존 패턴을 그대로 물려받았다
+- ~~`tests/test_kis_minute_bars.py` — 페이지네이션 테스트의 가짜 응답이 시(hour) 커서를
+  무시한다~~ **해결.** 커서를 존중하는 가짜(커서보다 이른 봉만 돌려준다)로
+  `test_fetch_day_bars_walks_the_cursor_backwards`를 추가했다. 페이지마다 넘어가는 커서
+  값까지 단언한다. 구현에서 `cursor` 갱신을 지우면 이 테스트만 실패하는 것을 확인했다.
+- ~~`tests/test_tick_fanout.py` — 예외를 던지는 리스너 테스트가 캡처를 붙이지 않는다~~
+  **이미 해결돼 있었다.** `test_a_raising_listener_does_not_break_the_others_or_the_caller`가
+  `_StubCapture`를 붙이고 `captured`를 단언한다. 이 메모가 낡은 것이었다.
+- ~~`bars_chart.js`와 `tests/js/bars_chart_checks.js`가 상수를 각자 중복 정의한다~~
+  **해결.** 하네스가 `constValue()`로 `bars_chart.js`에서 값을 읽는다. 소스의
+  `BARS_DOMAIN_PAD`를 0.07로 바꾸면 하네스도 0.07을 읽는 것을 확인했다. 함수 추출과 같은
+  `indexOf` 방식이다 — 정규식을 템플릿 리터럴에 넣으면 `\s`가 소실된다.
 - 전량 스파이크로 끝난 분은 `_pending_spikes` 항목이 계열이 닫힐 때까지 남는다 (하루 최대 391개)
+  — **남아 있다.** 하루 최대 391개이고 계열이 닫힐 때 함께 사라지므로 급하지 않다.
 
 ### 17.4 고아 워커 — 2026-08-28 수정
 

@@ -17,8 +17,18 @@ function extract(name) {
   throw new Error(`${name} unbalanced`);
 }
 
-const BARS_MIN_CANDLE_PX = 1;
-const BARS_DOMAIN_PAD = 0.02;
+// 상수는 소스에서 읽는다. 여기 값을 따로 적어두면 bars_chart.js가 값을 바꿔도
+// 테스트는 옛 값으로 계속 통과한다 — 둘이 소리 없이 어긋난다 (스펙 §17.3).
+function constValue(name) {
+  const marker = 'const ' + name + ' = ';
+  const at = src.indexOf(marker);
+  if (at < 0) throw new Error('const ' + name + ' not found in bars_chart.js');
+  const end = src.indexOf(';', at + marker.length);
+  return eval(src.slice(at + marker.length, end));
+}
+
+const BARS_MIN_CANDLE_PX = constValue('BARS_MIN_CANDLE_PX');
+const BARS_DOMAIN_PAD = constValue('BARS_DOMAIN_PAD');
 
 eval(extract('barsPriceDomain'));
 eval(extract('barsMacdDomain'));
