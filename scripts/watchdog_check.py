@@ -10,6 +10,10 @@ main.py 프로세스 사망 감지 시 자동 재시작. 재기동 창은 08:00~
 1분 간격이면 자정부터 10:01까지 그 짓을 600번 한다.
 
 PID 파일은 쓰지 않는다. main.py가 락을 잡은 뒤 스스로 쓴다.
+
+작업 스케줄러는 stdout을 버리므로 판단을 data/logs/watchdog_<날짜>.log에도
+남긴다. 재기동 창 안에서만 남긴다 — 1분 간격이라 하루 종일 남기면 1,440줄이
+쌓이는데, 확인할 값어치가 있는 구간은 창 안이다.
 """
 
 import msvcrt
@@ -23,6 +27,7 @@ KST = ZoneInfo("Asia/Seoul")
 ROOT = Path(__file__).parent.parent
 PID_FILE = ROOT / "main.pid"
 MAIN_SCRIPT = ROOT / "main.py"
+LOG_DIR = ROOT / "data" / "logs"
 PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 
 # 재기동 창. 상한만 있으면 새벽 3시에도 봇을 띄운다.
@@ -57,6 +62,17 @@ def is_bot_alive(pid_path: Path = PID_FILE) -> bool:
         handle.close()
 
 
+def write_log(line: str, now: datetime, log_dir: Path) -> None:
+    """로그 실패가 재기동을 막아서는 안 된다 — 본말이 전도된다."""
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / f"watchdog_{now.strftime('%Y%m%d')}.log"
+        with open(path, "a", encoding="utf-8") as fp:
+            fp.write(line + "\n")
+    except OSError:
+        pass
+
+
 def should_restart_at(now: datetime) -> bool:
     return RESTART_WINDOW_START <= (now.hour, now.minute) < RESTART_WINDOW_END
 
@@ -75,21 +91,29 @@ def main(
     now: datetime | None = None,
     pid_path: Path = PID_FILE,
     spawn=None,
+    log_dir: Path = LOG_DIR,
 ) -> int:
     now = now or datetime.now(KST)
     stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    in_window = should_restart_at(now)
+
+    def say(text: str) -> None:
+        line = f"[{stamp}] {text}"
+        print(line)
+        if in_window:
+            write_log(line, now, log_dir)
 
     if is_bot_alive(pid_path):
-        print(f"[{stamp}] 프로세스 정상 실행 중 (PID 파일 잠김)")
+        say("프로세스 정상 실행 중 (PID 파일 잠김)")
         return 0
 
-    if not should_restart_at(now):
+    if not in_window:
         print(f"[{stamp}] 재기동 창 밖 — 띄우지 않음")
         return 0
 
-    print(f"[{stamp}] 프로세스 사망 감지 — 재시작")
+    say("프로세스 사망 감지 — 재시작")
     pid = (spawn or _spawn)()
-    print(f"[{stamp}] 재시작 요청 완료 (PID={pid})")
+    say(f"재시작 요청 완료 (PID={pid})")
     return 0
 
 

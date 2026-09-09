@@ -121,3 +121,83 @@ def test_main_does_not_write_the_pid_file(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     watchdog_check.main(now=_at(9, 0), pid_path=pid_file, spawn=lambda: 999)
     assert pid_file.read_text(encoding="utf-8").strip() == "4242"
+
+
+# ---------------------------------------------------------------------------
+# 로그 — 작업 스케줄러는 stdout 을 버린다. 판정이 뒤집혀 있던 것이 오늘의
+# 버그였으므로, 고쳐진 판정이 실제로 무엇을 봤는지 확인할 수단이 있어야 한다.
+# ---------------------------------------------------------------------------
+
+
+def test_logs_the_healthy_case_inside_the_restart_window(tmp_path):
+    """창 안에서는 정상이어도 남긴다 — 판정이 맞는지 아침에 확인해야 한다."""
+    pid_file = tmp_path / "main.pid"
+    pid_file.write_text("4242", encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    handle = open(pid_file, "a+", encoding="utf-8")
+    try:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        watchdog_check.main(
+            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+        )
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        handle.close()
+
+    written = (log_dir / "watchdog_20260910.log").read_text(encoding="utf-8")
+    assert "정상 실행 중" in written
+
+
+def test_does_not_log_outside_the_restart_window(tmp_path):
+    """1분마다 도는 코드다. 창 밖까지 남기면 하루 1,440줄이 쌓인다."""
+    pid_file = tmp_path / "main.pid"
+    pid_file.write_text("4242", encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    watchdog_check.main(
+        now=_at(3, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+    )
+    assert not log_dir.exists() or not list(log_dir.glob("*.log"))
+
+
+def test_logs_both_lines_when_it_restarts(tmp_path):
+    pid_file = tmp_path / "main.pid"
+    pid_file.write_text("4242", encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    watchdog_check.main(
+        now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+    )
+    written = (log_dir / "watchdog_20260910.log").read_text(encoding="utf-8")
+    assert "사망 감지" in written
+    assert "PID=999" in written
+
+
+def test_log_appends_instead_of_overwriting(tmp_path):
+    pid_file = tmp_path / "main.pid"
+    pid_file.write_text("4242", encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    for _ in range(2):
+        watchdog_check.main(
+            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+        )
+    lines = (log_dir / "watchdog_20260910.log").read_text(
+        encoding="utf-8"
+    ).strip().splitlines()
+    assert len(lines) == 4
+
+
+def test_a_log_failure_does_not_stop_the_restart(tmp_path):
+    """로그를 못 써서 봇을 못 살리면 본말이 전도된다."""
+    pid_file = tmp_path / "main.pid"
+    pid_file.write_text("4242", encoding="utf-8")
+    blocked = tmp_path / "logs"
+    blocked.write_text("디렉터리가 아니라 파일이다", encoding="utf-8")
+
+    calls = []
+    rc = watchdog_check.main(
+        now=_at(9, 0), pid_path=pid_file, log_dir=blocked,
+        spawn=lambda: calls.append(1) or 999,
+    )
+    assert rc == 0
+    assert calls == [1]
