@@ -117,6 +117,13 @@ DEFAULT_PARAMS = {
     "hist_maturity_bars": 3,
     # 봉이 빠진 직후 이만큼은 신호를 내지 않는다 (그림자 스펙 §15.3).
     "min_bars_after_gap": 2,
+    # R4 눌림목. 값은 돌리기 전에 고정하고 결과를 본 뒤 바꾸지 않는다 (설계 §5.6).
+    "pullback_prior_run": 0.03,     # 눌리기 전 최소 상승폭
+    "pullback_touch_pct": 0.002,    # 지지선 근접 허용 오차
+    "pullback_vol_window": 5,
+    "pullback_vol_dry": 0.6,        # 지지 캔들 거래량 / 직전 평균
+    "pullback_tail_ratio": 0.5,     # 아래꼬리 / 봉 전체 범위
+    "pullback_doji_body": 0.1,      # 몸통 / 봉 전체 범위
 }
 
 
@@ -229,8 +236,70 @@ def r3_indicator(bars: list[dict], i: int, ctx: dict, params: dict) -> bool:
     return bars[i]["close"] > sma_now and hist_prev < 0 <= hist_now
 
 
+def r4_pullback(bars: list[dict], i: int, ctx: dict, params: dict) -> bool:
+    """급등 후 눌림에서 방어 캔들이 뜨고, 다음 봉이 그 고가를 넘는다.
+
+    실전 가이드의 4단계 중 ①지지 도달 ②거래량 급감 ③방어 캔들은 봉으로
+    판정하고, ④호가창 대량 매수 유입은 **봉으로 옮길 수 없다** — 분봉 API가
+    OHLCV만 주므로 백테스트 표본에 영영 들어오지 않는다. 호가를 조건에 넣으면
+    실시간과 백테스트가 서로 다른 것을 보게 된다. 그래서 "반등 확인 봉"으로
+    옮겼다. 원본보다 한 박자 늦지만 재현 가능하고 미래를 보지 않는다.
+
+    실시간 봉의 ``tick_derived``(체결강도·호가잔량·체결구분별 거래량)는 계속
+    쌓이므로, 그림자가 돌기 시작하면 이 대체가 옳았는지 사후 대조할 수 있다.
+    """
+    if i < 1:
+        return False
+    support, confirm = bars[i - 1], bars[i]
+
+    # ④ 반등 확인 — 확인 봉 종가가 지지 캔들 고가를 넘는다.
+    if confirm["close"] <= support["high"]:
+        return False
+
+    # ① 선행 급등 — 오른 적이 없으면 눌림목이 아니라 그냥 하락이다.
+    prior_high = ctx["run_high"][i - 1]
+    first_open = bars[0]["open"]
+    if prior_high == float("-inf") or first_open <= 0:
+        return False
+    run_up = params.get("pullback_prior_run", DEFAULT_PARAMS["pullback_prior_run"])
+    if prior_high / first_open - 1 < run_up:
+        return False
+
+    # ① 지지 도달 — 닿기 전에는 판정하지 않는다 (예측 매수 금지).
+    sma_now = ctx["sma"][i - 1]
+    if sma_now is None:
+        return False
+    touch = params.get("pullback_touch_pct", DEFAULT_PARAMS["pullback_touch_pct"])
+    if support["low"] > sma_now * (1 + touch):
+        return False
+
+    # ② 거래량 급감 — 던지려는 물량이 소진됐는가.
+    window = params.get("pullback_vol_window", DEFAULT_PARAMS["pullback_vol_window"])
+    if i - 1 < window:
+        return False
+    prior_vol = [b["volume"] for b in bars[i - 1 - window:i - 1]]
+    if not prior_vol or sum(prior_vol) <= 0:
+        return False
+    dry = params.get("pullback_vol_dry", DEFAULT_PARAMS["pullback_vol_dry"])
+    if support["volume"] > sum(prior_vol) / len(prior_vol) * dry:
+        return False
+
+    # ③ 방어 캔들 — 아래꼬리가 길거나(망치), 몸통이 없다(도지).
+    span = support["high"] - support["low"]
+    if span <= 0:
+        return False
+    body = abs(support["close"] - support["open"])
+    lower_tail = min(support["open"], support["close"]) - support["low"]
+    tail_ratio = params.get(
+        "pullback_tail_ratio", DEFAULT_PARAMS["pullback_tail_ratio"]
+    )
+    doji_body = params.get("pullback_doji_body", DEFAULT_PARAMS["pullback_doji_body"])
+    return lower_tail >= span * tail_ratio or body <= span * doji_body
+
+
 RULES = {
     "R1": r1_high_reclaim,
     "R2": r2_vwap_reclaim,
     "R3": r3_indicator,
+    "R4": r4_pullback,
 }

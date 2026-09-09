@@ -40,16 +40,35 @@ def _backup_sqlite(src: Path, dst: Path) -> None:
         source.close()
 
 
-def run(dest_root: Path = DEST_ROOT, keep: int = KEEP) -> Path:
+def has_backup_for(dest_root: Path, date_str: str) -> bool:
+    """그날 날짜의 백업 디렉터리가 이미 있는가.
+
+    백필은 여러 번 돌려도 안전하도록 만들어졌다. 그때마다 백업을 뜨면 KEEP개
+    회전이 하루 만에 다 돌아 "10일치"가 "오늘 10개"가 된다. 그래서 하루 한 번만
+    뜬다.
+
+    디렉터리만 백업으로 친다 — 이름이 비슷한 파일에 속으면 그날 백업을 통째로
+    건너뛴다.
+    """
+    if not dest_root.is_dir():
+        return False
+    return any(
+        p.is_dir() and p.name.startswith(f"data_{date_str}_")
+        for p in dest_root.glob(f"data_{date_str}_*")
+    )
+
+
+def run(dest_root: Path = DEST_ROOT, keep: int = KEEP,
+        source: Path = DATA) -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest = dest_root / f"data_{stamp}"
     dest.mkdir(parents=True, exist_ok=False)
 
     copied = dbs = 0
-    for src in sorted(DATA.rglob("*")):
+    for src in sorted(source.rglob("*")):
         if src.is_dir():
             continue
-        rel = src.relative_to(DATA)
+        rel = src.relative_to(source)
         out = dest / rel
         # -wal/-shm은 뜨지 않는다. 온라인 백업이 이미 그 내용을 반영한 본체를 만든다.
         if src.suffix in (".db-wal", ".db-shm") or src.name.endswith(("-wal", "-shm")):
@@ -112,8 +131,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="data/ 백업")
     parser.add_argument("--dest", default=str(DEST_ROOT))
     parser.add_argument("--keep", type=int, default=KEEP)
+    parser.add_argument("--source", default=str(DATA))
+    parser.add_argument(
+        "--skip-if-today", action="store_true",
+        help="오늘 날짜의 백업이 이미 있으면 뜨지 않는다 (백필 런처가 쓴다)",
+    )
     args = parser.parse_args(argv)
-    dest = run(Path(args.dest), args.keep)
+
+    dest_root = Path(args.dest)
+    today = datetime.now().strftime("%Y%m%d")
+    if args.skip_if_today and has_backup_for(dest_root, today):
+        print(f"오늘({today}) 백업이 이미 있습니다. 건너뜁니다: {dest_root}")
+        return 0
+
+    dest = run(dest_root, args.keep, Path(args.source))
     return 0 if verify(dest) else 1
 
 
