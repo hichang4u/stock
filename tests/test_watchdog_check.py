@@ -122,7 +122,9 @@ def test_main_does_not_write_the_pid_file(tmp_path):
     """PID 는 main.py 가 락을 잡은 뒤 스스로 쓴다. 워치독이 쓰면 남의 것을 덮는다."""
     pid_file = tmp_path / "main.pid"
     pid_file.write_text("4242", encoding="utf-8")
-    watchdog_check.main(now=_at(9, 0), pid_path=pid_file, spawn=lambda: 999)
+    watchdog_check.main(
+        now=_at(9, 0), pid_path=pid_file, spawn=lambda: 999, log_dir=tmp_path
+    )
     assert pid_file.read_text(encoding="utf-8").strip() == "4242"
 
 
