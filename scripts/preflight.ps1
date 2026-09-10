@@ -60,8 +60,19 @@ function Test-PyModule([string]$Python, [string]$Module) {
 $installHint = ".venv\Scripts\python.exe -m pip install -r requirements-dev.txt"
 
 Write-Section "역할 확인"
-& $py -m src.utils.tree_role --check
-if ($LASTEXITCODE -ne 0) { Fail "이 트리의 역할을 확인할 수 없습니다 (.stock-role)" }
+# `python -m src.utils.tree_role`은 모듈 검색을 현재 working directory
+# 기준으로 한다. 이 스크립트를 $repoRoot가 아닌 다른 위치(예: 다른 저장소나
+# 홈 디렉터리)에서 호출하면 "No module named 'src.utils'"만 뱉고 죽는다 —
+# fail-closed라 안전은 하지만 원인을 알 수 없는 트레이스백만 보여준다.
+# Push-Location으로 이 호출 구간만 $repoRoot에 강제로 고정한다.
+Push-Location -LiteralPath $repoRoot
+try {
+    & $py -m src.utils.tree_role --check
+    $roleCheckExit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($roleCheckExit -ne 0) { Fail "이 트리의 역할을 확인할 수 없습니다 (.stock-role)" }
 Write-Ok "이 트리는 승격 전 검사를 돌릴 수 있습니다"
 
 Write-Section "ruff"
@@ -103,8 +114,16 @@ Write-Section "전략 지문"
 # (F1_~F5_, PAPER_FAST_ 등)를 os.environ에 채운 뒤 지문을 계산한다. 여기서도
 # 같은 순서로 .env를 로드하지 않으면 env override가 빠진, 운영에서는 절대
 # 나오지 않는 값을 계산하게 된다.
-$fp = & $py -c "from dotenv import load_dotenv; load_dotenv(); from src.release import strategy_fingerprint; print(strategy_fingerprint())"
-if ($LASTEXITCODE -ne 0) { Fail "지문을 계산할 수 없습니다" }
+# import와 load_dotenv() 둘 다 현재 working directory 기준이라, 여기도
+# 역할 확인과 같은 이유로 $repoRoot에 고정해야 한다 (위 "역할 확인" 참고).
+Push-Location -LiteralPath $repoRoot
+try {
+    $fp = & $py -c "from dotenv import load_dotenv; load_dotenv(); from src.release import strategy_fingerprint; print(strategy_fingerprint())"
+    $fpExit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($fpExit -ne 0) { Fail "지문을 계산할 수 없습니다" }
 Write-Host "FINGERPRINT=$fp"
 
 Write-Host ""
