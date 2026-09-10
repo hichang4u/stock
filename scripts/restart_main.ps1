@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
+﻿[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = "High")]
 param(
     [switch]$AllowUnsafeState,
     [ValidateRange(5, 120)]
