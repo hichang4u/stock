@@ -99,17 +99,23 @@ if ($dirty) {
 }
 
 Write-Section "전략 지문"
-$fp = & $py -c "from src.release import strategy_fingerprint; print(strategy_fingerprint())"
+# main.py는 시작할 때 load_dotenv()를 가장 먼저 호출해 .env의 전략 override
+# (F1_~F5_, PAPER_FAST_ 등)를 os.environ에 채운 뒤 지문을 계산한다. 여기서도
+# 같은 순서로 .env를 로드하지 않으면 env override가 빠진, 운영에서는 절대
+# 나오지 않는 값을 계산하게 된다.
+$fp = & $py -c "from dotenv import load_dotenv; load_dotenv(); from src.release import strategy_fingerprint; print(strategy_fingerprint())"
 if ($LASTEXITCODE -ne 0) { Fail "지문을 계산할 수 없습니다" }
 Write-Host "FINGERPRINT=$fp"
 
 Write-Host ""
-Write-Host "  이 값이 현재 운영 지문과 다르면 2단 승격입니다." -ForegroundColor Yellow
-Write-Host "  운영 지문 확인:  운영 트리에서 같은 명령을 돌리거나" -ForegroundColor Yellow
-Write-Host "                   data/logs/<날짜>.jsonl 의 STRATEGY_FINGERPRINT_LOCKED 를 봅니다." -ForegroundColor Yellow
+Write-Host "  이 값은 '이 트리'의 지문입니다 (이 트리의 .env 기준)." -ForegroundColor Yellow
+Write-Host "  .env는 트리마다 다르고 gitignore 대상이라, 운영 트리에서 같은 코드를" -ForegroundColor Yellow
+Write-Host "  체크아웃해도 이 값과 정확히 같으리라는 보장이 없습니다." -ForegroundColor Yellow
+Write-Host "  이 실행은 방금 만든 변경이 지문을 바꿨는지 확인하는 용도로만 쓰세요." -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  2단이면 승격 시 아래를 붙입니다:" -ForegroundColor Yellow
-Write-Host "    scripts\promote.ps1 -Tag <태그> -AcknowledgeFingerprint $fp" -ForegroundColor Yellow
+Write-Host "  승격 시 실제로 넘길 -AcknowledgeFingerprint 값은 운영 트리에서" -ForegroundColor Yellow
+Write-Host "  scripts\promote.ps1이 그 트리 기준으로 계산해 알려줍니다." -ForegroundColor Yellow
+Write-Host "  (참고용 비교는 data/logs/<날짜>.jsonl 의 STRATEGY_FINGERPRINT_LOCKED로도 됩니다.)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "사전 검사 통과" -ForegroundColor Green
 exit 0
