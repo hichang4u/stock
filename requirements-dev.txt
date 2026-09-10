@@ -1,8 +1,8 @@
 -r requirements.txt
 
-# 테스트 프레임워크
-pytest==8.3.5
-pytest-asyncio==0.24.0
+# pytest / pytest-asyncio는 requirements.txt가 고정한다. 여기서 다시 고정하면
+# -r가 가져온 핀과 충돌해 pip가 ResolutionImpossible로 죽는다 — 최초 커밋부터
+# 그랬고, 그래서 아래 개발 도구들이 한 번도 설치되지 않았다.
 
 # HTTP mock (KIS API 테스트용)
 respx==0.21.1
