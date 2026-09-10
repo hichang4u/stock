@@ -135,6 +135,8 @@ EVENT_LABELS = {
     "BALANCE_SNAPSHOT_ERROR": "잔고 스냅샷 준비 오류(Balance Snapshot Error)",
     "BALANCE_SNAPSHOT_SKIPPED": "잔고 스냅샷 준비 생략(Balance Snapshot Skipped)",
     "F3_FAST_RECHECK_USED": "F3 멀티시세 재검증 사용(F3 Fast Recheck Used)",
+    "DEV_HELD_QUERY_FAILED": "개발 보유종목 조회 실패(Dev Held Query Failed)",
+    "DEV_HELD_TICKERS_EXCLUDED": "개발 보유종목 제외(Dev Held Tickers Excluded)",
     "NO_TARGET": "대상 종목 없음(No Target)",
     "F2_SKIPPED": "F2 종목 잠금 생략(F2 Skipped)",
     "VI_FILTER_ALL_EXCLUDED": "VI 필터 전부 제외(VI Filter All Excluded)",

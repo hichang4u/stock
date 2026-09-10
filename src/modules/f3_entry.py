@@ -705,6 +705,13 @@ async def _run_pipeline() -> None:
         # preserving balance / insufficient-balance / close_reason / notifier /
         # record_skip semantics untouched.
         ticker = candidates[0]
+        if ticker in await _held_tickers_to_exclude():
+            # 이 경로는 위 주석대로 _rank_final_entry_candidates를 거치지
+            # 않으므로 계좌 보유종목 제외를 여기서 따로 적용해야 한다.
+            # 제외 사유는 _held_tickers_to_exclude() 안에서 이미 로그로
+            # 남긴다(DEV_HELD_TICKERS_EXCLUDED). 플래그가 꺼져 있으면 이
+            # 호출은 즉시 빈 집합을 반환하므로 운영 경로에는 영향이 없다.
+            return
         candidate_by_ticker = {
             c.get("ticker"): c
             for c in (s.target_candidates or [])
@@ -3143,6 +3150,57 @@ def _fast_recheck_rows(
     return rows
 
 
+async def _held_tickers_to_exclude() -> set[str]:
+    """계좌에 이미 보유 중인 종목. 개발 트리에서만 채워진다.
+
+    운영과 개발이 모의계좌를 공유할 때(설계 6절), 같은 종목을 들면 먼저
+    청산하는 쪽이 상대 물량까지 판다 — F5가 계좌 전체 hldg_qty로 수량을
+    정하기 때문이다. 개발이 다음 순위로 내려가 충돌 자체를 없앤다.
+
+    조회가 실패하면 빈 집합을 낸다. 여기서 fail-closed 하면 개발 트리가
+    아무것도 테스트하지 못하는데, 실패의 대가는 종목 중복뿐이고 그 손해는
+    개발 몫(계좌의 30%)에 한정된다.
+    """
+    if os.getenv("DEV_EXCLUDE_HELD_TICKERS", "0") != "1":
+        return set()
+    try:
+        # 개발 전용 조회이므로 주문/체결/F5/VI보다 항상 뒤로 밀린다
+        # (REQUEST_PRIORITY_BACKGROUND). 운영 경로의 1건/초 예산을 다투지 않는다.
+        resp = await kis_rest.get(
+            "/uapi/domestic-stock/v1/trading/inquire-balance",
+            tr_id=_BAL_TR[os.getenv("KIS_MODE", "PAPER")],
+            params=kis_rest.balance_inquiry_params(),
+            request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
+        )
+        if not isinstance(resp, dict):
+            raise TypeError(f"unexpected balance response type: {type(resp)!r}")
+        rt_cd = str(resp.get("rt_cd", "0"))
+        if rt_cd != "0":
+            log(
+                "DEV_HELD_QUERY_FAILED",
+                level="WARN",
+                rt_cd=rt_cd,
+                msg1=resp.get("msg1"),
+            )
+            return set()
+        # 콤마 포함 수량("1,000") 등 브로커 응답의 실제 형식을 견디도록
+        # to_float를 쓴다. row가 dict가 아니거나 파싱이 실패해도(콤마 없는
+        # 비숫자 등) 여기서 걸러야 하므로 컴프리헨션 전체를 try 안에 둔다.
+        held = {
+            str(row.get("pdno") or "")
+            for row in (resp.get("output1") or [])
+            if isinstance(row, dict)
+            and str(row.get("pdno") or "")
+            and int(to_float(row.get("hldg_qty") or 0)) > 0
+        }
+    except Exception as exc:  # noqa: BLE001 — 조회 실패가 진입을 막지 않는다
+        log("DEV_HELD_QUERY_FAILED", level="WARN", error=repr(exc))
+        return set()
+    if held:
+        log("DEV_HELD_TICKERS_EXCLUDED", level="INFO", tickers=sorted(held))
+    return held
+
+
 async def _rank_final_entry_candidates(
     s: state.State,
     exclude_tickers: set[str] | None = None,
@@ -3151,7 +3209,7 @@ async def _rank_final_entry_candidates(
     candidate_by_ticker = {
         c.get("ticker"): c for c in candidates if isinstance(c, dict) and c.get("ticker")
     }
-    exclude_tickers = exclude_tickers or set()
+    exclude_tickers = set(exclude_tickers or set()) | await _held_tickers_to_exclude()
     tickers = [ticker for ticker in _entry_candidate_tickers(s) if ticker not in exclude_tickers]
     valid: list[dict] = []
     blocked_reasons: list[str] = []

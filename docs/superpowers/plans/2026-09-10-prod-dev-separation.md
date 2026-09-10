@@ -1025,13 +1025,13 @@ def _hhmmss(name: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
     return h, m, s
 
 
-F1_H, F1_M, _F1_S = _hhmmss("SCHEDULE_F1", (9, 0, 0))
+F1_H, F1_M, _F1_S_UNUSED = _hhmmss("SCHEDULE_F1", (9, 0, 0))
 ```
 
 `F2_H, F2_M = 9, 10`을 바꾼다:
 
 ```python
-F2_H, F2_M, _F2_S = _hhmmss("SCHEDULE_F2", (9, 10, 0))
+F2_H, F2_M, _F2_S_UNUSED = _hhmmss("SCHEDULE_F2", (9, 10, 0))
 ```
 
 `F3_H, F3_M, F3_S = 9, 10, 10`을 바꾼다:
@@ -1295,7 +1295,25 @@ DEV_EXCLUDE_HELD_TICKERS=1
 SCHEDULE_F1=09:15:00
 SCHEDULE_F2=09:25:00
 SCHEDULE_F3=09:25:10
+F3_ENTRY_RETRY_DEADLINE=09:26:00
 ```
+
+**`SCHEDULE_F*`만으로는 아무것도 바뀌지 않는다.** `f3_entry.py`의
+`F3_ENTRY_RETRY_DEADLINE`은 별도 env(`09:11:00` 기본값)이고 진입 마감을 그
+시각으로 강제한다(`f3_entry.py:1305,1439,1510,1745,1932`에서 검사). `SCHEDULE_F3`만
+09:25:10으로 밀고 `F3_ENTRY_RETRY_DEADLINE`을 그대로 두면, 개발 트리는 매번
+`ENTRY_DEADLINE_PASSED`(BEFORE_RECHECK)로 즉시 막힌다 — 스케줄을 옮긴 게 헛수고가
+된다. 위 `09:26:00`은 운영 기본값이 `F3`(09:10:10) 이후 50초를 주는 것과 같은
+여유를 개발의 새 `F3`(09:25:10) 기준으로 맞춘 값이다.
+
+**알려진 한계 — 개발 트리는 재시작 후 그날 진입을 따라잡지 못한다.**
+`main.py:607-611`의 catchup 창은 `F1 시각 ≤ 현재 시각 < F3_FILL_DEADLINE`이다.
+`F3_FILL_DEADLINE`은(Task 9에서 의도적으로) 오버라이드 대상이 아니라 운영
+고정값(09:11)에 남아 있으므로, 개발의 `F1`을 그 뒤로 미는 순간 이 구간은 항상
+비어 있다. 즉 개발 트리가 09:15~09:26 진입 창 도중 재시작되면 그날 진입을 다시
+시도할 방법이 없다. 이는 체결 마감을 운영 기준선에 고정한 데서 따라오는
+당연한 결과이고 받아들일 수 있는 한계이지만, 나중에 놀라지 않도록 여기 적어
+둔다.
 
 - [ ] **Step 8: 개발 트리의 운영 이력을 비운다**
 
