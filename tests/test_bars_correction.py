@@ -79,7 +79,8 @@ async def test_correction_replaces_ohlcv_and_marks_the_bar_confirmed(monkeypatch
 
     row = bars.series("20260827", "006340")[0]
     assert corrected == 1
-    assert (row["open"], row["high"], row["low"], row["close"]) == (14500.0, 15200.0, 14400.0, 15100.0)
+    ohlc = (row["open"], row["high"], row["low"], row["close"])
+    assert ohlc == (14500.0, 15200.0, 14400.0, 15100.0)
     assert row["volume"] == 900.0
     assert row["confirmed"] is True
 

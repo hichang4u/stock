@@ -51,7 +51,8 @@ def test_bars_endpoint_returns_bars_indicators_and_meta(tmp_path):
 
 def test_indicator_arrays_align_with_the_bar_array():
     for m in range(30):
-        bars._series.setdefault(("20260827", "006340"), {})[f"09{m:02d}00"] = _row(m, 14500 + m * 10)
+        series = bars._series.setdefault(("20260827", "006340"), {})
+        series[f"09{m:02d}00"] = _row(m, 14500 + m * 10)
 
     body = client.get("/api/bars", params={"date": "20260827", "ticker": "006340"}).json()
 
@@ -86,11 +87,15 @@ def test_unknown_series_returns_empty_arrays_not_an_error():
 
 def test_indicator_periods_are_configurable():
     for m in range(10):
-        bars._series.setdefault(("20260827", "006340"), {})[f"09{m:02d}00"] = _row(m, 14500 + m * 10)
+        series = bars._series.setdefault(("20260827", "006340"), {})
+        series[f"09{m:02d}00"] = _row(m, 14500 + m * 10)
 
     body = client.get(
         "/api/bars",
-        params={"date": "20260827", "ticker": "006340", "sma": 3, "fast": 2, "slow": 4, "signal": 2},
+        params={
+            "date": "20260827", "ticker": "006340",
+            "sma": 3, "fast": 2, "slow": 4, "signal": 2,
+        },
     ).json()
 
     assert body["indicators"]["sma"][2] is not None

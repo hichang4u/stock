@@ -45,8 +45,9 @@ def test_dev_role_passes_without_git_checks(tmp_path):
 
 def _git_repo(root: Path) -> None:
     """태그 하나를 가진 최소 저장소. 서명·훅 없이 결정적으로 만든다."""
-    run = lambda *a: subprocess.run(["git", *a], cwd=str(root), check=True,
-                                    capture_output=True)
+    def run(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=str(root), check=True, capture_output=True)
+
     run("init", "-q")
     run("config", "user.email", "test@example.com")
     run("config", "user.name", "test")
@@ -120,8 +121,9 @@ def test_prod_reports_git_failed_distinct_from_no_release_tag(tmp_path):
     NOT_AT_RELEASE_TAG로 뭉개면 08:00 로그만 보는 운영자가 "릴리스 태그가 없다"와
     "git이 고장났다"를 구분할 수 없다.
     """
-    run = lambda *a: subprocess.run(["git", *a], cwd=str(tmp_path), check=True,
-                                    capture_output=True)
+    def run(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=str(tmp_path), check=True, capture_output=True)
+
     run("init", "-q")
     run("config", "user.email", "test@example.com")
     run("config", "user.name", "test")

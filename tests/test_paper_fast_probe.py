@@ -901,34 +901,44 @@ def test_verdict_carries_evidence_for_the_log():
 # 멀티시세에서 그대로 뽑은 12행이다. 합성 픽스처가 실제 스키마와 어긋나면
 # 판정기가 통과해도 운영에서 안 걸린다.
 
+def _real_row(ticker: str, cls_code: str, antc_vol: str, acml_vol: str) -> dict:
+    """실제 응답에서 뽑은 멀티시세 1행. 값은 그대로, 표 모양만 100자 안에 넣는다."""
+    return {
+        "inter_shrn_iscd": ticker,
+        "hour_cls_code": cls_code,
+        "intr_antc_vol": antc_vol,
+        "acml_vol": acml_vol,
+    }
+
+
 _REAL_HOLIDAY_ROWS_20260817 = [
-    {"inter_shrn_iscd": "001210", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "23913143"},
-    {"inter_shrn_iscd": "005930", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "21669476"},
-    {"inter_shrn_iscd": "088350", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "14537788"},
-    {"inter_shrn_iscd": "073240", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "11897318"},
-    {"inter_shrn_iscd": "002990", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "10000380"},
-    {"inter_shrn_iscd": "092200", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "6544969"},
-    {"inter_shrn_iscd": "006340", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "5674735"},
-    {"inter_shrn_iscd": "005360", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "5512875"},
-    {"inter_shrn_iscd": "007110", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "4982802"},
-    {"inter_shrn_iscd": "047040", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "4858982"},
-    {"inter_shrn_iscd": "014160", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "4600312"},
-    {"inter_shrn_iscd": "000660", "hour_cls_code": "0", "intr_antc_vol": "0", "acml_vol": "4520990"},
+    _real_row("001210", "0", "0", "23913143"),
+    _real_row("005930", "0", "0", "21669476"),
+    _real_row("088350", "0", "0", "14537788"),
+    _real_row("073240", "0", "0", "11897318"),
+    _real_row("002990", "0", "0", "10000380"),
+    _real_row("092200", "0", "0", "6544969"),
+    _real_row("006340", "0", "0", "5674735"),
+    _real_row("005360", "0", "0", "5512875"),
+    _real_row("007110", "0", "0", "4982802"),
+    _real_row("047040", "0", "0", "4858982"),
+    _real_row("014160", "0", "0", "4600312"),
+    _real_row("000660", "0", "0", "4520990"),
 ]
 
 _REAL_TRADING_ROWS_20260818 = [
-    {"inter_shrn_iscd": "002820", "hour_cls_code": "B", "intr_antc_vol": "2526", "acml_vol": "22700"},
-    {"inter_shrn_iscd": "001520", "hour_cls_code": "B", "intr_antc_vol": "15834", "acml_vol": "10000"},
-    {"inter_shrn_iscd": "088350", "hour_cls_code": "B", "intr_antc_vol": "62862", "acml_vol": "6320"},
-    {"inter_shrn_iscd": "092200", "hour_cls_code": "B", "intr_antc_vol": "41810", "acml_vol": "4745"},
-    {"inter_shrn_iscd": "006340", "hour_cls_code": "B", "intr_antc_vol": "28392", "acml_vol": "2715"},
-    {"inter_shrn_iscd": "009830", "hour_cls_code": "B", "intr_antc_vol": "24154", "acml_vol": "2182"},
-    {"inter_shrn_iscd": "028670", "hour_cls_code": "B", "intr_antc_vol": "21532", "acml_vol": "2001"},
-    {"inter_shrn_iscd": "001740", "hour_cls_code": "B", "intr_antc_vol": "9924", "acml_vol": "1961"},
-    {"inter_shrn_iscd": "001550", "hour_cls_code": "B", "intr_antc_vol": "6934", "acml_vol": "1700"},
-    {"inter_shrn_iscd": "010690", "hour_cls_code": "B", "intr_antc_vol": "7374", "acml_vol": "1665"},
-    {"inter_shrn_iscd": "003350", "hour_cls_code": "B", "intr_antc_vol": "4942", "acml_vol": "1526"},
-    {"inter_shrn_iscd": "047040", "hour_cls_code": "B", "intr_antc_vol": "26535", "acml_vol": "1411"},
+    _real_row("002820", "B", "2526", "22700"),
+    _real_row("001520", "B", "15834", "10000"),
+    _real_row("088350", "B", "62862", "6320"),
+    _real_row("092200", "B", "41810", "4745"),
+    _real_row("006340", "B", "28392", "2715"),
+    _real_row("009830", "B", "24154", "2182"),
+    _real_row("028670", "B", "21532", "2001"),
+    _real_row("001740", "B", "9924", "1961"),
+    _real_row("001550", "B", "6934", "1700"),
+    _real_row("010690", "B", "7374", "1665"),
+    _real_row("003350", "B", "4942", "1526"),
+    _real_row("047040", "B", "26535", "1411"),
 ]
 
 

@@ -7,17 +7,16 @@
 """
 
 import json
+from dataclasses import replace
 
 import pytest
 
 from scripts.strategy_backtest import (
     BASELINE,
-    load_probe_days,
-    simulate_probe_day,
     FAST_BAR,
     LEGACY_BAR,
-    Policy,
     evaluate_entry,
+    load_probe_days,
     load_universes,
     rank,
     realized_pct,
@@ -25,13 +24,12 @@ from scripts.strategy_backtest import (
     score,
     selection_rejection,
     simulate_day,
+    simulate_probe_day,
     summarize,
     tickers_needed,
 )
 from src.modules import f1_selector
 from src.modules.f3_entry import _evaluate_order_gap
-from dataclasses import replace
-
 
 # ── 운영 코드와의 동치 ──────────────────────────────────────────────────
 
@@ -208,10 +206,12 @@ def test_barrier_window_starts_at_the_entry_bar():
     universe = [{"ticker": "A", "gap_pct": 0.04, "prev_close": 10_000 / 1.04,
                  "expected_amount": 1_000_000_000, "avg_amount_5d": 1_000_000_000}]
 
-    fast = simulate_day("20260820", universe, replace(BASELINE, name="F", entry_bar=FAST_BAR), {"A": bars})
+    fast_policy = replace(BASELINE, name="F", entry_bar=FAST_BAR)
+    fast = simulate_day("20260820", universe, fast_policy, {"A": bars})
     assert fast["outcome"] == "DOWN_FIRST"
 
-    legacy = simulate_day("20260820", universe, replace(BASELINE, name="L", entry_bar=LEGACY_BAR), {"A": bars})
+    legacy_policy = replace(BASELINE, name="L", entry_bar=LEGACY_BAR)
+    legacy = simulate_day("20260820", universe, legacy_policy, {"A": bars})
     assert legacy["outcome"] == "UP_FIRST"
 
 
@@ -242,7 +242,8 @@ def test_missing_bars_never_count_as_an_entry():
 def test_realized_pct_uses_approved_barriers():
     bars = _bars(10_000, 10_000, high=10_400, low=9_700, close=10_300)
     assert realized_pct({"outcome": "UP_FIRST", "entry_price": 10_000}, bars) == pytest.approx(2.5)
-    assert realized_pct({"outcome": "DOWN_FIRST", "entry_price": 10_000}, bars) == pytest.approx(-2.0)
+    down = {"outcome": "DOWN_FIRST", "entry_price": 10_000}
+    assert realized_pct(down, bars) == pytest.approx(-2.0)
 
 
 def test_realized_pct_is_none_for_ambiguous():
@@ -258,8 +259,10 @@ def test_realized_pct_marks_untouched_window_to_last_close():
 
 def test_summarize_excludes_undecidable_from_returns():
     rows = [
-        {"entered": True, "outcome": "UP_FIRST", "realized_pct": 2.5, "mfe_pct": 3.0, "mae_pct": -0.5},
-        {"entered": True, "outcome": "AMBIGUOUS", "realized_pct": None, "mfe_pct": 4.0, "mae_pct": -3.0},
+        {"entered": True, "outcome": "UP_FIRST",
+         "realized_pct": 2.5, "mfe_pct": 3.0, "mae_pct": -0.5},
+        {"entered": True, "outcome": "AMBIGUOUS",
+         "realized_pct": None, "mfe_pct": 4.0, "mae_pct": -3.0},
         {"entered": False},
     ]
     s = summarize(rows)
