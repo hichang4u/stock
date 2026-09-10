@@ -175,6 +175,33 @@ python scripts/fast_path_counterfactual.py --with-kis --out data/fast_path_count
 롤백은 `PAPER_FAST_HYBRID=0` 한 줄이다. `readiness.py`의 `paper_experiments_off`
 게이트가 REAL 전환 시 두 플래그를 모두 강제로 확인하므로 실전 경로에는 영향이 없다.
 
+### 전환 판정 (2026-09-10)
+
+네 기준을 모두 만족해 `PAPER_FAST_HYBRID=1`로 전환했다. `.env`와 `.env.paper`만
+바꾸고 `.env.real`은 `0`으로 두었다. `.env.example`도 `0`을 유지한다 — 신규 설치는
+관측일이 0이므로 검증을 건너뛰게 하면 안 된다.
+
+| 기준 | 실측 | 판정 |
+|---|---|---|
+| 판정일(`undecidable` 제외) 6일 이상 | 15일 (16 − 1) | 통과 |
+| `legacy_better` ≤ `fast_better` | 3 ≤ 5 | 통과 |
+| 전 관측일 개장 품질 `COMPLETE` | 16/16 | 통과 |
+| `lateness_ms` ≤ 2500 | 최대 25, 중위 10 | 통과 |
+
+반사실 평가 원본은 `data/fast_path_counterfactual_20260910.json`이다. 결정적 판정
+8일은 fast 5 / legacy 3이다. **이 표본으로 Fast가 더 낫다고 말할 수는 없다.**
+기준 2는 비열등성 조건이고, 전환의 근거는 우열이 아니라 지연 제거다.
+
+전환을 부른 관측은 2026-09-10 장이다. 레거시 F1 선정이 개장 후 78초(`selection_ms`
+77,841)가 걸렸고, 그 사이 1순위 187660의 갭이 락업 시점 7.82%에서 재검증 시점
+14.56%로 벌어져 `ABOVE_MAX`에 걸렸다. 나머지 두 종목도 고갭 대금 요건에 막혀
+후보 3개가 전부 차단됐다(`F3_ENTRY_BLOCKED` `terminal=true`). 지연이 길수록
+"장전 예상체결가로 고른 갭"과 "장중 현재가로 재검증한 갭"이 벌어지므로, 레거시
+경로에서는 이 차단이 구조적으로 반복된다.
+
+되돌리려면 `.env`와 `.env.paper`의 `PAPER_FAST_HYBRID`를 `0`으로 되돌리고
+프로세스를 재시작한다. 환경변수는 기동 시 읽으므로 실행 중 전환은 반영되지 않는다.
+
 ### 관측일 계수 주의
 
 `shadow_validation_summary`는 휴장으로 판정된 날을 `skipped_closed_days`로 빼고 센다.
