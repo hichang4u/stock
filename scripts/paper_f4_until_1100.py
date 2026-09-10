@@ -11,7 +11,10 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-load_dotenv(dotenv_path=r"D:\Private\stock\.env", override=True)
+# 테스트 수집 중에는 개발 머신의 .env가 os.environ을 오염시키지 않게 한다
+# (conftest가 STOCK_SKIP_DOTENV=1을 설정). 운영/수동 실행에서는 정상 로드한다.
+if os.getenv("STOCK_SKIP_DOTENV", "0") != "1":
+    load_dotenv(dotenv_path=ROOT / ".env", override=True)
 
 from src import live, state  # noqa: E402
 from src.api import auth, kis_ws  # noqa: E402
