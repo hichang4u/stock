@@ -1,8 +1,28 @@
 """스케줄 시각 오버라이드 — 개발 트리를 운영 진입 창 밖으로 밀어내기 위한 것."""
 
 import importlib
+import os
+
+import pytest
 
 from src import schedule_times
+
+
+@pytest.fixture(autouse=True)
+def _reset_schedule_times_module():
+    """테스트마다 reload한 모듈을 세션에 남기지 않는다.
+
+    monkeypatch는 env는 복원해도 이미 reload된 모듈 객체(F1_H 등)는 되돌리지
+    않는다 — 이 파일의 마지막 테스트가 우연히 기본값으로 reload하고 끝나서
+    지금까지 들키지 않았을 뿐, 다른 테스트 파일과 순서를 바꿔 실행하면
+    schedule_times를 import하는 다른 모듈(scheduler 등)이 오염된 상수를 본다.
+    os.environ을 직접 지우고 reload해 monkeypatch의 되돌림 순서와 무관하게
+    기본값으로 확실히 되돌린다.
+    """
+    yield
+    for name in ("SCHEDULE_F1", "SCHEDULE_F2", "SCHEDULE_F3"):
+        os.environ.pop(name, None)
+    importlib.reload(schedule_times)
 
 
 def _reload(monkeypatch, **env):

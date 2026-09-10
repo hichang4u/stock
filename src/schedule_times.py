@@ -30,10 +30,15 @@ def _hhmmss(name: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
     return h, m, s
 
 
-F1_H, F1_M, _F1_S = _hhmmss("SCHEDULE_F1", (9, 0, 0))
+# F1/F2는 scheduler.py가 second=0으로 등록하므로 초 단위는 읽는 곳이 없다
+# (분 단위로 충분하다). 그래서 초는 파싱만 하고 버린다 — 이름에 UNUSED를
+# 붙여 "일부러 안 쓴다"는 것을 드러낸다. SCHEDULE_F1="09:15:30" 같은 값은
+# 경고 없이 09:15:00으로 등록된다. F3만 초를 끝까지 쓴다(scheduler가
+# second=F3_S로 등록한다).
+F1_H, F1_M, _F1_S_UNUSED = _hhmmss("SCHEDULE_F1", (9, 0, 0))
 PAPER_FAST_PROBE_H, PAPER_FAST_PROBE_M, PAPER_FAST_PROBE_S = 8, 59, 45
 BALANCE_PREFETCH_H, BALANCE_PREFETCH_M, BALANCE_PREFETCH_S = 8, 59, 50
-F2_H, F2_M, _F2_S = _hhmmss("SCHEDULE_F2", (9, 10, 0))
+F2_H, F2_M, _F2_S_UNUSED = _hhmmss("SCHEDULE_F2", (9, 10, 0))
 F3_H, F3_M, F3_S = _hhmmss("SCHEDULE_F3", (9, 10, 10))
 # F3_FILL_DEADLINE은 오버라이드하지 않는다 — 개발 트리 제외 규칙(f3_entry의
 # _held_tickers_to_exclude)이 운영 기준선에 기대기 때문에, 이 값이 움직이면

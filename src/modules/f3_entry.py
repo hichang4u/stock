@@ -705,6 +705,13 @@ async def _run_pipeline() -> None:
         # preserving balance / insufficient-balance / close_reason / notifier /
         # record_skip semantics untouched.
         ticker = candidates[0]
+        if ticker in await _held_tickers_to_exclude():
+            # 이 경로는 위 주석대로 _rank_final_entry_candidates를 거치지
+            # 않으므로 계좌 보유종목 제외를 여기서 따로 적용해야 한다.
+            # 제외 사유는 _held_tickers_to_exclude() 안에서 이미 로그로
+            # 남긴다(DEV_HELD_TICKERS_EXCLUDED). 플래그가 꺼져 있으면 이
+            # 호출은 즉시 빈 집합을 반환하므로 운영 경로에는 영향이 없다.
+            return
         candidate_by_ticker = {
             c.get("ticker"): c
             for c in (s.target_candidates or [])
@@ -3157,19 +3164,38 @@ async def _held_tickers_to_exclude() -> set[str]:
     if os.getenv("DEV_EXCLUDE_HELD_TICKERS", "0") != "1":
         return set()
     try:
+        # 개발 전용 조회이므로 주문/체결/F5/VI보다 항상 뒤로 밀린다
+        # (REQUEST_PRIORITY_BACKGROUND). 운영 경로의 1건/초 예산을 다투지 않는다.
         resp = await kis_rest.get(
             "/uapi/domestic-stock/v1/trading/inquire-balance",
             tr_id=_BAL_TR[os.getenv("KIS_MODE", "PAPER")],
             params=kis_rest.balance_inquiry_params(),
+            request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
         )
+        if not isinstance(resp, dict):
+            raise TypeError(f"unexpected balance response type: {type(resp)!r}")
+        rt_cd = str(resp.get("rt_cd", "0"))
+        if rt_cd != "0":
+            log(
+                "DEV_HELD_QUERY_FAILED",
+                level="WARN",
+                rt_cd=rt_cd,
+                msg1=resp.get("msg1"),
+            )
+            return set()
+        # 콤마 포함 수량("1,000") 등 브로커 응답의 실제 형식을 견디도록
+        # to_float를 쓴다. row가 dict가 아니거나 파싱이 실패해도(콤마 없는
+        # 비숫자 등) 여기서 걸러야 하므로 컴프리헨션 전체를 try 안에 둔다.
+        held = {
+            str(row.get("pdno") or "")
+            for row in (resp.get("output1") or [])
+            if isinstance(row, dict)
+            and str(row.get("pdno") or "")
+            and int(to_float(row.get("hldg_qty") or 0)) > 0
+        }
     except Exception as exc:  # noqa: BLE001 — 조회 실패가 진입을 막지 않는다
         log("DEV_HELD_QUERY_FAILED", level="WARN", error=repr(exc))
         return set()
-    held = {
-        str(row.get("pdno") or "")
-        for row in (resp.get("output1") or [])
-        if str(row.get("pdno") or "") and int(float(row.get("hldg_qty") or 0)) > 0
-    }
     if held:
         log("DEV_HELD_TICKERS_EXCLUDED", level="INFO", tickers=sorted(held))
     return held
