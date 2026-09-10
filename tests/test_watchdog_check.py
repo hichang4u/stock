@@ -9,6 +9,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from scripts import watchdog_check
+from src.utils.tree_role import ReleaseState
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -228,3 +229,38 @@ def test_main_writes_no_log_outside_the_given_dir(tmp_path):
 
     assert list(log_dir.glob("watchdog_*.log")), "주입한 디렉터리에 로그가 없다"
     assert not list(other.iterdir()), "주입하지 않은 디렉터리에 썼다"
+
+
+# ---------------------------------------------------------------------------
+# 릴리스 상태 — 워치독은 main.py를 직접 띄운다(런처를 거치지 않는다). 더티한
+# 운영 트리를 되살리면 트리 분리가 무의미해지므로, 재기동 직전에 검사한다.
+# ---------------------------------------------------------------------------
+
+
+def test_main_does_not_spawn_when_the_release_state_is_bad(tmp_path):
+    """더티한 운영 트리를 워치독이 되살리면 분리가 무의미해진다."""
+    pid_file = tmp_path / "main.pid"
+    calls = []
+    watchdog_check.main(
+        now=_at(9, 0),
+        pid_path=pid_file,
+        spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path,
+        release_check=lambda: ReleaseState(False, "TREE_DIRTY", "파일.txt"),
+    )
+    assert calls == [], "릴리스 상태가 나쁜데 프로세스를 띄웠다"
+    logged = (tmp_path / f"watchdog_{_at(9, 0).strftime('%Y%m%d')}.log").read_text("utf-8")
+    assert "TREE_DIRTY" in logged, "거부 사유가 로그에 없다"
+
+
+def test_main_spawns_when_the_release_state_is_good(tmp_path):
+    pid_file = tmp_path / "main.pid"
+    calls = []
+    watchdog_check.main(
+        now=_at(9, 0),
+        pid_path=pid_file,
+        spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path,
+        release_check=lambda: ReleaseState(True, "AT_RELEASE_TAG", "release/20260911-1"),
+    )
+    assert calls == [1]

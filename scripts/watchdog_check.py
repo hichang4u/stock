@@ -25,6 +25,11 @@ from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
 ROOT = Path(__file__).parent.parent
+
+sys.path.insert(0, str(ROOT))
+
+from src.utils import tree_role  # noqa: E402
+
 PID_FILE = ROOT / "main.pid"
 MAIN_SCRIPT = ROOT / "main.py"
 LOG_DIR = ROOT / "data" / "logs"
@@ -87,11 +92,16 @@ def _spawn() -> int:
     return proc.pid
 
 
+def _default_release_check() -> tree_role.ReleaseState:
+    return tree_role.check_release_state(ROOT, tree_role.read_role(ROOT))
+
+
 def main(
     now: datetime | None = None,
     pid_path: Path = PID_FILE,
     spawn=None,
     log_dir: Path = LOG_DIR,
+    release_check=None,
 ) -> int:
     now = now or datetime.now(KST)
     stamp = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -109,6 +119,14 @@ def main(
 
     if not in_window:
         print(f"[{stamp}] 재기동 창 밖 — 띄우지 않음")
+        return 0
+
+    # 워치독은 main.py를 직접 띄운다(런처를 거치지 않는다). 그래서 릴리스
+    # 상태 검사가 여기에도 있어야 한다 — 런처에만 두면 운영의 주 경로가
+    # 검사를 통과하지 않는다.
+    state = (release_check or _default_release_check)()
+    if not state.ok:
+        say(f"기동 거부 — {state.reason}: {state.detail}")
         return 0
 
     say("프로세스 사망 감지 — 재시작")
