@@ -40,6 +40,23 @@ function Get-Fingerprint {
     return $v.Trim()
 }
 
+function Restore-OriginRef([string]$Ref) {
+    # git checkout은 정보성 안내("Previous HEAD position was ...",
+    # "HEAD is now at ...")를 stderr로 낸다. PS 5.1은 $ErrorActionPreference
+    # = "Stop"인 상태에서 `2>`로 리다이렉트된 네이티브 명령의 stderr 줄을
+    # 터미네이팅 NativeCommandError로 승격시킨다 — git 자체는 성공했는데도
+    # 이 스크립트가 그 자리에서 죽어, 뒤이어 나와야 할 Fail 안내(특히
+    # -AcknowledgeFingerprint 값)를 전혀 보여주지 못한다. 이 호출 구간에서만
+    # Continue로 낮춰 정보성 줄을 조용히 버린 뒤 원래대로 복원한다.
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & git -C $repoRoot checkout --detach $Ref 2>$null
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+}
+
 Section "역할 확인"
 $role = (Get-Content (Join-Path $repoRoot ".stock-role") -ErrorAction SilentlyContinue)
 if ($null -ne $role) { $role = $role.Trim().ToLower() }
@@ -85,7 +102,7 @@ if ($before -ne $after) {
     Write-Host "  stable_paper_trades 카운터가 0에서 다시 시작하고," -ForegroundColor Yellow
     Write-Host "  baseline-$after 실험이 새로 열립니다." -ForegroundColor Yellow
     if ($AcknowledgeFingerprint -ne $after) {
-        & git -C $repoRoot checkout --detach $origin_ref 2>$null
+        Restore-OriginRef $origin_ref
         Fail @"
 지문 변경을 확인하지 않았습니다. 원래 위치($origin_ref)로 되돌렸습니다.
   다시 실행:  scripts\promote.ps1 -Tag $Tag -AcknowledgeFingerprint $after
@@ -99,11 +116,52 @@ if ($before -ne $after) {
 Section "재시작"
 # restart_main.ps1은 [CmdletBinding(SupportsShouldProcess, ConfirmImpact="High")]라
 # 기본적으로 확인 프롬프트를 띄운다. 자동화된 세션은 stdin이 닫혀 있어
-# 프롬프트에서 멈추므로 -Confirm:$false로 명시적으로 억제한다. restart_main.ps1은
-# 내부에서 restart_guard.py를 다시 돌리지만, 여기서 한 번 더 앞서 확인해 둔
-# 이유는 체크아웃으로 트리가 바뀌기 *전에* 안전 상태를 걸러내기 위해서다.
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "scripts\restart_main.ps1") -Confirm:$false
-if ($LASTEXITCODE -ne 0) { Fail "재시작 실패" }
+# 프롬프트에서 멈추므로 -Confirm:$false로 억제해야 한다.
+#
+# 별도의 powershell.exe -File로 실행하면(이전 구현) 그 자식 프로세스가 인자를
+# 문자열로 재파싱하면서 -Confirm:$false를 SwitchParameter로 바인딩하지 못해
+# "Cannot convert 'System.String' to ... 'SwitchParameter'" 예외가 난다
+# (PS 5.1에서 실측). 그 예외는 restart_main.ps1의 본문이 시작되기도 전인
+# 파라미터 바인딩 단계에서 나므로 restart_guard 재점검조차 돌지 않고, 트리는
+# 이미 새 태그로 체크아웃된 채 남는다. `&`로 같은 프로세스의 자식 스코프에서
+# 직접 호출하면 스위치가 정상적으로 바인딩된다. restart_main.ps1은 내부에서
+# 자체 $ErrorActionPreference를 설정하고 함수를 정의하지만, `&` 호출은 자식
+# 스코프를 만들어 그 변경이 이 스크립트로 새지 않는다(task-7-report.md
+# Fix Round 1의 실측 확인 참고).
+#
+# restart_main.ps1은 내부에서 restart_guard.py를 다시 돌리지만, 여기서 한 번 더
+# 앞서 확인해 둔 이유는 체크아웃으로 트리가 바뀌기 *전에* 안전 상태를 걸러내기
+# 위해서다.
+#
+# restart_main.ps1은 실패 시 throw만 하고 exit code를 따로 내지 않는다(내부에서
+# 외부 네이티브 명령을 쓰지 않아 $LASTEXITCODE도 신뢰할 수 없다). 그래서 성공/
+# 실패 판정은 예외 포착으로만 한다.
+$restartFailed = $false
+$restartError = ""
+try {
+    & (Join-Path $repoRoot "scripts\restart_main.ps1") -Confirm:$false
+} catch {
+    $restartFailed = $true
+    $restartError = $_.Exception.Message
+}
+
+if ($restartFailed) {
+    Write-Host ""
+    Write-Host "  [실패] 재시작에 실패했습니다." -ForegroundColor Red
+    if ($restartError) { Write-Host "  사유: $restartError" -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "  트리를 원래 위치($origin_ref)로 되돌립니다." -ForegroundColor Yellow
+    Restore-OriginRef $origin_ref
+    Fail @"
+재시작 실패로 원래 위치($origin_ref)로 되돌렸습니다.
+  주의: 재시작이 일부만 진행됐을 수 있습니다 — 기존 프로세스가 이미 종료됐지만
+  새 프로세스는 뜨지 않았을 가능성이 있습니다. 시스템이 정상이라고 가정하지
+  말고 프로세스가 실제로 돌고 있는지 직접 확인하세요:
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'"
+  돌고 있지 않다면 수동으로 기동하세요:
+    .\scripts\start_main.ps1
+"@
+}
 
 Write-Host ""
 Write-Host "승격 완료: $Tag (지문 $after)" -ForegroundColor Green
