@@ -256,8 +256,19 @@ Write-Info "공휴일 여부는 확인하지 않습니다. 휴장일이면 봇�
 
 # 8. 트리 역할과 릴리스 상태
 Write-Section "8. 트리 역할과 릴리스 상태"
-& $venvPython -m src.utils.tree_role --check
-if ($LASTEXITCODE -ne 0) {
+# `python -m src.utils.tree_role`은 모듈 검색을 현재 working directory
+# 기준으로 한다. stock.bat은 cmd의 cwd를 그대로 물려받으므로, 바로가기의
+# "시작 위치"가 저장소 루트가 아니면 "No module named 'src.utils'"라는
+# 트레이스백만 뱉고 죽는다 — fail-closed라 안전하지만 원인 불명이다.
+# Push-Location으로 이 호출 구간만 $repoRoot에 강제로 고정한다.
+Push-Location -LiteralPath $repoRoot
+try {
+    & $venvPython -m src.utils.tree_role --check
+    $roleCheckExit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($roleCheckExit -ne 0) {
     Fail "이 트리는 기동할 수 없는 상태입니다" @(
         "운영 트리라면 릴리스 태그에 있고 워킹트리가 깨끗해야 합니다.",
         "  현재 상태 확인:  .venv\Scripts\python.exe -m src.utils.tree_role --check",
@@ -266,6 +277,24 @@ if ($LASTEXITCODE -ne 0) {
     )
 }
 Write-Ok "역할·릴리스 상태 확인됨"
+
+# 개발 트리는 실계좌로 매매할 수 없어야 한다 (spec 3항: "개발은
+# KIS_MODE=PAPER 고정. REAL은 구조적으로 불가능해야 한다"). tree_role
+# 모듈은 설정(.env) 관심사를 모르게 유지하므로 여기서 직접 .stock-role을
+# 읽어 판단한다 — 이미 위에서 이 트리의 역할 자체는 통과했다는 것을
+# 확인했으니, 여기서는 그 값이 dev인지만 보면 된다.
+#
+# 데이터 경로(AUTH_DIR/REPLAY_SOURCE_DIR)가 운영 경로면 거부하는 쪽은
+# 의도적으로 구현하지 않는다 — spec 5절이 개발 트리의 그 경로들을 일부러
+# 운영 경로로 가리키게 하므로, 순진하게 검사하면 거기서 오탐한다.
+$treeRoleValue = (Get-Content -LiteralPath (Join-Path $repoRoot ".stock-role") -ErrorAction SilentlyContinue)
+if ($null -ne $treeRoleValue) { $treeRoleValue = ($treeRoleValue | Select-Object -First 1).Trim().ToLower() }
+if ($treeRoleValue -eq "dev" -and $mode -ne "PAPER") {
+    Fail "개발 트리는 KIS_MODE=PAPER로 고정됩니다. 현재 값: $mode" @(
+        ".env의 KIS_MODE를 PAPER로 바꾸세요.",
+        "REAL(실계좌) 매매는 운영 트리에서만 허용됩니다."
+    )
+}
 
 if ($CheckOnly) {
     Write-Host ""
