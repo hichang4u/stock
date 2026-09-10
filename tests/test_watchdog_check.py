@@ -9,6 +9,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from scripts import watchdog_check
+from src.utils import tree_role
 from src.utils.tree_role import ReleaseState
 
 KST = ZoneInfo("Asia/Seoul")
@@ -314,21 +315,22 @@ def test_main_does_not_spawn_when_the_release_check_raises(tmp_path):
     assert "git blew up" in logged, "검사 실패의 흔적이 로그에 없다"
 
 
-def test_default_release_check_consults_the_real_tree_role(tmp_path):
+def test_default_release_check_consults_the_real_tree_role():
     """release_check를 안 넘기면 실제 tree_role 검사로 이어져야 한다.
 
     위의 다른 재기동 테스트들은 hermetic하려고 release_check를 명시
     주입한다. 그래서 기본값 배선(_default_release_check) 자체를 보는
     테스트가 따로 있어야, 그 배선이 끊겨도 나머지 테스트들이 알아채지
     못하는 사각지대가 생기지 않는다.
+
+    reason이 7개 값 중 하나이기만 하면 통과하는 느슨한 집합 비교였다 —
+    `_default_release_check`를 `return ReleaseState(True, "DEV", "")`로
+    바꿔치기해도 그대로 통과해, 배선이 끊긴 것을 잡아내지 못했다. 이 트리의
+    실제 상태를 tree_role.check_release_state로 독립적으로 계산해 정확히
+    같은 값과 비교한다 — role-agnostic이라 Phase 3에서 이 스위트를 운영
+    트리에서 돌려도(이 트리 자체가 prod가 되어도) 그대로 유효하다.
     """
-    state = watchdog_check._default_release_check()
-    assert state.reason in {
-        "ROLE_MISSING",
-        "ROLE_UNKNOWN",
-        "DEV",
-        "GIT_FAILED",
-        "TREE_DIRTY",
-        "NOT_AT_RELEASE_TAG",
-        "AT_RELEASE_TAG",
-    }
+    expected = tree_role.check_release_state(
+        watchdog_check.ROOT, tree_role.read_role(watchdog_check.ROOT)
+    )
+    assert watchdog_check._default_release_check() == expected
