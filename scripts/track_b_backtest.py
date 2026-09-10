@@ -209,20 +209,36 @@ def sign_stability(
     return signs
 
 
-def gate_report(axis_results: dict[str, dict], a_daily: dict[str, float | None]) -> dict:
-    """스펙 §5의 관문을 그대로 적용한다. 통과·탈락과 사유를 함께 남긴다."""
+def gate_report(
+    axis_results: dict[str, dict],
+    a_daily: dict[str, float | None],
+    *,
+    evaluable_days: int | None = None,
+    compute_corr: bool = True,
+) -> dict:
+    """스펙 §5의 관문을 그대로 적용한다. 통과·탈락과 사유를 함께 남긴다.
+
+    ``evaluable_days`` 는 봉이 실제로 있었던 날짜 수다(``load_bars_for`` 의
+    ``len(bars)``). 주지 않으면 ``entry_days`` 로 대신한다 — 진입일과 평가
+    가능일이 같다고 가정하는 것이므로 단위 테스트 바깥에서는 반드시 넘긴다.
+    분모가 명목 52일이면 3/3(콜드 캐시로 3일만 평가됨)이 3/52로 읽혀 신호가
+    실제보다 드물어 보인다(재생 스펙 §3).
+
+    ``compute_corr`` 가 거짓이면 A와의 상관과 미진입일 커버리지를 계산하지
+    않고 ``None`` 으로 둔다 — 복원 유니버스(``--universes``)는 겹치는 날이
+    2~3일뿐이라 상관계수가 ±1.0 으로 튀는데(n=2면 항상 그렇다), 계산해서
+    숨기면 JSON 재읽기에서 그 숫자가 다시 튀어나온다.
+    """
     report = {}
     for key, data in axis_results.items():
         rows = data["rows"]
         judged = [r for r in rows if not r["ambiguous"] and r["pct"] is not None]
         pcts = [r["pct"] for r in judged]
         entry_days = len(rows)
+        denom = entry_days if evaluable_days is None else evaluable_days
 
         gate1_pass = entry_days >= MIN_ENTRY_DAYS
-        gate1_reason = (
-            "" if gate1_pass
-            else f"진입일 {entry_days}일 < {MIN_ENTRY_DAYS}일 — 판정 불가"
-        )
+        gate1_reason = f"진입일 {entry_days}일 / 평가 가능 {denom}일"
 
         signs = [s for s in data["slippage_signs"] if s != 0]
         gate2_pass = len(set(signs)) <= 1
@@ -231,16 +247,21 @@ def gate_report(axis_results: dict[str, dict], a_daily: dict[str, float | None])
             else f"체결 가정에 따라 부호가 뒤집힌다: {data['slippage_signs']}"
         )
 
-        paired_b, paired_a = [], []
-        for row in judged:
-            a_pct = a_daily.get(row["date"])
-            if a_pct is not None:      # None 을 상관계수에 넣으면 TypeError 다
-                paired_b.append(row["pct"])
-                paired_a.append(a_pct)
-        # A가 미진입이거나 AMBIGUOUS라 판정 못 한 날. 둘을 섞어 세므로 문서에
-        # 적을 때 "A의 손익이 없는 날"이라고 쓴다.
-        a_missing_days = [d for d, v in a_daily.items() if v is None]
-        covered = sum(1 for r in rows if r["date"] in a_missing_days)
+        if compute_corr:
+            paired_b, paired_a = [], []
+            for row in judged:
+                a_pct = a_daily.get(row["date"])
+                if a_pct is not None:  # None 을 상관계수에 넣으면 TypeError 다
+                    paired_b.append(row["pct"])
+                    paired_a.append(a_pct)
+            # A가 미진입이거나 AMBIGUOUS라 판정 못 한 날. 둘을 섞어 세므로 문서에
+            # 적을 때 "A의 손익이 없는 날"이라고 쓴다.
+            a_missing_days = [d for d, v in a_daily.items() if v is None]
+            corr_with_a = correlation(paired_b, paired_a)
+            a_missing_day_coverage = sum(1 for r in rows if r["date"] in a_missing_days)
+        else:
+            corr_with_a = None
+            a_missing_day_coverage = None
 
         lo, hi = bootstrap_ci(pcts)
         report[key] = {
@@ -252,8 +273,8 @@ def gate_report(axis_results: dict[str, dict], a_daily: dict[str, float | None])
             "ci_low": lo,
             "ci_high": hi,
             "ci_includes_zero": (lo is not None and hi is not None and lo <= 0 <= hi),
-            "corr_with_a": correlation(paired_b, paired_a),
-            "a_missing_day_coverage": covered,
+            "corr_with_a": corr_with_a,
+            "a_missing_day_coverage": a_missing_day_coverage,
             "gate1_pass": gate1_pass,
             "gate1_reason": gate1_reason,
             "gate2_pass": gate2_pass,
@@ -417,6 +438,11 @@ def main(argv: list[str] | None = None) -> int:
           f"{warmed_pairs}/{total_pairs}")
     if stats["missing"] + stats["partial"] > 0:
         print("  ! 전 세션 봉이 없는 쌍이 있다. track_b_backfill.py 를 먼저 돌린다.")
+    if args.universes is not None:
+        print(
+            "  참고: 복원 유니버스는 f1_snapshots와 겹치는 날이 2~3일뿐이라 "
+            "A와의 상관·미진입일 커버리지는 계산하지 않는다(재생 스펙 §3)."
+        )
 
     axis_results = {}
     for key in sorted(RULES):
@@ -433,7 +459,10 @@ def main(argv: list[str] | None = None) -> int:
             ),
         }
 
-    report = gate_report(axis_results, a_daily_from_baseline())
+    report = gate_report(
+        axis_results, a_daily_from_baseline(),
+        evaluable_days=len(bars), compute_corr=args.universes is None,
+    )
     for key in sorted(report):
         r = report[key]
         print(f"\n[{key}] 진입 {r['entry_days']}일 / 판정 {r['judged_days']}일 "
@@ -442,17 +471,15 @@ def main(argv: list[str] | None = None) -> int:
               f"{'-' if r['win_rate'] is None else format(r['win_rate'] * 100, '.1f')}%")
         print(f"  일평균 95% CI [{r['ci_low']}, {r['ci_high']}] "
               f"{'— 0을 포함한다 (차이 없음)' if r['ci_includes_zero'] else ''}")
-        print(f"  A와의 상관 {r['corr_with_a']}  A 미진입일 커버 "
-              f"{r['a_missing_day_coverage']}일")
-        print(f"  관문1 {'통과' if r['gate1_pass'] else '탈락 — ' + r['gate1_reason']}")
-        print(f"  관문2 {'통과' if r['gate2_pass'] else '탈락 — ' + r['gate2_reason']}")
-
-    if args.universes is not None:
-        print(
-            "  주의: 복원 유니버스에는 종목 속성이 없어 관문 3(트랙 A 상관)은 "
-            "의미 없는 값이다. 관문 1·2·4만 읽어라.",
-            flush=True,
+        corr_display = "-" if r["corr_with_a"] is None else format(r["corr_with_a"], ".3f")
+        coverage_display = (
+            "-" if r["a_missing_day_coverage"] is None
+            else f"{r['a_missing_day_coverage']}일"
         )
+        print(f"  A와의 상관 {corr_display}  A 미진입일 커버 {coverage_display}")
+        print(f"  관문1 {'통과' if r['gate1_pass'] else '탈락'} — {r['gate1_reason']}"
+              f"{'' if r['gate1_pass'] else f' ({MIN_ENTRY_DAYS}일 미만)'}")
+        print(f"  관문2 {'통과' if r['gate2_pass'] else '탈락 — ' + r['gate2_reason']}")
 
     if args.out:
         Path(args.out).write_text(
@@ -461,6 +488,13 @@ def main(argv: list[str] | None = None) -> int:
                     "report": report,
                     "axes": axis_results,
                     "warmup_days": args.warmup_days,
+                    "universes_source": (
+                        str(args.universes) if args.universes is not None
+                        else "f1_snapshots"
+                    ),
+                    "stats": stats,
+                    "dates_evaluated": len(bars),
+                    "dates_nominal": len(universes),
                 },
                 ensure_ascii=False, indent=2,
             ),

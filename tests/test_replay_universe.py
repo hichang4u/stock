@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from scripts.replay_universe import build_document, restore_universes
+from scripts.replay_universe import build_document, main, restore_universes
 
 
 def _write_log(directory: Path, date: str, events: list[dict]) -> None:
@@ -63,3 +63,38 @@ def test_document_records_provenance(tmp_path):
     assert doc["day_count"] == 1
     assert doc["pair_count"] == 1
     assert doc["generated_at"].endswith("+09:00")
+
+
+def test_main_refuses_to_write_a_zero_day_document(tmp_path, capsys):
+    """빈 로그 디렉터리로 돌리면 실제 산출물을 0일치로 덮어쓸 위험이 있다.
+
+    ``--log-dir`` 를 안 주면 ``data/logs`` 로 기본값이 잡히는데, 그 디렉터리가
+    존재하되 비어 있으면 ``Path.glob`` 이 예외 없이 빈 결과를 준다 — 그대로
+    쓰면 성공(0)을 반환하며 52일치 진짜 파일을 지운다.
+    """
+    empty_log_dir = tmp_path / "logs"
+    empty_log_dir.mkdir()
+    out_path = tmp_path / "universes.json"
+
+    rc = main(["--log-dir", str(empty_log_dir), "--out", str(out_path)])
+
+    assert rc != 0
+    assert not out_path.exists()
+    assert "logs" in capsys.readouterr().err
+
+
+def test_main_does_not_overwrite_an_existing_file_when_restore_is_empty(tmp_path, capsys):
+    """기존 산출물이 있는 자리에 빈 복원 결과를 쓰면 진짜 자산을 지운다."""
+    empty_log_dir = tmp_path / "logs"
+    empty_log_dir.mkdir()
+    out_path = tmp_path / "universes.json"
+    out_path.write_text(
+        json.dumps({"days": {"20260910": [{"rank": 1, "ticker": "111111"}]}}),
+        encoding="utf-8",
+    )
+
+    rc = main(["--log-dir", str(empty_log_dir), "--out", str(out_path)])
+
+    assert rc != 0
+    assert json.loads(out_path.read_text(encoding="utf-8"))["days"]
+    assert "logs" in capsys.readouterr().err

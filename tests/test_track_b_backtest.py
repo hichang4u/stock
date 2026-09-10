@@ -367,13 +367,14 @@ def test_load_bars_for_uses_the_restored_order_when_universe_is_empty(tmp_path):
     assert stats["missing"] == 0
 
 
-def test_load_bars_for_with_ranked_by_date_skips_the_f1_ranking():
+def test_load_bars_for_with_ranked_by_date_skips_the_f1_ranking(tmp_path):
     """빈 universe 에 rank_candidates([]) 를 돌리면 항상 0건이다. 부르면 안 된다."""
     from scripts.track_b_backtest import load_bars_for
 
     with patch("scripts.track_b_backtest.f1_selector.rank_candidates") as ranker:
         load_bars_for(
             {"20260910": []},
+            cache_dir=tmp_path,
             ranked_by_date={"20260910": ["111111"]},
         )
 

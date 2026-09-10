@@ -98,6 +98,15 @@ def main(argv: list[str] | None = None) -> int:
     days = restore_universes(log_dirs)
     document = build_document(days, log_dirs)
 
+    if document["day_count"] == 0:
+        searched = ", ".join(str(d) for d in log_dirs)
+        print(
+            f"오류: 복원된 거래일이 0일이다. 검색한 디렉터리: {searched} — "
+            f"{args.out} 은(는) 덮어쓰지 않는다.",
+            file=sys.stderr,
+        )
+        return 1
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8"
