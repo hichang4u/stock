@@ -83,7 +83,8 @@ def test_main_does_not_spawn_while_the_bot_is_alive(tmp_path):
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         rc = watchdog_check.main(
-            now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999
+            now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
+            log_dir=tmp_path,
         )
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -98,7 +99,8 @@ def test_main_spawns_when_dead_inside_the_window(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     calls = []
     rc = watchdog_check.main(
-        now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999
+        now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path,
     )
     assert rc == 0
     assert calls == [1]
@@ -109,7 +111,8 @@ def test_main_does_not_spawn_outside_the_window(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     calls = []
     rc = watchdog_check.main(
-        now=_at(3, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999
+        now=_at(3, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path,
     )
     assert rc == 0
     assert calls == []
@@ -201,3 +204,25 @@ def test_a_log_failure_does_not_stop_the_restart(tmp_path):
     )
     assert rc == 0
     assert calls == [1]
+
+
+def test_main_writes_no_log_outside_the_given_dir(tmp_path):
+    """로그 디렉터리를 주입하면 그 밖에는 한 줄도 쓰지 않는다.
+
+    주입을 빠뜨린 테스트가 운영 워치독 로그에 PID=999를 남긴 적이 있다
+    (2026-09-10). 실제 경로로 새는 것을 이 테스트가 막는다.
+    """
+    pid_file = tmp_path / "main.pid"
+    log_dir = tmp_path / "logs"
+    other = tmp_path / "운영로그"
+    other.mkdir()
+
+    watchdog_check.main(
+        now=_at(9, 0),
+        pid_path=pid_file,
+        spawn=lambda: 999,
+        log_dir=log_dir,
+    )
+
+    assert list(log_dir.glob("watchdog_*.log")), "주입한 디렉터리에 로그가 없다"
+    assert not list(other.iterdir()), "주입하지 않은 디렉터리에 썼다"
