@@ -1025,13 +1025,13 @@ def _hhmmss(name: str, default: tuple[int, int, int]) -> tuple[int, int, int]:
     return h, m, s
 
 
-F1_H, F1_M, _F1_S = _hhmmss("SCHEDULE_F1", (9, 0, 0))
+F1_H, F1_M, _F1_S_UNUSED = _hhmmss("SCHEDULE_F1", (9, 0, 0))
 ```
 
 `F2_H, F2_M = 9, 10`을 바꾼다:
 
 ```python
-F2_H, F2_M, _F2_S = _hhmmss("SCHEDULE_F2", (9, 10, 0))
+F2_H, F2_M, _F2_S_UNUSED = _hhmmss("SCHEDULE_F2", (9, 10, 0))
 ```
 
 `F3_H, F3_M, F3_S = 9, 10, 10`을 바꾼다:
@@ -1300,7 +1300,7 @@ F3_ENTRY_RETRY_DEADLINE=09:26:00
 
 **`SCHEDULE_F*`만으로는 아무것도 바뀌지 않는다.** `f3_entry.py`의
 `F3_ENTRY_RETRY_DEADLINE`은 별도 env(`09:11:00` 기본값)이고 진입 마감을 그
-시각으로 강제한다(`f3_entry.py:1297,1431,1502,1736,1925`에서 검사). `SCHEDULE_F3`만
+시각으로 강제한다(`f3_entry.py:1305,1439,1510,1745,1932`에서 검사). `SCHEDULE_F3`만
 09:25:10으로 밀고 `F3_ENTRY_RETRY_DEADLINE`을 그대로 두면, 개발 트리는 매번
 `ENTRY_DEADLINE_PASSED`(BEFORE_RECHECK)로 즉시 막힌다 — 스케줄을 옮긴 게 헛수고가
 된다. 위 `09:26:00`은 운영 기본값이 `F3`(09:10:10) 이후 50초를 주는 것과 같은
