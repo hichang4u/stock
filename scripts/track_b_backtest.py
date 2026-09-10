@@ -87,6 +87,7 @@ def simulate_day(
     depth: int = DEPTH,
     warmup_by_ticker: dict[str, list[dict]] | None = None,
     warmup_days: int = 1,
+    ranked_tickers: list[str] | None = None,
 ) -> dict | None:
     """하루 한 건. 신호가 없거나 진입가가 없으면 None(미진입)이다.
 
@@ -94,8 +95,13 @@ def simulate_day(
     (``src.warmup.meta``) — 산출물만 보고도 어느 모드에서 나온 값인지 알 수
     있어야 22거래일 기존 표본과 비교 가능하다(스펙 §8).
     """
-    ranked = f1_selector.rank_candidates(universe)[:depth]
-    ranked_tickers = [str(r["ticker"]) for r in ranked if r.get("ticker")]
+    # 복원된 유니버스(재생 스펙 §2.3)에는 순위를 다시 매길 속성이 없다.
+    # 기록된 순서를 그대로 자른다.
+    if ranked_tickers is None:
+        ranked = f1_selector.rank_candidates(universe)[:depth]
+        ranked_tickers = [str(r["ticker"]) for r in ranked if r.get("ticker")]
+    else:
+        ranked_tickers = [str(t) for t in ranked_tickers][:depth]
     signal = find_signal(
         bars_by_ticker, ranked_tickers, rule_key, params,
         warmup_by_ticker=warmup_by_ticker,
@@ -168,6 +174,7 @@ def run_axis(
     slippage: float = 0.0,
     warmup: dict[str, dict[str, list[dict]]] | None = None,
     warmup_days: int = 1,
+    ranked_by_date: dict[str, list[str]] | None = None,
 ) -> list[dict]:
     rows = []
     warm = warmup or {}
@@ -176,6 +183,7 @@ def run_axis(
             date, universes[date], bars.get(date, {}), rule_key, params,
             slippage=slippage, warmup_by_ticker=warm.get(date),
             warmup_days=warmup_days,
+            ranked_tickers=(ranked_by_date or {}).get(date),
         )
         if result is not None:
             rows.append(result)
@@ -188,12 +196,14 @@ def sign_stability(
     rule_key: str,
     params: dict,
     warmup: dict[str, dict[str, list[dict]]] | None = None,
+    ranked_by_date: dict[str, list[str]] | None = None,
 ) -> list[int]:
     """체결 가정 셋에서의 합계 부호. 하나라도 다르면 관문 2 탈락이다."""
     signs = []
     for slip in SLIPPAGES:
         rows = run_axis(universes, bars, rule_key, params,
-                        slippage=slip, warmup=warmup)
+                        slippage=slip, warmup=warmup,
+                        ranked_by_date=ranked_by_date)
         total = sum(r["pct"] for r in rows if r["pct"] is not None)
         signs.append(0 if total == 0 else (1 if total > 0 else -1))
     return signs
@@ -365,9 +375,21 @@ def main(argv: list[str] | None = None) -> int:
         help="지표에 먹일 전 거래일 수. 0이면 구 동작(일 단위 초기화)",
     )
     parser.add_argument("--out", default="", help="결과 JSON 경로")
+    parser.add_argument(
+        "--universes", type=Path, default=None,
+        help="replay_universe.py 산출물. 주면 f1_snapshots 대신 이것을 쓴다",
+    )
     args = parser.parse_args(argv)
 
-    universes = load_universes()
+    universes: dict[str, list[dict]]
+    if args.universes is not None:
+        from scripts.track_b_backfill import load_restored_universes
+
+        ranked_by_date = load_restored_universes(args.universes)
+        universes = {date: [] for date in ranked_by_date}
+    else:
+        ranked_by_date = None
+        universes = load_universes()
     bars, stats = load_bars_for(universes, depth=args.depth)
     dates = sorted(universes)
     warmup = {
@@ -391,11 +413,13 @@ def main(argv: list[str] | None = None) -> int:
         rows = run_axis(
             universes, bars, key, DEFAULT_PARAMS,
             warmup=warmup, warmup_days=args.warmup_days,
+            ranked_by_date=ranked_by_date,
         )
         axis_results[key] = {
             "rows": rows,
             "slippage_signs": sign_stability(
-                universes, bars, key, DEFAULT_PARAMS, warmup=warmup
+                universes, bars, key, DEFAULT_PARAMS, warmup=warmup,
+                ranked_by_date=ranked_by_date,
             ),
         }
 
@@ -412,6 +436,13 @@ def main(argv: list[str] | None = None) -> int:
               f"{r['a_missing_day_coverage']}일")
         print(f"  관문1 {'통과' if r['gate1_pass'] else '탈락 — ' + r['gate1_reason']}")
         print(f"  관문2 {'통과' if r['gate2_pass'] else '탈락 — ' + r['gate2_reason']}")
+
+    if args.universes is not None:
+        print(
+            "  주의: 복원 유니버스에는 종목 속성이 없어 관문 3(트랙 A 상관)은 "
+            "의미 없는 값이다. 관문 1·2·4만 읽어라.",
+            flush=True,
+        )
 
     if args.out:
         Path(args.out).write_text(

@@ -5,6 +5,7 @@
 """
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -274,3 +275,63 @@ def test_count_warmed_uses_the_session_predicate_not_a_bar_count():
     assert len(morning_only) > track_b_backtest.warmup_mod.WARMUP_MIN_BARS
     assert track_b_backtest.count_warmed({"20260831": {"AAA": whole}}) == 1
     assert track_b_backtest.count_warmed({"20260831": {"AAA": morning_only}}) == 0
+
+
+def _bars_rising(n: int = 40) -> list[dict]:
+    """09:00부터 1분 간격. 종가가 계속 올라 R1(고점 회복)이 반드시 걸린다."""
+    rows = []
+    for i in range(n):
+        price = 10_000 + i * 10
+        rows.append({
+            "date": "20260910",
+            "time": f"{9 + i // 60:02d}{i % 60:02d}00",
+            "open": float(price), "high": float(price + 5),
+            "low": float(price - 5), "close": float(price),
+            "volume": 1_000,
+        })
+    return rows
+
+
+def test_ranked_tickers_bypasses_the_f1_ranking():
+    """복원된 유니버스에는 순위를 다시 매길 속성이 없다. 부르면 안 된다."""
+    bars = {"111111": _bars_rising()}
+
+    with patch("scripts.track_b_backtest.f1_selector.rank_candidates") as ranker:
+        result = simulate_day(
+            "20260910", [], bars, "R1", {},
+            ranked_tickers=["111111"],
+        )
+
+    ranker.assert_not_called()
+    # 신호가 실제로 잡혀야 주입 경로 이후 코드(진입가·청산)까지 실행된다.
+    assert result is not None
+    assert result["ticker"] == "111111"
+
+
+def test_ranked_tickers_is_truncated_to_depth():
+    """depth 를 넘는 종목은 보지 않는다 — 캐시에 없는 종목을 찾지 않게."""
+    bars = {"111111": _bars_rising()}
+
+    result = simulate_day(
+        "20260910", [], bars, "R1", {},
+        ranked_tickers=["111111", "222222", "333333"], depth=1,
+    )
+    # 222222/333333 의 분봉이 없어도 KeyError 없이 끝나야 한다.
+    assert result is not None
+    assert result["ticker"] == "111111"
+
+
+def test_sign_stability_uses_the_restored_order_too():
+    """관문 2가 조용히 옛 경로로 돌면 4일치로 부호를 판정하게 된다."""
+    from scripts.track_b_backtest import sign_stability
+
+    bars = {"20260910": {"111111": _bars_rising()}}
+    universes = {"20260910": []}
+
+    with patch("scripts.track_b_backtest.f1_selector.rank_candidates") as ranker:
+        sign_stability(
+            universes, bars, "R1", {},
+            ranked_by_date={"20260910": ["111111"]},
+        )
+
+    ranker.assert_not_called()
