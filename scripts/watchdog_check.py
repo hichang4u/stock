@@ -124,7 +124,19 @@ def main(
     # 워치독은 main.py를 직접 띄운다(런처를 거치지 않는다). 그래서 릴리스
     # 상태 검사가 여기에도 있어야 한다 — 런처에만 두면 운영의 주 경로가
     # 검사를 통과하지 않는다.
-    state = (release_check or _default_release_check)()
+    #
+    # 검사 자체가 터질 수 있다 (예: 한글 로케일 윈도우에서 git 출력이
+    # UnicodeDecodeError를 내는 경우 — check_release_state는 OSError와
+    # SubprocessError만 잡는다). 여기서 안 잡으면 say() 호출 전에 죽어서
+    # 로그에 한 줄도 안 남고, 작업 스케줄러는 stdout을 버리므로 완전히
+    # 무소음으로 실패한다 — 그 상태로 창이 닫힐 때까지 매분 반복된다.
+    # 그래서 일부러 넓게 잡는다: 띄우지 않는 쪽으로 fail-closed 하되,
+    # 무슨 일이 있었는지는 반드시 로그에 남긴다.
+    try:
+        state = (release_check or _default_release_check)()
+    except Exception as exc:
+        say(f"기동 거부 — 릴리스 검사 실패: {exc!r}")
+        return 0
     if not state.ok:
         say(f"기동 거부 — {state.reason}: {state.detail}")
         return 0

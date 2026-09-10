@@ -18,6 +18,17 @@ def _at(hour: int, minute: int) -> datetime:
     return datetime(2026, 9, 10, hour, minute, tzinfo=KST)
 
 
+def _ok_release_check():
+    """이 트리가 dev 든 prod 든 상관없이 항상 통과하는 검사.
+
+    release_check 를 넘기지 않으면 _default_release_check() 가 실제
+    트리의 .stock-role 과 git 상태를 읽는다. 재기동 로직만 보는
+    테스트가 그 상태에 좌우되면 안 되므로(이 트리가 나중에 prod 로
+    바뀌면 이유 없이 깨진다) 여기서 명시적으로 주입한다.
+    """
+    return ReleaseState(True, "AT_RELEASE_TAG", "release/20260910-1")
+
+
 def test_alive_when_the_pid_file_is_locked(tmp_path):
     """main.py 는 PID 파일의 0번 바이트를 잠근 채 돈다. 잠겨 있으면 살아 있다.
 
@@ -85,7 +96,7 @@ def test_main_does_not_spawn_while_the_bot_is_alive(tmp_path):
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         rc = watchdog_check.main(
             now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
-            log_dir=tmp_path,
+            log_dir=tmp_path, release_check=_ok_release_check,
         )
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -101,7 +112,7 @@ def test_main_spawns_when_dead_inside_the_window(tmp_path):
     calls = []
     rc = watchdog_check.main(
         now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
-        log_dir=tmp_path,
+        log_dir=tmp_path, release_check=_ok_release_check,
     )
     assert rc == 0
     assert calls == [1]
@@ -113,7 +124,7 @@ def test_main_does_not_spawn_outside_the_window(tmp_path):
     calls = []
     rc = watchdog_check.main(
         now=_at(3, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
-        log_dir=tmp_path,
+        log_dir=tmp_path, release_check=_ok_release_check,
     )
     assert rc == 0
     assert calls == []
@@ -124,7 +135,8 @@ def test_main_does_not_write_the_pid_file(tmp_path):
     pid_file = tmp_path / "main.pid"
     pid_file.write_text("4242", encoding="utf-8")
     watchdog_check.main(
-        now=_at(9, 0), pid_path=pid_file, spawn=lambda: 999, log_dir=tmp_path
+        now=_at(9, 0), pid_path=pid_file, spawn=lambda: 999, log_dir=tmp_path,
+        release_check=_ok_release_check,
     )
     assert pid_file.read_text(encoding="utf-8").strip() == "4242"
 
@@ -145,7 +157,8 @@ def test_logs_the_healthy_case_inside_the_restart_window(tmp_path):
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         watchdog_check.main(
-            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999,
+            release_check=_ok_release_check,
         )
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -162,7 +175,8 @@ def test_does_not_log_outside_the_restart_window(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     log_dir = tmp_path / "logs"
     watchdog_check.main(
-        now=_at(3, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+        now=_at(3, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999,
+        release_check=_ok_release_check,
     )
     assert not log_dir.exists() or not list(log_dir.glob("*.log"))
 
@@ -172,7 +186,8 @@ def test_logs_both_lines_when_it_restarts(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     log_dir = tmp_path / "logs"
     watchdog_check.main(
-        now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+        now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999,
+        release_check=_ok_release_check,
     )
     written = (log_dir / "watchdog_20260910.log").read_text(encoding="utf-8")
     assert "사망 감지" in written
@@ -185,7 +200,8 @@ def test_log_appends_instead_of_overwriting(tmp_path):
     log_dir = tmp_path / "logs"
     for _ in range(2):
         watchdog_check.main(
-            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999,
+            release_check=_ok_release_check,
         )
     lines = (log_dir / "watchdog_20260910.log").read_text(
         encoding="utf-8"
@@ -204,6 +220,7 @@ def test_a_log_failure_does_not_stop_the_restart(tmp_path):
     rc = watchdog_check.main(
         now=_at(9, 0), pid_path=pid_file, log_dir=blocked,
         spawn=lambda: calls.append(1) or 999,
+        release_check=_ok_release_check,
     )
     assert rc == 0
     assert calls == [1]
@@ -225,6 +242,7 @@ def test_main_writes_no_log_outside_the_given_dir(tmp_path):
         pid_path=pid_file,
         spawn=lambda: 999,
         log_dir=log_dir,
+        release_check=_ok_release_check,
     )
 
     assert list(log_dir.glob("watchdog_*.log")), "주입한 디렉터리에 로그가 없다"
@@ -264,3 +282,53 @@ def test_main_spawns_when_the_release_state_is_good(tmp_path):
         release_check=lambda: ReleaseState(True, "AT_RELEASE_TAG", "release/20260911-1"),
     )
     assert calls == [1]
+
+
+def test_main_does_not_spawn_when_the_release_check_raises(tmp_path):
+    """검사 자체가 터져도 무소음으로 죽으면 안 된다.
+
+    check_release_state는 자기 git 호출의 OSError/SubprocessError만
+    잡는다. 그 밖의 예외(예: 한글 로케일 윈도우에서 git 출력이
+    UnicodeDecodeError를 내는 경우)가 새면 say() 호출 전에 죽어서 작업
+    스케줄러가 버리는 stdout에만 남고, 워치독 로그에는 아무 흔적도
+    없이 재기동 창이 그냥 닫힌다. 그래서 예외도 띄우지 않는 결정으로
+    바꾸고 로그에 남겨야 한다 — "크래시하지 않는다"만 확인하는 테스트로는
+    이 부분(로그에 남는다)을 놓친다.
+    """
+    pid_file = tmp_path / "main.pid"
+    calls = []
+
+    def _raising_release_check():
+        raise RuntimeError("git blew up")
+
+    rc = watchdog_check.main(
+        now=_at(9, 0),
+        pid_path=pid_file,
+        spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path,
+        release_check=_raising_release_check,
+    )
+    assert rc == 0
+    assert calls == [], "검사가 예외를 던졌는데 프로세스를 띄웠다"
+    logged = (tmp_path / f"watchdog_{_at(9, 0).strftime('%Y%m%d')}.log").read_text("utf-8")
+    assert "git blew up" in logged, "검사 실패의 흔적이 로그에 없다"
+
+
+def test_default_release_check_consults_the_real_tree_role(tmp_path):
+    """release_check를 안 넘기면 실제 tree_role 검사로 이어져야 한다.
+
+    위의 다른 재기동 테스트들은 hermetic하려고 release_check를 명시
+    주입한다. 그래서 기본값 배선(_default_release_check) 자체를 보는
+    테스트가 따로 있어야, 그 배선이 끊겨도 나머지 테스트들이 알아채지
+    못하는 사각지대가 생기지 않는다.
+    """
+    state = watchdog_check._default_release_check()
+    assert state.reason in {
+        "ROLE_MISSING",
+        "ROLE_UNKNOWN",
+        "DEV",
+        "GIT_FAILED",
+        "TREE_DIRTY",
+        "NOT_AT_RELEASE_TAG",
+        "AT_RELEASE_TAG",
+    }
