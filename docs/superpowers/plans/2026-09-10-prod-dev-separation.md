@@ -1376,8 +1376,22 @@ curl -s http://127.0.0.1:8899/api/status | head -c 200; echo
 # 2. 개발 기동 (다른 포트)
 cd /d/Private/stock && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start_main.ps1 -CheckOnly
 
-# 3. 개발에서 REAL 시도 → 거부
-cd /d/Private/stock && KIS_MODE=REAL powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start_main.ps1 -CheckOnly; echo "REAL exit=$? (1이어야 정상)"
+# 3. 개발에서 PAPER가 아닌 모드 시도 → 거부
+# start_main.ps1은 KIS_MODE를 환경변수가 아니라 .env 파일에서 Read-DotEnv로
+# 읽으므로(환경변수는 무시한다), 환경변수로 넘기는 이전 버전의 이 검증은
+# 아무것도 테스트하지 못했다. .env를 백업하고 KIS_MODE만 바꿔치기한 뒤
+# 검사하고 원복한다. REAL로 테스트하면 -CheckOnly라도 실계좌 확인
+# Read-Host를 4단계에서 먼저 거치는데, 자동화된 세션은 stdin이 닫혀 있어
+# 그 프롬프트가 빈 값을 읽고 "사용자가 취소했습니다"로 exit 0을 내
+# 이 거부 경로(8단계, exit 1)를 전혀 확인하지 못한다. DRY_RUN은 그 확인
+# 프롬프트(KIS_MODE -eq "REAL"일 때만 뜬다)를 거치지 않으면서도 PAPER가
+# 아니므로 같은 거부 경로를 탄다.
+cd /d/Private/stock
+cp .env .env.bak
+sed -i 's/^KIS_MODE=.*/KIS_MODE=DRY_RUN/' .env
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start_main.ps1 -CheckOnly
+echo "dev-not-paper exit=$? (1이어야 정상)"
+mv .env.bak .env
 
 # 4. 운영 트리를 더럽히면 기동 거부
 cd /d/Private/stock-prod && echo "//더러움" >> README.md
@@ -1486,8 +1500,8 @@ echo prod > .stock-role
 
 ## Self-Review 결과
 
-**스펙 커버리지:** 1절 구조 → Task 11. 2절 승격 경로 → Task 6·7. 3절 2단 게이트 → Task 6·7. 4절 기동 거부 → Task 4·8. 5절 런타임 격리 → Task 11 Step 6·7. 6절 계좌 규칙 → Task 9·10, Task 11 Step 6·7. 6-5절 모드별 범위 → Task 12 Step 7. 7절 지문 비용 → Task 10 Step 7 묶음 커밋. 8절 마이그레이션 → Task 11·12.
+**스펙 커버리지:** 1절 구조 → Task 11. 2절 승격 경로 → Task 6·7. 3절 2단 게이트 → Task 6·7. 4절 기동 거부 → Task 4·8, 단 `dev` 행의 두 조건 중 "`KIS_MODE`가 `PAPER`가 아니면 거부"만 커버한다 — "데이터 경로가 운영 경로면 거부"는 의도적으로 미구현이다(스펙 5절이 개발 트리의 `AUTH_DIR`/`REPLAY_SOURCE_DIR`을 일부러 운영 경로로 가리키게 하므로, 순진한 경로 비교는 거기서 오탐한다). 5절 런타임 격리 → Task 11 Step 6·7. 6절 계좌 규칙 → Task 9·10, Task 11 Step 6·7. 6-5절 모드별 범위 → Task 12 Step 7. 7절 지문 비용 → Task 10 Step 7 묶음 커밋. 8절 마이그레이션 → Task 11·12.
 
-**미커버 항목:** 스펙 5절의 `REPLAY_SOURCE_DIR`은 값만 설정하고(Task 11 Step 7) 읽는 코드는 없다. 하위 프로젝트 B가 소비한다. 지금 소비자가 없는 설정을 넣는 것은 B의 착수를 위한 자리표시이며, 그 전까지 아무 동작에도 영향을 주지 않는다.
+**미커버 항목:** 스펙 5절의 `REPLAY_SOURCE_DIR`은 값만 설정하고(Task 11 Step 7) 읽는 코드는 없다. 하위 프로젝트 B가 소비한다. 지금 소비자가 없는 설정을 넣는 것은 B의 착수를 위한 자리표시이며, 그 전까지 아무 동작에도 영향을 주지 않는다. 스펙 4절 `dev` 행의 데이터 경로 조건도 위와 같은 이유로 의도적으로 미구현이다.
 
 **타입 일관성:** `ReleaseState(ok, reason, detail)`이 Task 2에서 정의되어 Task 3·4에서 같은 필드명으로 쓰인다. `read_role`은 전 구간 `str | None`을 반환한다. `_held_tickers_to_exclude`는 `set[str]`을 반환해 `exclude_tickers`의 기존 타입과 맞는다.

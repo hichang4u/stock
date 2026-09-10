@@ -16,7 +16,7 @@ load_dotenv(dotenv_path=ROOT / ".env", override=True)
 from src.api import auth, kis_rest  # noqa: E402
 from src.api.status_logic import parse_asset_snapshot_response  # noqa: E402
 from src.modules import f4_tracking  # noqa: E402
-from src.utils import logger  # noqa: E402
+from src.utils import logger, tree_role  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
 _BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}
@@ -172,6 +172,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 async def main() -> int:
+    tree_role.require_prod(ROOT)
     args = _parse_args()
     mode = os.getenv("KIS_MODE", "PAPER")
     if mode != "PAPER":

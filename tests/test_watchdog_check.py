@@ -9,12 +9,25 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from scripts import watchdog_check
+from src.utils import tree_role
+from src.utils.tree_role import ReleaseState
 
 KST = ZoneInfo("Asia/Seoul")
 
 
 def _at(hour: int, minute: int) -> datetime:
     return datetime(2026, 9, 10, hour, minute, tzinfo=KST)
+
+
+def _ok_release_check():
+    """이 트리가 dev 든 prod 든 상관없이 항상 통과하는 검사.
+
+    release_check 를 넘기지 않으면 _default_release_check() 가 실제
+    트리의 .stock-role 과 git 상태를 읽는다. 재기동 로직만 보는
+    테스트가 그 상태에 좌우되면 안 되므로(이 트리가 나중에 prod 로
+    바뀌면 이유 없이 깨진다) 여기서 명시적으로 주입한다.
+    """
+    return ReleaseState(True, "AT_RELEASE_TAG", "release/20260910-1")
 
 
 def test_alive_when_the_pid_file_is_locked(tmp_path):
@@ -83,7 +96,8 @@ def test_main_does_not_spawn_while_the_bot_is_alive(tmp_path):
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         rc = watchdog_check.main(
-            now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999
+            now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
+            log_dir=tmp_path, release_check=_ok_release_check,
         )
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -98,7 +112,8 @@ def test_main_spawns_when_dead_inside_the_window(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     calls = []
     rc = watchdog_check.main(
-        now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999
+        now=_at(9, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path, release_check=_ok_release_check,
     )
     assert rc == 0
     assert calls == [1]
@@ -109,7 +124,8 @@ def test_main_does_not_spawn_outside_the_window(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     calls = []
     rc = watchdog_check.main(
-        now=_at(3, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999
+        now=_at(3, 0), pid_path=pid_file, spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path, release_check=_ok_release_check,
     )
     assert rc == 0
     assert calls == []
@@ -119,7 +135,10 @@ def test_main_does_not_write_the_pid_file(tmp_path):
     """PID 는 main.py 가 락을 잡은 뒤 스스로 쓴다. 워치독이 쓰면 남의 것을 덮는다."""
     pid_file = tmp_path / "main.pid"
     pid_file.write_text("4242", encoding="utf-8")
-    watchdog_check.main(now=_at(9, 0), pid_path=pid_file, spawn=lambda: 999)
+    watchdog_check.main(
+        now=_at(9, 0), pid_path=pid_file, spawn=lambda: 999, log_dir=tmp_path,
+        release_check=_ok_release_check,
+    )
     assert pid_file.read_text(encoding="utf-8").strip() == "4242"
 
 
@@ -139,7 +158,8 @@ def test_logs_the_healthy_case_inside_the_restart_window(tmp_path):
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         watchdog_check.main(
-            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999,
+            release_check=_ok_release_check,
         )
         handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -156,7 +176,8 @@ def test_does_not_log_outside_the_restart_window(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     log_dir = tmp_path / "logs"
     watchdog_check.main(
-        now=_at(3, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+        now=_at(3, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999,
+        release_check=_ok_release_check,
     )
     assert not log_dir.exists() or not list(log_dir.glob("*.log"))
 
@@ -166,7 +187,8 @@ def test_logs_both_lines_when_it_restarts(tmp_path):
     pid_file.write_text("4242", encoding="utf-8")
     log_dir = tmp_path / "logs"
     watchdog_check.main(
-        now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+        now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999,
+        release_check=_ok_release_check,
     )
     written = (log_dir / "watchdog_20260910.log").read_text(encoding="utf-8")
     assert "사망 감지" in written
@@ -179,7 +201,8 @@ def test_log_appends_instead_of_overwriting(tmp_path):
     log_dir = tmp_path / "logs"
     for _ in range(2):
         watchdog_check.main(
-            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999
+            now=_at(9, 0), pid_path=pid_file, log_dir=log_dir, spawn=lambda: 999,
+            release_check=_ok_release_check,
         )
     lines = (log_dir / "watchdog_20260910.log").read_text(
         encoding="utf-8"
@@ -198,6 +221,116 @@ def test_a_log_failure_does_not_stop_the_restart(tmp_path):
     rc = watchdog_check.main(
         now=_at(9, 0), pid_path=pid_file, log_dir=blocked,
         spawn=lambda: calls.append(1) or 999,
+        release_check=_ok_release_check,
     )
     assert rc == 0
     assert calls == [1]
+
+
+def test_main_writes_no_log_outside_the_given_dir(tmp_path):
+    """로그 디렉터리를 주입하면 그 밖에는 한 줄도 쓰지 않는다.
+
+    주입을 빠뜨린 테스트가 운영 워치독 로그에 PID=999를 남긴 적이 있다
+    (2026-09-10). 실제 경로로 새는 것을 이 테스트가 막는다.
+    """
+    pid_file = tmp_path / "main.pid"
+    log_dir = tmp_path / "logs"
+    other = tmp_path / "운영로그"
+    other.mkdir()
+
+    watchdog_check.main(
+        now=_at(9, 0),
+        pid_path=pid_file,
+        spawn=lambda: 999,
+        log_dir=log_dir,
+        release_check=_ok_release_check,
+    )
+
+    assert list(log_dir.glob("watchdog_*.log")), "주입한 디렉터리에 로그가 없다"
+    assert not list(other.iterdir()), "주입하지 않은 디렉터리에 썼다"
+
+
+# ---------------------------------------------------------------------------
+# 릴리스 상태 — 워치독은 main.py를 직접 띄운다(런처를 거치지 않는다). 더티한
+# 운영 트리를 되살리면 트리 분리가 무의미해지므로, 재기동 직전에 검사한다.
+# ---------------------------------------------------------------------------
+
+
+def test_main_does_not_spawn_when_the_release_state_is_bad(tmp_path):
+    """더티한 운영 트리를 워치독이 되살리면 분리가 무의미해진다."""
+    pid_file = tmp_path / "main.pid"
+    calls = []
+    watchdog_check.main(
+        now=_at(9, 0),
+        pid_path=pid_file,
+        spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path,
+        release_check=lambda: ReleaseState(False, "TREE_DIRTY", "파일.txt"),
+    )
+    assert calls == [], "릴리스 상태가 나쁜데 프로세스를 띄웠다"
+    logged = (tmp_path / f"watchdog_{_at(9, 0).strftime('%Y%m%d')}.log").read_text("utf-8")
+    assert "TREE_DIRTY" in logged, "거부 사유가 로그에 없다"
+
+
+def test_main_spawns_when_the_release_state_is_good(tmp_path):
+    pid_file = tmp_path / "main.pid"
+    calls = []
+    watchdog_check.main(
+        now=_at(9, 0),
+        pid_path=pid_file,
+        spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path,
+        release_check=lambda: ReleaseState(True, "AT_RELEASE_TAG", "release/20260911-1"),
+    )
+    assert calls == [1]
+
+
+def test_main_does_not_spawn_when_the_release_check_raises(tmp_path):
+    """검사 자체가 터져도 무소음으로 죽으면 안 된다.
+
+    check_release_state는 자기 git 호출의 OSError/SubprocessError만
+    잡는다. 그 밖의 예외(예: 한글 로케일 윈도우에서 git 출력이
+    UnicodeDecodeError를 내는 경우)가 새면 say() 호출 전에 죽어서 작업
+    스케줄러가 버리는 stdout에만 남고, 워치독 로그에는 아무 흔적도
+    없이 재기동 창이 그냥 닫힌다. 그래서 예외도 띄우지 않는 결정으로
+    바꾸고 로그에 남겨야 한다 — "크래시하지 않는다"만 확인하는 테스트로는
+    이 부분(로그에 남는다)을 놓친다.
+    """
+    pid_file = tmp_path / "main.pid"
+    calls = []
+
+    def _raising_release_check():
+        raise RuntimeError("git blew up")
+
+    rc = watchdog_check.main(
+        now=_at(9, 0),
+        pid_path=pid_file,
+        spawn=lambda: calls.append(1) or 999,
+        log_dir=tmp_path,
+        release_check=_raising_release_check,
+    )
+    assert rc == 0
+    assert calls == [], "검사가 예외를 던졌는데 프로세스를 띄웠다"
+    logged = (tmp_path / f"watchdog_{_at(9, 0).strftime('%Y%m%d')}.log").read_text("utf-8")
+    assert "git blew up" in logged, "검사 실패의 흔적이 로그에 없다"
+
+
+def test_default_release_check_consults_the_real_tree_role():
+    """release_check를 안 넘기면 실제 tree_role 검사로 이어져야 한다.
+
+    위의 다른 재기동 테스트들은 hermetic하려고 release_check를 명시
+    주입한다. 그래서 기본값 배선(_default_release_check) 자체를 보는
+    테스트가 따로 있어야, 그 배선이 끊겨도 나머지 테스트들이 알아채지
+    못하는 사각지대가 생기지 않는다.
+
+    reason이 7개 값 중 하나이기만 하면 통과하는 느슨한 집합 비교였다 —
+    `_default_release_check`를 `return ReleaseState(True, "DEV", "")`로
+    바꿔치기해도 그대로 통과해, 배선이 끊긴 것을 잡아내지 못했다. 이 트리의
+    실제 상태를 tree_role.check_release_state로 독립적으로 계산해 정확히
+    같은 값과 비교한다 — role-agnostic이라 Phase 3에서 이 스위트를 운영
+    트리에서 돌려도(이 트리 자체가 prod가 되어도) 그대로 유효하다.
+    """
+    expected = tree_role.check_release_state(
+        watchdog_check.ROOT, tree_role.read_role(watchdog_check.ROOT)
+    )
+    assert watchdog_check._default_release_check() == expected

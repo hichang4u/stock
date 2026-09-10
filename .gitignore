@@ -11,7 +11,9 @@ __pycache__/
 .pytest_tmp*/
 .codex/
 data/
+.stock-role
 *.log
 main.pid
 .claude/worktrees/
 .worktrees/
+.superpowers/
