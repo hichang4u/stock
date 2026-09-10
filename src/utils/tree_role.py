@@ -74,6 +74,22 @@ def check_release_state(root: Path, role: str | None) -> ReleaseState:
     return ReleaseState(True, "AT_RELEASE_TAG", tag)
 
 
+def require_prod(root: Path) -> None:
+    """계좌 전체를 건드리는 스크립트는 운영 트리에서만 돈다.
+
+    개발 트리는 운영과 모의계좌를 공유한다. 여기서 전량 청산 같은 계좌 단위
+    작업을 돌리면 운영이 들고 있는 포지션까지 팔린다. 역할이 prod가 아니면
+    (역할이 없어도 마찬가지로) 즉시 거부한다 — fail-closed.
+    """
+    role = read_role(root)
+    if role != ROLE_PROD:
+        print(
+            f"[거부] 계좌 전체를 건드리는 작업은 운영 트리에서만 실행합니다. "
+            f"현재 역할: {role or '(.stock-role 없음)'}"
+        )
+        raise SystemExit(2)
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python -m src.utils.tree_role --check` — 통과 0, 실패 1."""
     root = Path(__file__).resolve().parents[2]

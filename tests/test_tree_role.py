@@ -3,6 +3,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from src.utils import tree_role
 
 
@@ -85,3 +87,22 @@ def test_prod_refuses_an_untagged_commit(tmp_path):
     state = tree_role.check_release_state(tmp_path, "prod")
     assert state.ok is False
     assert state.reason == "NOT_AT_RELEASE_TAG"
+
+
+def test_require_prod_refuses_when_role_is_missing(tmp_path):
+    """계좌 전체 청산은 운영 트리에서만 — 역할 파일이 없으면 거부."""
+    with pytest.raises(SystemExit) as excinfo:
+        tree_role.require_prod(tmp_path)
+    assert excinfo.value.code == 2
+
+
+def test_require_prod_refuses_dev_tree(tmp_path):
+    _role(tmp_path, "dev")
+    with pytest.raises(SystemExit) as excinfo:
+        tree_role.require_prod(tmp_path)
+    assert excinfo.value.code == 2
+
+
+def test_require_prod_allows_prod_tree(tmp_path):
+    _role(tmp_path, "prod")
+    tree_role.require_prod(tmp_path)  # 예외가 나지 않으면 통과
