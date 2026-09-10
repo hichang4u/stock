@@ -156,7 +156,7 @@ def build_context(
     sma_rows = indicators.sma(warmed_bars, period)[offset:]
 
     run_high: list[float] = []
-    vwap: list[float] = []
+    vwap: list[float | None] = []  # 거래량 0인 선두 봉은 VWAP이 없다
     cum_pv = 0.0
     cum_v = 0.0
     highest = float("-inf")

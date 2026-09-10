@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import gzip
 import hashlib
 import json
@@ -21,6 +22,7 @@ from collections import deque
 from collections.abc import Awaitable
 from datetime import datetime
 from pathlib import Path
+from typing import TextIO
 from zoneinfo import ZoneInfo
 
 from src import db
@@ -108,7 +110,8 @@ class TickCapture:
         self._initial_task: asyncio.Task | None = None
         self._resume_task: asyncio.Task | None = None
         self._resumed = False
-        self._fh: dict[str, gzip.GzipFile] = {}
+        # gzip.open(..., "at")은 GzipFile을 감싼 텍스트 핸들을 낸다.
+        self._fh: dict[str, TextIO] = {}
         self._seq = 0
         self._rows_written = 0
         self._write_errors = 0
@@ -296,7 +299,7 @@ class TickCapture:
                     error=repr(exc),
                 )
 
-    def _fh_for(self, hour: str) -> gzip.GzipFile:
+    def _fh_for(self, hour: str) -> TextIO:
         fh = self._fh.get(hour)
         if fh is None:
             path = self.dir / f"{self.ticker}.{hour}.jsonl.gz"
@@ -662,7 +665,7 @@ def _finalize_detached(cap: TickCapture, reason: str) -> None:
     _switch_finalizers.add(task)
     _pending_switch_by_ticker[cap.ticker] = task
     task.add_done_callback(_switch_finalizers.discard)
-    task.add_done_callback(lambda t, tk=cap.ticker: _forget_pending_switch(tk, t))
+    task.add_done_callback(functools.partial(_forget_pending_switch, cap.ticker))
 
 
 def _forget_pending_switch(ticker: str, task: asyncio.Task) -> None:

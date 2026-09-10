@@ -88,7 +88,7 @@ def test_the_bars_module_does_not_import_db():
         # node.module 자체를 넣는 것이 핵심이다 — 그래야
         # `from src.db import open_trade`가 "src.db"를 직접 내놓는다.
         tree = ast.parse(source)
-        modules = set()
+        modules: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 modules.update(alias.name for alias in node.names)

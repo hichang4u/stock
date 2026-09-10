@@ -199,7 +199,7 @@ def sign_stability(
     return signs
 
 
-def gate_report(axis_results: dict[str, dict], a_daily: dict[str, float]) -> dict:
+def gate_report(axis_results: dict[str, dict], a_daily: dict[str, float | None]) -> dict:
     """스펙 §5의 관문을 그대로 적용한다. 통과·탈락과 사유를 함께 남긴다."""
     report = {}
     for key, data in axis_results.items():
@@ -241,7 +241,7 @@ def gate_report(axis_results: dict[str, dict], a_daily: dict[str, float]) -> dic
             "win_rate": (sum(1 for p in pcts if p > 0) / len(pcts)) if pcts else None,
             "ci_low": lo,
             "ci_high": hi,
-            "ci_includes_zero": (lo is not None and lo <= 0 <= hi),
+            "ci_includes_zero": (lo is not None and hi is not None and lo <= 0 <= hi),
             "corr_with_a": correlation(paired_b, paired_a),
             "a_missing_day_coverage": covered,
             "gate1_pass": gate1_pass,
@@ -283,9 +283,10 @@ def load_warmup(
     out: list[dict] = []
     cursor = date
     for _ in range(days):
-        cursor = previous_trading_date(dates, cursor)
-        if cursor is None:
+        previous = previous_trading_date(dates, cursor)
+        if previous is None:
             break
+        cursor = previous
         cached = read_cached_bars(cursor, ticker, cache_dir)
         if not cached:
             break

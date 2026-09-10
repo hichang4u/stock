@@ -45,12 +45,20 @@ def build_config(rule_key: str, params: dict) -> dict:
 
 
 async def main_async(rule_key: str) -> int:
+    import os
+
     from src import db
 
-    await db.connect()
-    config_id = await db.upsert_strategy_config(
-        build_config(rule_key, {}), kind="EXPLORATORY"
-    )
+    # db.connect()는 존재한 적이 없다 — 열기는 db.init(경로)이고, 경로는
+    # real_readiness.py와 같은 DB_DIR 규약을 따른다.
+    db_path = os.path.join(os.getenv("DB_DIR", "data/db"), "trading.db")
+    await db.init(db_path)
+    try:
+        config_id = await db.upsert_strategy_config(
+            build_config(rule_key, {}), kind="EXPLORATORY"
+        )
+    finally:
+        await db.close()
     print(f"config_id = {config_id}")
     return 0
 

@@ -67,7 +67,8 @@ async def _clean_paper_trade_count(fingerprint: str) -> int:
         (fingerprint,),
     ) as cur:
         row = await cur.fetchone()
-    return int(row["cnt"] or 0)
+    # COUNT는 늘 한 행을 낸다. 방어적으로만 좁힌다.
+    return int(row["cnt"] or 0) if row is not None else 0
 
 
 async def calculate() -> dict[str, Any]:
@@ -172,7 +173,7 @@ async def calculate() -> dict[str, Any]:
         ),
     ]
 
-    groups = [
+    groups: list[dict[str, Any]] = [
         {
             "key": "code_safety",
             "label": "주문 안전성",

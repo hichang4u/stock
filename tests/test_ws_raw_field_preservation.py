@@ -35,10 +35,18 @@ def _cnt_frame(*, ticker="005930", hms="091015", price="10300", vol="7",
 # ── 계층 1: 파서 ─────────────────────────────────────────────────────
 
 
+def _parse_one(frame: str) -> dict:
+    """_parse_tick은 dict | None이다. 테스트 프레임은 늘 파싱되므로 여기서 좁힌다."""
+    tick = kis_ws._parse_tick(frame)
+    assert tick is not None
+    return tick
+
+
+
 def test_parse_tick_preserves_every_raw_field() -> None:
     """해석하지 않은 필드도 순서 그대로 남아야 한다."""
     tail = ["101", "202", "1.23", "5"]
-    tick = kis_ws._parse_tick(_cnt_frame(extra=tail))
+    tick = _parse_one(_cnt_frame(extra=tail))
     assert tick["raw"][:13] == ["005930", "091015", "10300", "", "", "", "",
                                 "", "", "", "", "", "7"]
     assert tick["raw"][13:] == tail
@@ -46,15 +54,15 @@ def test_parse_tick_preserves_every_raw_field() -> None:
 
 def test_parse_tick_raw_is_not_shared_with_caller_mutation() -> None:
     """호출부가 raw를 바꿔도 다음 파싱에 영향이 없어야 한다."""
-    a = kis_ws._parse_tick(_cnt_frame())
+    a = _parse_one(_cnt_frame())
     a["raw"].append("MUTATED")
-    b = kis_ws._parse_tick(_cnt_frame())
+    b = _parse_one(_cnt_frame())
     assert "MUTATED" not in b["raw"]
 
 
 def test_parse_tick_keeps_existing_interpreted_fields() -> None:
     """원시 보존이 기존 해석 필드를 밀어내면 안 된다."""
-    tick = kis_ws._parse_tick(_cnt_frame(price="10300", vol="7"))
+    tick = _parse_one(_cnt_frame(price="10300", vol="7"))
     assert tick["price"] == 10300.0
     assert tick["qty"] == 7
     assert tick["ticker"] == "005930"
@@ -124,6 +132,7 @@ async def test_schema_version_bumped(mem, tmp_path) -> None:
     cap.start()
     await cap.finalize("COMPLETE", reached_expected_close=True)
     m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m is not None
     assert m["schema_version"] == tc.SCHEMA_VERSION
 
 
@@ -143,7 +152,7 @@ async def test_f4_forwards_raw_from_ws_tick_to_capture(monkeypatch) -> None:
                         lambda: type("S", (), {"position_status": "CLOSED",
                                                "target_ticker": "005930"})())
 
-    tick = kis_ws._parse_tick(_cnt_frame(extra=["A", "B"]))
+    tick = _parse_one(_cnt_frame(extra=["A", "B"]))
     await f4_tracking._handle_price_tick(
         10300.0, "005930", f4_tracking.SpikeFilter(),
         source="ws", tick_meta=tick,

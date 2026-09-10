@@ -1,6 +1,7 @@
 import json
 from datetime import datetime as real_datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1075,14 +1076,13 @@ def _write_shadow_day(
             "quality": {"ok": True, "reason": "COMPLETE"},
         }
     )
-    records.append(
-        {
-            "event": "PAPER_FAST_SHADOW_COMPARE",
-            "ts": f"{ts}+09:00",
-            "rank1_match": rank1_match,
-            "top3_overlap_count": 1,
-        }
-    )
+    compare: dict[str, Any] = {
+        "event": "PAPER_FAST_SHADOW_COMPARE",
+        "ts": f"{ts}+09:00",
+        "rank1_match": rank1_match,
+        "top3_overlap_count": 1,
+    }
+    records.append(compare)
     (directory / f"{date}.jsonl").write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
         encoding="utf-8",

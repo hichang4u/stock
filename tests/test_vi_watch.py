@@ -59,7 +59,9 @@ def _watch(check_vi, clock, now=DETECT_AT, **kwargs) -> ViWatch:
     holder = {"now": now}
     w = ViWatch(TICKER, check_vi, freeze_sec=10.0, cooldown_sec=60.0,
                 monotonic=clock, now_fn=lambda: holder["now"], **kwargs)
-    w._test_now = holder  # 테스트에서 벽시계 주입용
+    # ViWatch에 없는 속성이다 — 테스트가 벽시계를 흔들려고 얹는 것이라
+    # 타입 검사에는 보이지 않는다.
+    w._test_now = holder  # type: ignore[attr-defined]
     return w
 
 

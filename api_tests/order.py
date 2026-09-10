@@ -10,6 +10,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import api_tests._helper as h
@@ -36,9 +37,14 @@ async def _place_order(
 
     tr_id = _BUY_TR[mode] if side == "BUY" else _SELL_TR[mode]
     is_buy = side == "BUY"
-    if is_buy and (limit_price is None or limit_price <= 0):
-        raise ValueError("REAL smoke BUY requires a positive F3-capped limit price")
-    post_kwargs = {
+    if is_buy:
+        if limit_price is None or limit_price <= 0:
+            raise ValueError("REAL smoke BUY requires a positive F3-capped limit price")
+        ord_unpr = str(int(limit_price))
+    else:
+        ord_unpr = "0"
+    # send_guard가 콜러블이라 bool 전용 dict로 추론되면 안 된다.
+    post_kwargs: dict[str, Any] = {
         "allow_real_smoke_buy": mode == "REAL" and is_buy and allow_real_smoke_buy,
     }
     if is_buy:
@@ -54,7 +60,7 @@ async def _place_order(
             "PDNO":         TICKER,
             "ORD_DVSN":    "00" if is_buy else "01",
             "ORD_QTY":     str(qty),
-            "ORD_UNPR":    str(int(limit_price)) if is_buy else "0",
+            "ORD_UNPR":    ord_unpr,
         },
         **post_kwargs,
     )

@@ -28,9 +28,9 @@ from src.utils.logger import log
 KST = ZoneInfo("Asia/Seoul")
 
 
-def _deadline(seconds: int = 30) -> tuple[int, int, int]:
-    dl = datetime.now(KST) + timedelta(seconds=seconds)
-    return dl.hour, dl.minute, dl.second
+def _deadline(seconds: int = 30) -> datetime:
+    """_poll_fill이 요구하는 절대 마감. (시,분,초) 튜플을 주면 비교에서 터진다."""
+    return datetime.now(KST) + timedelta(seconds=seconds)
 
 
 def _smoke_buy_limit_or_reason(

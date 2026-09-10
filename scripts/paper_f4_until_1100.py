@@ -33,9 +33,9 @@ def now_kst() -> datetime:
     return datetime.now(KST)
 
 
-def deadline_after(seconds: int) -> tuple[int, int, int]:
-    d = now_kst() + timedelta(seconds=seconds)
-    return d.hour, d.minute, d.second
+def deadline_after(seconds: int) -> datetime:
+    """_poll_fill이 요구하는 절대 마감. (시,분,초) 튜플을 주면 비교에서 터진다."""
+    return now_kst() + timedelta(seconds=seconds)
 
 
 def seconds_until_1100() -> float:
@@ -120,7 +120,7 @@ async def main() -> None:
         f"psbl_msg={psbl_resp.get('msg_cd')} seconds_until_1100={remain:.1f}",
         flush=True,
     )
-    if qty <= 0:
+    if qty <= 0 or not price:
         raise SystemExit("NO_BUY_QTY")
 
     quiet_sec = getattr(f3_entry, "F3_PRE_ORDER_QUIET_SEC", 1.5)
@@ -128,7 +128,10 @@ async def main() -> None:
         print(f"PRE_ORDER_WAIT seconds={quiet_sec}", flush=True)
         await asyncio.sleep(quiet_sec)
 
-    buy_resp = await f3_entry._send_buy(TICKER, qty, mode)
+    # _send_buy는 양수 지정가가 필수다. 진입 경로와 같은 슬리피지를 현재가에
+    # 얹어 체결되는 지정가를 만든다 — 이 스크립트의 목적이 체결 뒤 F4 추적이다.
+    limit_price = f3_entry._floor_to_tick(price * (1 + f3_entry.F3_ASK_SLIPPAGE_RATIO))
+    buy_resp = await f3_entry._send_buy(TICKER, qty, mode, limit_price=limit_price)
     buy_id = buy_resp.get("output", {}).get("ODNO", "")
     buy_org = buy_resp.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")
     print(

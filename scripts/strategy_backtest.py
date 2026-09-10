@@ -32,6 +32,7 @@ import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -325,7 +326,7 @@ def simulate_day(
 ) -> dict:
     """정책 하나로 하루를 돌린다. 진입 못 하면 ``entered=False``."""
     ranked = rank(universe, p)
-    attempts = []
+    attempts: list[dict[str, Any]] = []
     for candidate in ranked[: max(1, p.depth)]:
         ticker = str(candidate.get("ticker") or "")
         prev_close = float(candidate.get("prev_close") or 0.0)

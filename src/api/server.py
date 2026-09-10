@@ -349,7 +349,7 @@ def _summary_with_trade_anchor(summary: dict, logs: list[dict], current_state=No
         return summary
 
     candidates = list(summary.get("candidates") or [])
-    matched = next((c for c in candidates if str(c.get("ticker")) == str(ticker)), {})
+    matched: dict = next((c for c in candidates if str(c.get("ticker")) == str(ticker)), {})
     selected = {**matched, "ticker": ticker}
     if name or matched.get("name"):
         selected["name"] = name or matched.get("name")
@@ -436,7 +436,7 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
             if f2_event
             else None,
             "gap_pct": (
-                (float(f2_event.get("gap_pct")) / 100)
+                (float(f2_event["gap_pct"]) / 100)
                 if f2_event and f2_event.get("gap_pct") is not None
                 else None
             ),
@@ -478,7 +478,7 @@ def _selection_process_from_logs(summary: dict, logs: list[dict]) -> list[dict]:
         "GAP_RECHECK_UNAVAILABLE": "차단",
         "BUYABLE_QTY_QUERY_FAILED": "차단",
         "BUYABLE_QTY_ZERO": "차단",
-    }.get(f3_event.get("event") if f3_event else None, "대기")
+    }.get(str(f3_event.get("event") or "") if f3_event else "", "대기")
     f3_ticker = f3_event.get("ticker") if f3_event else None
     steps.append(
         {
@@ -1030,7 +1030,8 @@ def _bar_gaps(rows: list) -> list[dict]:
             previous_row = None
             previous_minute = None
             continue
-        if previous_minute is not None:
+        # 둘은 같이 세팅되고 같이 지워진다. 함께 좁혀야 타입이 따라온다.
+        if previous_minute is not None and previous_row is not None:
             missing = minute - previous_minute - 1
             if missing > 0:
                 close = previous_row.get("close")
@@ -1188,7 +1189,9 @@ async def api_stats(track: str = "A") -> JSONResponse:
                FROM trades WHERE status='CLOSED' AND track=?""",
             (track,),
         ) as cur:
-            agg = dict(await cur.fetchone())
+            # 집계 SELECT는 늘 한 행을 낸다 — 빈 테이블이면 값이 NULL인 행이다.
+            agg_row = await cur.fetchone()
+            agg = dict(agg_row) if agg_row is not None else {}
 
         # ????????????????????
         async with conn.execute(

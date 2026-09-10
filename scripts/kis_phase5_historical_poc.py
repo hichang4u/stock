@@ -16,6 +16,7 @@ import sys
 from collections import Counter
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -282,7 +283,7 @@ async def compare_kis_daily(samples: list[tuple[str, str, dict]]) -> dict:
         if not await auth.load_or_refresh():
             raise PocStop("AUTH_FAILED")
 
-        comparisons = []
+        comparisons: list[dict[str, Any]] = []
         for compact_date, ticker, snapshot in samples:
             target = datetime.strptime(compact_date, "%Y%m%d")
             response = await kis_rest.get(

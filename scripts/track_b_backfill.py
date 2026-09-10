@@ -124,7 +124,9 @@ async def fetch_session_bars(
             seen.add(bar["time"])
             bars.append(bar)
         earliest = next_cursor(fresh)
-        if earliest <= SESSION_START:
+        # fresh는 위 break가 보장하므로 None이 될 수 없지만, next_cursor의
+        # 시그니처가 Optional이라 여기서 좁혀 둔다.
+        if earliest is None or earliest <= SESSION_START:
             break
         cursor = earliest
 
@@ -156,9 +158,10 @@ def needed_pairs(
         for date in list(needed):
             cursor = date
             for _ in range(warmup_days):
-                cursor = previous_trading_date(dates, cursor)
-                if cursor is None:
+                previous = previous_trading_date(dates, cursor)
+                if previous is None:
                     break
+                cursor = previous
                 needed.setdefault(cursor, set()).update(needed[date])
     return needed
 
@@ -169,7 +172,9 @@ def is_session_complete(bars: list[dict] | None) -> bool:
     봉 수가 아니라 개장~마감을 덮었는지로 본다 — 거래가 뜸한 종목은 완전한
     하루도 265봉이라, 개수로 자르면 그런 쌍을 매번 다시 받는다.
     """
-    return bool(bars) and warmup.covers_session(bars)
+    if not bars:
+        return False
+    return warmup.covers_session(bars)
 
 
 async def backfill(

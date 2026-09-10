@@ -174,7 +174,8 @@ def completion_evidence(
         if str(data.get("selector_version")) not in KNOWN_SELECTOR_VERSIONS:
             return False, "SIDECAR_INVALID"
         try:
-            if int(data.get("count")) != _row_count(snapshot_path):
+            count = data.get("count")
+            if count is None or int(count) != _row_count(snapshot_path):
                 return False, "SIDECAR_INVALID"
         except (TypeError, ValueError):
             return False, "SIDECAR_INVALID"

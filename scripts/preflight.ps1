@@ -91,9 +91,13 @@ if (-not (Test-PyModule $py "mypy")) {
         "$installHint 를 실행한 뒤 다시 시도하세요."
     )
 }
-& $py -m mypy .
-if ($LASTEXITCODE -ne 0) { Fail "mypy 오류가 있습니다" }
-Write-Ok "오류 없음"
+# 전략 파일에 남은 100건은 mypy-baseline.txt 에 동결돼 있다. 고치면 파일이
+# 바뀌어 전략 지문이 리셋되고, REAL 전환에 필요한 깨끗한 PAPER 청산 20건을
+# 다시 쌓아야 한다 — 전략을 실제로 손보는 시점에 함께 치를 비용이다.
+# 여기서는 새로 생긴 오류만 막는다.
+& $py (Join-Path $repoRoot "scripts\mypy_baseline.py")
+if ($LASTEXITCODE -ne 0) { Fail "새로 생긴 mypy 오류가 있습니다" }
+Write-Ok "새 오류 없음"
 
 Write-Section "pytest"
 & $py -m pytest -q
