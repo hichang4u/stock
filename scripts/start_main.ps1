@@ -2,7 +2,7 @@
 .SYNOPSIS
     stock.bat이 호출하는 수동 실행 런처.
 .DESCRIPTION
-    사전 점검 7단계를 수행한 뒤 main.py를 포그라운드로 실행하고,
+    사전 점검 8단계를 수행한 뒤 main.py를 포그라운드로 실행하고,
     화면과 data\logs\launcher_*.log에 동시에 출력한다.
 
     이 스크립트는 실행 중인 프로세스를 종료하지 않는다. 재시작은
@@ -253,6 +253,19 @@ if ($isWeekend) {
     Write-Host "  오늘 매매 시간(15:15)이 지났습니다." -ForegroundColor Yellow
 }
 Write-Info "공휴일 여부는 확인하지 않습니다. 휴장일이면 봇이 스스로 판단합니다."
+
+# 8. 트리 역할과 릴리스 상태
+Write-Section "8. 트리 역할과 릴리스 상태"
+& $venvPython -m src.utils.tree_role --check
+if ($LASTEXITCODE -ne 0) {
+    Fail "이 트리는 기동할 수 없는 상태입니다" @(
+        "운영 트리라면 릴리스 태그에 있고 워킹트리가 깨끗해야 합니다.",
+        "  현재 상태 확인:  .venv\Scripts\python.exe -m src.utils.tree_role --check",
+        "  승격:            scripts\promote.ps1 -Tag <릴리스태그>",
+        "개발 트리라면 .stock-role 파일에 dev 를 넣으세요."
+    )
+}
+Write-Ok "역할·릴리스 상태 확인됨"
 
 if ($CheckOnly) {
     Write-Host ""
