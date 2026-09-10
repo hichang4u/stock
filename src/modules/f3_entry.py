@@ -3143,6 +3143,38 @@ def _fast_recheck_rows(
     return rows
 
 
+async def _held_tickers_to_exclude() -> set[str]:
+    """계좌에 이미 보유 중인 종목. 개발 트리에서만 채워진다.
+
+    운영과 개발이 모의계좌를 공유할 때(설계 6절), 같은 종목을 들면 먼저
+    청산하는 쪽이 상대 물량까지 판다 — F5가 계좌 전체 hldg_qty로 수량을
+    정하기 때문이다. 개발이 다음 순위로 내려가 충돌 자체를 없앤다.
+
+    조회가 실패하면 빈 집합을 낸다. 여기서 fail-closed 하면 개발 트리가
+    아무것도 테스트하지 못하는데, 실패의 대가는 종목 중복뿐이고 그 손해는
+    개발 몫(계좌의 30%)에 한정된다.
+    """
+    if os.getenv("DEV_EXCLUDE_HELD_TICKERS", "0") != "1":
+        return set()
+    try:
+        resp = await kis_rest.get(
+            "/uapi/domestic-stock/v1/trading/inquire-balance",
+            tr_id=_BAL_TR[os.getenv("KIS_MODE", "PAPER")],
+            params=kis_rest.balance_inquiry_params(),
+        )
+    except Exception as exc:  # noqa: BLE001 — 조회 실패가 진입을 막지 않는다
+        log("DEV_HELD_QUERY_FAILED", level="WARN", error=repr(exc))
+        return set()
+    held = {
+        str(row.get("pdno") or "")
+        for row in (resp.get("output1") or [])
+        if str(row.get("pdno") or "") and int(float(row.get("hldg_qty") or 0)) > 0
+    }
+    if held:
+        log("DEV_HELD_TICKERS_EXCLUDED", level="INFO", tickers=sorted(held))
+    return held
+
+
 async def _rank_final_entry_candidates(
     s: state.State,
     exclude_tickers: set[str] | None = None,
@@ -3151,7 +3183,7 @@ async def _rank_final_entry_candidates(
     candidate_by_ticker = {
         c.get("ticker"): c for c in candidates if isinstance(c, dict) and c.get("ticker")
     }
-    exclude_tickers = exclude_tickers or set()
+    exclude_tickers = set(exclude_tickers or set()) | await _held_tickers_to_exclude()
     tickers = [ticker for ticker in _entry_candidate_tickers(s) if ticker not in exclude_tickers]
     valid: list[dict] = []
     blocked_reasons: list[str] = []
