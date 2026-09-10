@@ -130,7 +130,11 @@ async def fetch_daily_minute_bars(
     budget: kis_rest.CallBudget,
     hour_cursor: str = "093000",
 ) -> dict:
-    """일별 분봉 한 페이지. 과거 관측일 소급용이며 가용성은 미검증이다."""
+    """일별 분봉 한 페이지 — 과거 관측일 소급용.
+
+    2026-09-11 실측(005930): 343일 전까지 정상 응답, 435일 전은 0봉. 한 종목
+    하루는 커서를 앞으로 밀며 4호출이면 09:00~15:30 전 구간이 덮인다.
+    """
     return await kis_rest.get(
         DAILY_MINUTE_PATH,
         tr_id=DAILY_MINUTE_TR,

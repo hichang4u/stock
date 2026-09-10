@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from datetime import datetime, time
@@ -134,31 +135,62 @@ async def fetch_session_bars(
     return bars
 
 
+def load_restored_universes(path: Path) -> dict[str, list[str]]:
+    """replay_universe.py 산출물 → 날짜별 순위 순서 종목 목록.
+
+    rank 필드를 신뢰하지 않고 명시적으로 정렬한다. 파일을 손으로 고쳤을 때
+    순서가 조용히 뒤바뀌면 어느 종목을 본 것인지 알 수 없게 된다.
+    """
+    document = json.loads(Path(path).read_text(encoding="utf-8"))
+    days: dict[str, list[str]] = {}
+    for date, rows in (document.get("days") or {}).items():
+        ordered = sorted(rows, key=lambda r: int(r["rank"]))
+        tickers = [str(r["ticker"]) for r in ordered if r.get("ticker")]
+        if tickers:
+            days[str(date)] = tickers
+    return days
+
+
 def needed_pairs(
-    depth: int = 5, snapshot_dir: Path | None = None, warmup_days: int = 0
+    depth: int = 5,
+    snapshot_dir: Path | None = None,
+    warmup_days: int = 0,
+    universes_path: Path | None = None,
 ) -> dict[str, set[str]]:
-    """날짜별 F1 랭크 1~depth 종목. 운영 랭킹 함수를 그대로 쓴다.
+    """날짜별 F1 랭크 1~depth 종목.
+
+    ``universes_path`` 가 있으면 복원된 유니버스를 쓴다. 그 파일에는 순위를
+    다시 매길 속성이 없으므로(재생 스펙 §2.3) 기록된 순서를 그대로 자른다.
+    없으면 f1_snapshots 를 읽어 운영 랭킹 함수를 돌린다.
 
     ``warmup_days``가 0보다 크면 각 종목의 전 거래일 쌍을 함께 대상에 넣는다.
     지표 워밍업이 그 봉을 필요로 하는데, 그 종목이 그날 F1 상위에 없었으면
     캐시에 없기 때문이다(스펙 §5.1).
     """
-    universes = (
-        load_universes(snapshot_dir) if snapshot_dir is not None else load_universes()
-    )
     needed: dict[str, set[str]] = {}
-    for date, rows in universes.items():
-        ranked = f1_selector.rank_candidates(rows)[:depth]
-        tickers = {str(r["ticker"]) for r in ranked if r.get("ticker")}
-        if tickers:
-            needed[date] = tickers
+    if universes_path is not None:
+        restored = load_restored_universes(universes_path)
+        all_dates = sorted(restored)
+        for date, tickers in restored.items():
+            picked = set(tickers[:depth])
+            if picked:
+                needed[date] = picked
+    else:
+        universes = (
+            load_universes(snapshot_dir) if snapshot_dir is not None else load_universes()
+        )
+        all_dates = sorted(universes)
+        for date, rows in universes.items():
+            ranked = f1_selector.rank_candidates(rows)[:depth]
+            tickers_set = {str(r["ticker"]) for r in ranked if r.get("ticker")}
+            if tickers_set:
+                needed[date] = tickers_set
 
     if warmup_days > 0:
-        dates = sorted(universes)
         for date in list(needed):
             cursor = date
             for _ in range(warmup_days):
-                previous = previous_trading_date(dates, cursor)
+                previous = previous_trading_date(all_dates, cursor)
                 if previous is None:
                     break
                 cursor = previous
@@ -237,11 +269,18 @@ async def main_async(argv: list[str] | None = None) -> int:
         "--warmup-days", type=int, default=1,
         help="지표 워밍업에 필요한 전 거래일도 함께 채운다. 0이면 채우지 않는다",
     )
+    parser.add_argument(
+        "--universes", type=Path, default=None,
+        help="replay_universe.py 산출물. 주면 f1_snapshots 대신 이것을 쓴다",
+    )
     args = parser.parse_args(argv)
 
-    needed = needed_pairs(args.depth, warmup_days=args.warmup_days)
+    needed = needed_pairs(
+        args.depth, warmup_days=args.warmup_days, universes_path=args.universes
+    )
+    source = str(args.universes) if args.universes else "data/f1_snapshots"
     pairs = sum(len(v) for v in needed.values())
-    print(f"대상 {len(needed)}거래일 / {pairs}쌍 (랭크 1~{args.depth})")
+    print(f"대상 {len(needed)}거래일 / {pairs}쌍 (랭크 1~{args.depth}, 출처 {source})")
     if args.dry_run:
         return 0
 

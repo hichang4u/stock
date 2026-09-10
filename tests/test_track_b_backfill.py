@@ -281,3 +281,43 @@ def test_needed_pairs_warmup_does_not_invent_days_outside_the_universe(tmp_path)
                                           warmup_days=1)
 
     assert set(pairs) == {"20260814"}
+
+
+def test_needed_pairs_reads_a_restored_universe_file(tmp_path):
+    """복원된 유니버스에는 순위를 다시 매길 속성이 없다. 순서를 그대로 쓴다."""
+    path = tmp_path / "universes.json"
+    path.write_text(
+        json.dumps({
+            "days": {
+                "20260910": [
+                    {"rank": 1, "ticker": "111111"},
+                    {"rank": 2, "ticker": "222222"},
+                    {"rank": 3, "ticker": "333333"},
+                ]
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    needed = needed_pairs(depth=2, universes_path=path)
+
+    assert needed == {"20260910": {"111111", "222222"}}
+
+
+def test_needed_pairs_restored_universe_still_adds_warmup_days(tmp_path):
+    """워밍업은 입력 출처와 무관하게 적용된다."""
+    path = tmp_path / "universes.json"
+    path.write_text(
+        json.dumps({
+            "days": {
+                "20260909": [{"rank": 1, "ticker": "999999"}],
+                "20260910": [{"rank": 1, "ticker": "111111"}],
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    needed = needed_pairs(depth=5, universes_path=path, warmup_days=1)
+
+    assert needed["20260910"] == {"111111"}
+    assert needed["20260909"] == {"999999", "111111"}
