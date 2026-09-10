@@ -68,10 +68,25 @@ def check_release_state(root: Path, role: str | None) -> ReleaseState:
         first = dirty.splitlines()[0]
         return ReleaseState(False, "TREE_DIRTY", f"수정된 파일이 있다: {first}")
 
-    code, tag = _git(root, "describe", "--tags", "--exact-match")
-    if code != 0 or not tag.startswith(RELEASE_TAG_PREFIX):
-        return ReleaseState(False, "NOT_AT_RELEASE_TAG", tag or "태그 없음")
-    return ReleaseState(True, "AT_RELEASE_TAG", tag)
+    # 릴리스 커밋에는 release/* 태그 외에 다른 태그(개발 트리에서 만들어
+    # push된 메모용 태그 등)가 동시에 붙을 수 있다. `describe --exact-match`
+    # 는 그중 아무거나 하나를 골라 반환하고 release/*를 우대하지 않으므로,
+    # 엉뚱한 태그가 먼저 걸리면 코드는 그대로인데도 운영이 영구히 거부당한다
+    # (원인도 그 엉뚱한 태그 이름으로 찍혀 HEAD가 움직인 것처럼 보인다).
+    # HEAD를 가리키는 태그를 전부 받아 release/*가 있는지 직접 확인한다.
+    #
+    # git 명령 자체의 실패(원인: 저장소 손상, git 없음 등)와 "release 태그가
+    # 없다"는 서로 다른 사유다. 둘을 같은 reason으로 뭉개면 08:00 재기동
+    # 로그의 한 줄만 보는 운영자가 원인을 구분할 수 없다.
+    code, tags_out = _git(root, "tag", "--points-at", "HEAD")
+    if code != 0:
+        return ReleaseState(False, "GIT_FAILED", tags_out)
+    tags_here = [t for t in tags_out.splitlines() if t]
+    release_tags = [t for t in tags_here if t.startswith(RELEASE_TAG_PREFIX)]
+    if release_tags:
+        return ReleaseState(True, "AT_RELEASE_TAG", release_tags[0])
+    detail = tags_here[0] if tags_here else "태그 없음"
+    return ReleaseState(False, "NOT_AT_RELEASE_TAG", detail)
 
 
 def require_prod(root: Path) -> None:
