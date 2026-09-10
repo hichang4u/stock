@@ -335,3 +335,63 @@ def test_sign_stability_uses_the_restored_order_too():
         )
 
     ranker.assert_not_called()
+
+
+def _write_cached_bars(cache_dir, date: str, ticker: str) -> None:
+    """load_bars_for 가 09:00~14:00를 덮은 것으로 보도록 최소 두 봉을 쓴다."""
+    rows = [
+        {"date": date, "time": "090000", "open": 1.0, "high": 1.0,
+         "low": 1.0, "close": 1.0, "volume": 1.0},
+        {"date": date, "time": "140000", "open": 1.0, "high": 1.0,
+         "low": 1.0, "close": 1.0, "volume": 1.0},
+    ]
+    (cache_dir / f"{date}_{ticker}.json").write_text(
+        json.dumps(rows), encoding="utf-8"
+    )
+
+
+def test_load_bars_for_uses_the_restored_order_when_universe_is_empty(tmp_path):
+    """복원 경로는 universes[date] 가 비어 있다. ranked_by_date 로 골라야 한다."""
+    from scripts.track_b_backtest import load_bars_for
+
+    _write_cached_bars(tmp_path, "20260910", "111111")
+    _write_cached_bars(tmp_path, "20260910", "222222")
+
+    bars, stats = load_bars_for(
+        {"20260910": []}, cache_dir=tmp_path,
+        ranked_by_date={"20260910": ["111111", "222222"]},
+    )
+
+    assert set(bars["20260910"]) == {"111111", "222222"}
+    assert stats["pairs"] == 2
+    assert stats["missing"] == 0
+
+
+def test_load_bars_for_with_ranked_by_date_skips_the_f1_ranking():
+    """빈 universe 에 rank_candidates([]) 를 돌리면 항상 0건이다. 부르면 안 된다."""
+    from scripts.track_b_backtest import load_bars_for
+
+    with patch("scripts.track_b_backtest.f1_selector.rank_candidates") as ranker:
+        load_bars_for(
+            {"20260910": []},
+            ranked_by_date={"20260910": ["111111"]},
+        )
+
+    ranker.assert_not_called()
+
+
+def test_load_bars_for_restored_path_still_counts_missing_pairs(tmp_path):
+    """캐시가 없는 쌍도 옛 경로처럼 missing 으로 세어야 경고가 계속 뜬다."""
+    from scripts.track_b_backtest import load_bars_for
+
+    _write_cached_bars(tmp_path, "20260910", "111111")
+    # 222222 는 캐시에 없다.
+
+    bars, stats = load_bars_for(
+        {"20260910": []}, cache_dir=tmp_path,
+        ranked_by_date={"20260910": ["111111", "222222"]},
+    )
+
+    assert stats["pairs"] == 2
+    assert stats["missing"] == 1
+    assert set(bars["20260910"]) == {"111111"}

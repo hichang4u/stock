@@ -307,15 +307,23 @@ def load_warmup(
 def load_bars_for(
     universes: dict[str, list[dict]], *, depth: int = DEPTH,
     cache_dir: Path = BAR_CACHE_DIR,
+    ranked_by_date: dict[str, list[str]] | None = None,
 ) -> tuple[dict[str, dict[str, list[dict]]], dict[str, int]]:
-    """캐시에서만 읽는다. 없는 쌍은 세어서 보고한다 — 조용히 빠지면 안 된다."""
+    """캐시에서만 읽는다. 없는 쌍은 세어서 보고한다 — 조용히 빠지면 안 된다.
+
+    ``ranked_by_date``가 있으면 복원된 유니버스(재생 스펙 §2.3)를 쓰는
+    것이므로 순위를 다시 매기지 않고 기록된 순서를 그대로 자른다.
+    """
     bars: dict[str, dict[str, list[dict]]] = {}
     stats = {"pairs": 0, "missing": 0, "partial": 0}
     for date, rows in universes.items():
-        ranked = f1_selector.rank_candidates(rows)[:depth]
+        if ranked_by_date is not None:
+            tickers = [str(t) for t in ranked_by_date.get(date, [])[:depth]]
+        else:
+            ranked = f1_selector.rank_candidates(rows)[:depth]
+            tickers = [str(row.get("ticker") or "") for row in ranked]
         day: dict[str, list[dict]] = {}
-        for row in ranked:
-            ticker = str(row.get("ticker") or "")
+        for ticker in tickers:
             if not ticker:
                 continue
             stats["pairs"] += 1
@@ -390,7 +398,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         ranked_by_date = None
         universes = load_universes()
-    bars, stats = load_bars_for(universes, depth=args.depth)
+    bars, stats = load_bars_for(
+        universes, depth=args.depth, ranked_by_date=ranked_by_date
+    )
     dates = sorted(universes)
     warmup = {
         date: {
