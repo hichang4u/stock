@@ -196,6 +196,11 @@ scripts\promote.ps1 -Tag release/20260911-1 -AcknowledgeFingerprint 833edca5fff4
 - `AUTH_DIR` → 운영의 `data/auth` 공유. 개발은 캐시를 읽기만 하고 **발급하지
   않는다** (`KIS_AUTH_READONLY=1`). 만료되면 조용히 실패하는 대신 "운영 토큰
   만료"를 크게 알린다. 운영이 유일한 발급자다.
+  플래그를 생략하면 `.stock-role`이 기본값을 정한다 — 개발이면 읽기 전용.
+  `.env`에서 빠뜨려도 안전한 쪽으로 기울게 하려는 것이고, 명시된 값은 항상
+  역할을 이긴다(6-5절의 REAL 전환이 이 override를 쓴다). 읽기 전용은 발급
+  (`refresh`), 캐시 쓰기(`_save_cache`), 폐기(`revoke`) 세 가지를 모두 막는다 —
+  폐기는 운영이 쓰는 바로 그 토큰을 KIS에서 죽이기 때문이다.
   **이 공유는 운영도 PAPER일 때만 성립한다** — REAL 토큰은 발급 호스트가 달라
   개발이 쓸 수 없다. 6-5절 참조.
 - `REPLAY_SOURCE_DIR` → 운영의 `data/` (프로브·스냅샷·틱). B가 쓸 재생 원본.

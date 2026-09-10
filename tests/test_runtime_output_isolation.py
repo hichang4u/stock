@@ -30,7 +30,7 @@ def _tree_contains(root: Path, marker: bytes) -> bool:
 
 @pytest.mark.asyncio
 async def test_common_fixture_redirects_all_runtime_outputs(
-    isolate_runtime_output_dirs,
+    isolate_runtime_output_dirs, monkeypatch
 ):
     runtime_dir = Path(isolate_runtime_output_dirs)
     output_dirs = {
@@ -71,6 +71,9 @@ async def test_common_fixture_redirects_all_runtime_outputs(
         state.get().target_name = old_target_name
 
     paper_fast_probe._append_record(marker_text, phase="TEST")
+    # 이 테스트가 보려는 것은 AUTH_DIR 리디렉션이므로 쓰는 구성이어야 한다.
+    # 개발 트리에서 돌면 실제 역할이 dev라 쓰기가 생략된다.
+    monkeypatch.setattr(auth.tree_role, "read_role", lambda root: "prod")
     auth._save_cache(marker_text, "2099-12-31 23:59:59")
     logger.setup(os.environ["LOG_DIR"])
     logger.log(marker_text, level="INFO")

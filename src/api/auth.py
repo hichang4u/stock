@@ -10,9 +10,11 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from src import notifier
+from src.utils import tree_role
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
+_ROOT = Path(__file__).resolve().parents[2]
 _EXPIRY_BUFFER_MIN = 10  # 만료 N분 전 선제 갱신
 
 _token: str = ""
@@ -64,8 +66,30 @@ def _load_cache() -> dict:
     return {}
 
 
+def _auth_is_readonly() -> bool:
+    """개발 트리는 토큰을 발급하지 않는다 — 운영이 유일한 발급자다 (스펙 5절).
+
+    개발의 AUTH_DIR은 운영 디렉터리를 가리킨다. APP_KEY가 하나뿐이라 캐시를
+    나눠 봐야 같은 앱키 재발급이 운영 토큰을 무효화할 수 있으므로, 개발은
+    운영이 발급해 둔 캐시를 읽기만 한다.
+
+    `KIS_AUTH_READONLY`가 명시되면 그 값이 이긴다. 운영이 REAL로 가면 PAPER
+    토큰은 발급 호스트가 달라 개발이 자기 AUTH_DIR에서 직접 발급해야 하므로,
+    끌 수 있어야 한다(스펙 6-5절). 값이 없으면 역할이 기본값을 정한다 —
+    개발이면 읽기 전용. 플래그를 .env에서 빠뜨려도 안전한 쪽으로 기운다.
+    """
+    raw = os.getenv("KIS_AUTH_READONLY", "").strip()
+    if raw:
+        return raw.lower() not in ("0", "false", "no", "off")
+    return tree_role.read_role(_ROOT) == tree_role.ROLE_DEV
+
+
 def _save_cache(token: str, expires_at: str = "") -> None:
-    """원자적 쓰기 (tmp → rename)."""
+    """원자적 쓰기 (tmp → rename). 읽기 전용 트리에서는 건너뛴다."""
+    if _auth_is_readonly():
+        log("TOKEN_CACHE_WRITE_SKIPPED", level="INFO",
+            auth_dir=os.getenv("AUTH_DIR", "data/auth"))
+        return
     p = _cache_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
@@ -94,6 +118,16 @@ async def refresh() -> str:
     실패 시 2초 간격 3회 재시도. 전부 실패 시 CRIT 알림.
     """
     global _token
+    if _auth_is_readonly():
+        # 조용히 실패하면 개발이 왜 안 도는지 알 수 없다. 크게 알린다.
+        log("TOKEN_ISSUE_REFUSED_READONLY", level="CRIT",
+            auth_dir=os.getenv("AUTH_DIR", "data/auth"))
+        await notifier.send(
+            "TOKEN_ISSUE_REFUSED_READONLY", level="CRIT",
+            message="운영 토큰 만료 — 읽기 전용 트리는 발급하지 않는다. 운영을 확인하라",
+        )
+        return ""
+
     base_url = os.getenv("KIS_BASE_URL", "")
     url = f"{base_url}/oauth2/tokenP"
     payload = {
@@ -213,8 +247,16 @@ async def refresh_ws_key() -> str:
 
 
 async def revoke(token: str = "") -> bool:
-    """접근토큰 폐기 [인증-002]. token 생략 시 현재 세션 토큰 폐기."""
+    """접근토큰 폐기 [인증-002]. token 생략 시 현재 세션 토큰 폐기.
+
+    읽기 전용 트리에서는 거부한다. APP_KEY가 하나라 폐기는 운영이 쓰는 바로
+    그 토큰을 KIS에서 죽이고, 운영 캐시 파일까지 지운다.
+    """
     global _token
+    if _auth_is_readonly():
+        log("TOKEN_REVOKE_REFUSED_DEV", level="WARN",
+            reason="읽기 전용 트리는 공유 토큰을 폐기할 수 없다")
+        return False
     target = token or _token
     if not target:
         log("TOKEN_REVOKE_SKIP", level="WARN", reason="no_token")
