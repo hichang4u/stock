@@ -1,6 +1,6 @@
 """트랙 B 규칙 후보 — 순수 함수만 둔다.
 
-진입 축 세 개와 청산 한 벌이 들어 있다. I/O도 상태도 없어서 실시간 신호
+진입 축 다섯 개와 청산 한 벌이 들어 있다. I/O도 상태도 없어서 실시간 신호
 엔진(2단계)과 백테스트가 같은 코드를 탈 수 있다.
 
 청산은 트랙 A와 같다 — 하드스탑 -2.0%, 스텝 트레일링 +2.5%/-2.0%, 15:15.
@@ -297,9 +297,69 @@ def r4_pullback(bars: list[dict], i: int, ctx: dict, params: dict) -> bool:
     return lower_tail >= span * tail_ratio or body <= span * doji_body
 
 
+def r5_pullback_breakout(bars: list[dict], i: int, ctx: dict, params: dict) -> bool:
+    """눌림 뒤 돌파 — R4의 눌림(①지지 도달 ②거래량 급감)에 R1의 돌파를 잇는다.
+
+    R4는 방어 캔들 고가만 넘으면 들어가고, R1은 눌림 없이 고점만 넘으면
+    들어간다. 둘 다 졌다(2026-09-11 스윕). 이 규칙은 "눌렸다가 눌리기 전
+    고점을 되찾는" 사건만 잡는다 — 조건이 교집합이라 진입은 더 늦고 더 드물다.
+    방어 캔들 모양은 보지 않는다: 돌파 자체가 확인이라 중복이고, 조건이 늘수록
+    표본만 준다. 파라미터는 R4 값을 그대로 쓰고 결과를 본 뒤 바꾸지 않는다.
+
+    2026-09-11에 R1~R4 표본이 살아 있는 채로 추가됐으므로 그 표본에서의 결과는
+    체로만 쓴다 (tests/test_track_b_rules.py 의 registry 테스트 참조).
+    """
+    if i < 2:
+        return False
+    confirm = bars[i]
+
+    # 돌파 — 확정 봉 종가가 직전까지의 고점을 넘는다 (R1과 같은 정의).
+    prior_high = ctx["run_high"][i]
+    first_open = bars[0]["open"]
+    if prior_high == float("-inf") or first_open <= 0:
+        return False
+    if confirm["close"] <= prior_high:
+        return False
+
+    # 선행 급등 — 되찾을 만한 고점이었는가.
+    run_up = params.get("pullback_prior_run", DEFAULT_PARAMS["pullback_prior_run"])
+    if prior_high / first_open - 1 < run_up:
+        return False
+
+    # 눌림 구간 — 고점 봉 다음부터 확정 봉 직전까지. 비어 있으면 연속 상승이다.
+    peak = next(k for k in range(i) if bars[k]["high"] == prior_high)
+    pull = range(peak + 1, i)
+    if len(pull) == 0:
+        return False
+
+    # ① 지지 도달 — 눌림 구간 어느 봉의 저가가 SMA 근처까지 내려왔다.
+    touch = params.get("pullback_touch_pct", DEFAULT_PARAMS["pullback_touch_pct"])
+    touched = any(
+        ctx["sma"][k] is not None and bars[k]["low"] <= ctx["sma"][k] * (1 + touch)
+        for k in pull
+    )
+    if not touched:
+        return False
+
+    # ② 거래량 급감 — 돌파 직전 N봉 평균이 고점까지의 직전 N봉(고점 봉 포함, 그만큼
+    #    없으면 있는 만큼) 평균에 비해 말랐다. 고점이 첫 봉인 날이 흔해서 N봉을
+    #    강제하면 09:00 고점 종목이 통째로 빠진다.
+    window = params.get("pullback_vol_window", DEFAULT_PARAMS["pullback_vol_window"])
+    prior_vol = [b["volume"] for b in bars[max(0, peak + 1 - window):peak + 1]]
+    if sum(prior_vol) <= 0:
+        return False
+    dry = params.get("pullback_vol_dry", DEFAULT_PARAMS["pullback_vol_dry"])
+    # 마른 것은 돌파 직전 — 지지 부근 — 의 봉들이어야 한다. 고점부터 전부
+    # 평균하면 긴 횡보가 급감을 가려 버린다.
+    tail = list(pull)[-window:]
+    tail_vol = sum(bars[k]["volume"] for k in tail) / len(tail)
+    return tail_vol <= sum(prior_vol) / len(prior_vol) * dry
+
+
 RULES = {
     "R1": r1_high_reclaim,
     "R2": r2_vwap_reclaim,
     "R3": r3_indicator,
     "R4": r4_pullback,
+    "R5": r5_pullback_breakout,
 }

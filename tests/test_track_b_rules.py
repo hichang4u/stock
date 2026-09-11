@@ -19,6 +19,7 @@ from scripts.track_b_rules import (
     r2_vwap_reclaim,
     r3_indicator,
     r4_pullback,
+    r5_pullback_breakout,
     resolve_exit,
     simulate_exit,
 )
@@ -194,10 +195,12 @@ def test_rules_registry_is_closed_at_four_axes():
     2026-09-03에 소멸했다(`68549c7`). R4는 그 표본에 얹히지 않는다 — 판정은
     백필로 새로 쌓는 표본에서만 하고, 관문은 돌리기 전에 선언한다.
 
-    이 테스트를 다시 고쳐 R5를 넣으려는 사람은 위 조건이 그때도 성립하는지
-    먼저 확인해야 한다. 성립하지 않으면 그것이 바로 그리드 서치다.
+    R5는 위 조건을 **충족하지 못한다** — R1~R4를 판정한 48거래일 표본(2026-07-01
+    ~09-10)이 살아 있는 채로 2026-09-11에 추가됐다. 그래서 R5의 이 표본 결과는
+    판정이 아니라 **체(sieve)** 로만 쓴다: 지면 닫히고, 이기면 H1처럼 사전 등록
+    가설이 되어 등록 이후 표본에서만 판정한다. 관문은 돌리기 전에 선언했다.
     """
-    assert sorted(RULES) == ["R1", "R2", "R3", "R4"]
+    assert sorted(RULES) == ["R1", "R2", "R3", "R4", "R5"]
 
 
 def test_gap_block_suppresses_signals_after_missing_minutes():
@@ -426,3 +429,79 @@ def test_r4_requires_price_to_reach_support():
     )
     ctx = build_context(bars, DEFAULT_PARAMS)
     assert r4_pullback(bars, 23, ctx, DEFAULT_PARAMS) is False
+
+
+# ── R5 눌림목+돌파 ─────────────────────────────────────────────────
+
+def _pullback_breakout_series(*, breakout_close: float = 120.5,
+                              pull_low: float = 99.8,
+                              pull_volume: float = 300.0,
+                              lead_high: float = 120.0,
+                              slope: float = 0.0) -> list[dict]:
+    """급등 봉(고점 120) → 평탄 구간 21봉(SMA20 = 100) → 눌림 5봉(지지 터치,
+    거래량 급감) → 돌파 봉(인덱스 27).
+
+    ``slope`` > 0 이면 평탄 구간이 완만히 오른다 — 평탄한 선은 자기 SMA 위에
+    놓여 항상 "지지 터치"가 되므로, 터치가 없는 경우를 만들려면 SMA가 가격
+    아래로 처지게 해야 한다.
+    """
+    bars = [_ohlcv("093500", open_=100, high=lead_high, low=100,
+                   close=100, volume=1000.0)]
+    for i in range(1, 22):
+        minute = 35 + i
+        px = 100 + slope * i
+        bars.append(_ohlcv(f"{9 + minute // 60:02d}{minute % 60:02d}00",
+                           open_=px, high=px, low=px, close=px, volume=1000.0))
+    base = 100 + slope * 21
+    for k in range(5):
+        minute = 57 + k
+        bars.append(_ohlcv(f"{9 + minute // 60:02d}{minute % 60:02d}00",
+                           open_=base + 0.2, high=base + 0.4,
+                           low=pull_low if k == 2 else base + 0.1,
+                           close=base + 0.2, volume=pull_volume))
+    bars.append(_ohlcv("100200", open_=base + 0.3, high=breakout_close + 0.2,
+                       low=base + 0.2, close=breakout_close, volume=2000.0))
+    return bars
+
+
+def test_r5_fires_when_pullback_then_prior_high_is_broken():
+    bars = _pullback_breakout_series()
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r5_pullback_breakout(bars, 27, ctx, DEFAULT_PARAMS) is True
+    # 눌림 구간 자체에서는 발화하지 않는다 — 돌파 봉을 기다린다.
+    assert r5_pullback_breakout(bars, 26, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r5_requires_close_above_prior_high_not_support_high():
+    """R4와의 차이: 방어 캔들 고가(100.4)를 넘는 것으로는 부족하다."""
+    bars = _pullback_breakout_series(breakout_close=101.0)
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r5_pullback_breakout(bars, 27, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r5_requires_pullback_to_reach_support():
+    """완만히 오르는 선(SMA20 ≈ 106)에서 눌림 저가 110 — 지지에 닿지 않았다."""
+    bars = _pullback_breakout_series(slope=0.5, pull_low=110.0)
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r5_pullback_breakout(bars, 27, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r5_requires_pullback_volume_to_dry_up():
+    bars = _pullback_breakout_series(pull_volume=900.0)
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r5_pullback_breakout(bars, 27, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r5_requires_prior_run_up():
+    """급등이 없었으면 돌파할 고점도 없다 — R1 단독 돌파와 구분한다."""
+    bars = _pullback_breakout_series(lead_high=101.0, breakout_close=101.5)
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r5_pullback_breakout(bars, 27, ctx, DEFAULT_PARAMS) is False
+
+
+def test_r5_does_not_fire_without_a_pullback_between_peak_and_breakout():
+    """고점 바로 다음 봉이 고점을 넘는 것은 눌림목이 아니라 연속 상승이다."""
+    bars = [_ohlcv("093500", open_=100, high=120, low=100, close=100, volume=1000.0),
+            _ohlcv("093600", open_=100, high=121, low=100, close=120.5, volume=1000.0)]
+    ctx = build_context(bars, DEFAULT_PARAMS)
+    assert r5_pullback_breakout(bars, 1, ctx, DEFAULT_PARAMS) is False
