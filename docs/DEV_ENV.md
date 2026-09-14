@@ -585,10 +585,22 @@ STRATEGY_TICK_SOFT_LIMIT_MB=100
   `F4_POST_CLOSE_REST_BACKUP_ENABLED`(기본 0)를 우회하므로, 우회 자체를
   `STRATEGY_TICK_REST_BACKUP_ENABLED`로 명시해 운영자가 끈 설정을 캡처가 조용히
   되살리지 않게 한다.
-- 15:15 이전 WS 단절은 재연결해도 `data_complete=0`/`missing_reason=WS_LOSS`로 남기고,
-  프로세스 재시작은 truncate/중복 없이 이어쓰며 `RESTART_GAP`으로 표시한다. 거래소 시각
-  역전은 `source_ts_reversals`, 실제 seq 빈틈은 `seq_gaps`, REST 보강 구간은
-  `rest_backfill_ranges_json`으로 분리 기록한다.
+- 캡처 창(15:20) 이전 WS 단절은 **다음 표본까지의 공백**으로 잰다(2026-09-14부터).
+  단절 뒤 WS든 REST든 표본이 `STRATEGY_TICK_MAX_WS_OUTAGE_SEC`(기본 10초) 안에
+  돌아오면 완전하고, 넘기면 `data_complete=0`/`missing_reason=WS_LOSS`다. 그 전에는
+  단절 유무만 봤는데, 모의서버가 매시 정각에 WS를 끊고 2초 뒤 다시 붙이므로 어떤
+  날도 완전할 수 없었다(9/14 기준 manifest 22행 중 `data_complete=1`이 0행). 단절
+  횟수는 `ws_disconnects`에, 최장 공백은 `TICK_CAPTURE_FINALIZED.max_ws_outage_sec`에
+  남는다. 단절 시각보다 앞선 수신 시각의 표본(단절 전에 큐에 있던 것)은 그 단절을
+  덮지 못한다. 프로세스 재시작은 truncate/중복 없이 이어쓰며 `RESTART_GAP`으로
+  표시한다. 거래소 시각 역전은 `source_ts_reversals`, 실제 seq 빈틈은 `seq_gaps`,
+  REST 보강 구간은 `rest_backfill_ranges_json`으로 분리 기록한다.
+- `price_path_manifests.trade_id`는 2026-09-02~09-14 행에서 전부 NULL이다. F4가
+  09:00에 `trade_id=None`으로 캡처를 먼저 붙이고(관측 중립화, `3acdac2`) F3가 체결 뒤
+  같은 종목으로 `tick_capture.start()`를 다시 부르는데, idempotent 분기가 식별자를
+  받지 않았다. 08-28 재부착 수정(`5a54d9e`) 전에는 재부착이 우연히 채워 가려져 있었다.
+  이제 같은 종목 재호출은 `trade_id`·`entry_at`이 비어 있을 때만 받아들인다. 해당 기간
+  행은 `trades`의 같은 거래일·종목으로 손으로 잇는다.
 - 재시작 복원 스캔(하루치 gzip 전체)은 워커 스레드에서 돈다. 이 경로가 F4 스탑 감시
   무장보다 앞서므로 이벤트 루프를 막으면 포지션이 무방비가 된다. writer·manifest는
   복원이 끝난 뒤에만 기록해 seq 중복을 막는다.
@@ -689,8 +701,8 @@ for line in open('data/logs/20260901.jsonl', encoding='utf-8'):
   | 15:20 | `TICK_CAPTURE_FINALIZED`가 **정확히 1회** |
   | 15:20 이후 | `TICK_CAPTURE_STARTED`가 **없다** — 재부착이 막혔다 |
 
-  `reason`은 그날 WS 상태에 따라 `COMPLETE`(무단절) 또는 `WS_LOSS`(단절 있음)이며,
-  둘 다 정상이다. 이 확인이 보는 것은 **최종화 횟수와 시각**이지 완전성 플래그가
+  `reason`은 그날 WS 상태에 따라 `COMPLETE` 또는 `WS_LOSS`(표본 공백이 임계값 초과)
+  이며, 둘 다 정상이다. 이 확인이 보는 것은 **최종화 횟수와 시각**이지 완전성 플래그가
   아니다. `RESTART_GAP`이 다시 나오면 진동이 남아 있다는 뜻이다.
 
   비교용으로, 진동이 있던 20260831의 같은 출력은 이렇게 시작한다 — 15:15에

@@ -105,6 +105,33 @@ async def test_same_ticker_start_stays_idempotent(mem, tmp_path):
     await tc.drain_switch_finalizers()
 
 
+async def test_same_ticker_restart_adopts_the_trade_id(mem, tmp_path):
+    """F4가 09:00에 trade_id=None으로 먼저 붙고 F3가 체결 뒤 같은 종목으로 다시
+    start()하면, 인스턴스는 유지하되 체결 식별자는 받아들여야 한다. 2026-09-02
+    이후 manifest.trade_id가 전부 NULL로 남은 원인."""
+    tc.start("20260826", "215600", None, EXP, None)
+    tc.start("20260826", "215600", 32, EXP, ENTRY_AT)
+
+    assert tc._capture.trade_id == 32
+    assert tc._capture.entry_at == ENTRY_AT
+
+    await tc.finalize("COMPLETE", reached_expected_close=True)
+    await tc.drain_switch_finalizers()
+    m = await db.get_price_path_manifest("20260826", "215600", EXP)
+    assert m["trade_id"] == 32
+
+
+async def test_same_ticker_restart_never_overwrites_a_known_trade_id(mem, tmp_path):
+    tc.start("20260826", "215600", 32, EXP, ENTRY_AT)
+    tc.start("20260826", "215600", None, EXP, None)
+
+    assert tc._capture.trade_id == 32
+    assert tc._capture.entry_at == ENTRY_AT
+
+    await tc.finalize("COMPLETE", reached_expected_close=True)
+    await tc.drain_switch_finalizers()
+
+
 async def test_module_finalize_waits_for_switched_away_capture(mem, tmp_path, monkeypatch):
     """종료 경로가 tick_capture.finalize 하나만 부르므로, 전환으로 떼어낸 캡처의
     manifest도 그 안에서 확정돼야 DB close 전에 디스크·DB가 일치한다."""

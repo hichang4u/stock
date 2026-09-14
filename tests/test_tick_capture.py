@@ -1,6 +1,7 @@
 """내구 틱 캡처 코어 — 순서·gzip·gap·회전·manifest·재시작 안전 테스트."""
 import gzip
 import json
+from datetime import datetime
 
 import pytest
 
@@ -79,17 +80,83 @@ async def test_source_ts_reversal_counted_separately_from_seq_gaps(mem, tmp_path
     assert m["seq_gaps"] == 0
 
 
-async def test_ws_disconnect_before_close_forces_incomplete(mem, tmp_path):
+def _at(hour="09", minute="10", second="10"):
+    return datetime.fromisoformat(f"2026-08-13T{hour}:{minute}:{second}+09:00")
+
+
+async def test_short_ws_outage_covered_by_next_sample_stays_complete(mem, tmp_path):
+    """모의서버는 매시 정각에 WS를 끊고 2초 뒤 다시 붙는다. 다음 표본까지의 공백이
+    임계값 안이면 경로는 완전하다 — 단절 횟수는 별도 컬럼에 그대로 남는다."""
     cap = _new_capture(tmp_path)
     cap.start()
     cap.enqueue(_tick(0))
-    cap.mark_ws_disconnect()  # 15:15 이전 WS 단절
-    cap.enqueue(_tick(1, second="12"))  # 재연결 후 계속 수신
+    cap.mark_ws_disconnect(at=_at(second="10"))
+    cap.enqueue(_tick(1, second="12"))  # 2초 뒤 재수신
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+    m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m["data_complete"] == 1
+    assert m["missing_reason"] is None
+    assert m["ws_disconnects"] == 1
+
+
+async def test_ws_outage_longer_than_threshold_forces_incomplete(mem, tmp_path, monkeypatch):
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_tick(0))
+    cap.mark_ws_disconnect(at=_at(second="10"))
+    cap.enqueue(_tick(1, second="30"))  # 20초 공백
     await cap.finalize("COMPLETE", reached_expected_close=True)
     m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
     assert m["data_complete"] == 0
     assert m["missing_reason"] == "WS_LOSS"
-    assert m["ws_disconnects"] >= 1
+    assert m["ws_disconnects"] == 1
+
+
+async def test_rest_sample_closes_a_ws_outage(mem, tmp_path, monkeypatch):
+    """WS가 끊긴 동안 REST 백업이 표본을 남기면 그 표본이 커버리지를 잇는다."""
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_tick(0))
+    cap.mark_ws_disconnect(at=_at(second="10"))
+    rest = _tick(1, second="13")
+    rest["source"] = "rest"
+    rest["source_ts"] = None
+    cap.enqueue(rest)
+    cap.enqueue(_tick(2, second="40"))  # WS 틱은 30초 뒤에야 돌아온다
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+    m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m["data_complete"] == 1
+
+
+async def test_ws_outage_still_open_at_finalize_counts_to_finalize_time(
+    mem, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_tick(0))
+    cap.mark_ws_disconnect(at=_at(second="10"))
+    await cap.finalize("COMPLETE", reached_expected_close=True, now=_at(second="50"))
+    m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m["data_complete"] == 0
+    assert m["missing_reason"] == "WS_LOSS"
+
+
+async def test_worst_ws_outage_is_the_max_not_the_last(mem, tmp_path, monkeypatch):
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_tick(0))
+    cap.mark_ws_disconnect(at=_at(second="10"))
+    cap.enqueue(_tick(1, second="40"))  # 30초 — 초과
+    cap.mark_ws_disconnect(at=_at(second="40"))
+    cap.enqueue(_tick(2, second="42"))  # 2초 — 정상
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+    m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m["data_complete"] == 0
+    assert m["ws_disconnects"] == 2
 
 
 async def test_rest_backfill_ranges_tracked(mem, tmp_path):

@@ -67,6 +67,13 @@ CAPTURE_BACKUP_STOP = (F5_EXEC_H, F5_EXEC_M - 1)  # (15, 14)
 # 별도 이름으로 분리한다. STRATEGY_TICK_ 접두사라 전략 지문 환경 스냅샷에 잡힌다.
 REST_BACKUP_ENABLED = os.getenv("STRATEGY_TICK_REST_BACKUP_ENABLED", "1") == "1"
 
+# 완전성은 "단절이 있었나"가 아니라 "표본이 이만큼 비었나"로 판정한다. 모의서버는
+# 매시 정각에 WS를 끊고 2초 뒤 다시 붙이므로, 단절 유무로 판정하면 어떤 날도
+# 완전할 수 없다(2026-09-14 기준 manifest 22행 중 data_complete=1이 0행).
+# 단절 뒤 다음 표본(WS·REST 무관)까지의 공백이 이 값을 넘을 때만 WS_LOSS다.
+# 단절 횟수 자체는 ws_disconnects 컬럼에 그대로 남는다.
+MAX_WS_OUTAGE_SEC = max(0.0, _env_float("STRATEGY_TICK_MAX_WS_OUTAGE_SEC", 10.0))
+
 _VALID_REASONS = {
     "COMPLETE",
     "MANUAL_STOP",
@@ -76,6 +83,15 @@ _VALID_REASONS = {
     "WRITER_ERROR",
     "TARGET_SWITCHED",
 }
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _hour_of(received_at: str) -> str:
@@ -117,7 +133,9 @@ class TickCapture:
         self._write_errors = 0
         self._source_ts_reversals = 0
         self._ws_disconnects = 0
-        self._ws_loss_before_close = False
+        # 열린 단절의 시각과 지금까지의 최장 공백(초). 공백은 다음 표본이 닫는다.
+        self._ws_outage_since: datetime | None = None
+        self._max_ws_outage_sec = 0.0
         self._prior_interruption = False
         self._rest_backfill: list[dict] = []
         self._first_source_ts: str | None = None
@@ -252,10 +270,26 @@ class TickCapture:
             except OSError:
                 continue
 
-    def mark_ws_disconnect(self) -> None:
-        """캡처 창(15:20) 이전 WS 단절을 실제 증거로 기록한다(재연결해도 불완전)."""
+    def mark_ws_disconnect(self, at: datetime | None = None) -> None:
+        """캡처 창(15:20) 이전 WS 단절을 기록한다. 공백 측정은 여기서 시작한다."""
         self._ws_disconnects += 1
-        self._ws_loss_before_close = True
+        if self._ws_outage_since is None:
+            self._ws_outage_since = at or datetime.now(KST)
+
+    def _close_ws_outage(self, until: datetime | None) -> None:
+        """열린 단절을 표본 시각으로 닫고 최장 공백을 갱신한다."""
+        if self._ws_outage_since is None or until is None:
+            return
+        if until <= self._ws_outage_since:
+            # 단절 전에 수신돼 큐에 남아 있던 표본은 그 단절을 덮지 못한다.
+            return
+        gap = (until - self._ws_outage_since).total_seconds()
+        if gap > self._max_ws_outage_sec:
+            self._max_ws_outage_sec = gap
+        self._ws_outage_since = None
+
+    def _ws_loss_before_close(self) -> bool:
+        return self._max_ws_outage_sec > MAX_WS_OUTAGE_SEC
 
     def _track_rest_backfill(self, received_at: str | None) -> None:
         """연속된 REST 표본 구간을 [start,end] received_at 범위로 누적한다."""
@@ -328,6 +362,7 @@ class TickCapture:
             self._track_rest_backfill(received_at)
         elif self._rest_backfill and self._rest_backfill[-1].get("_open"):
             self._rest_backfill[-1]["_open"] = False  # ws 재개 → 백필 구간 종료
+        self._close_ws_outage(_parse_ts(received_at))
 
         row = {
             "seq": self._seq,
@@ -422,11 +457,18 @@ class TickCapture:
             finalized_at=None,
         )
 
-    async def finalize(self, reason: str, *, reached_expected_close: bool) -> dict:
+    async def finalize(
+        self,
+        reason: str,
+        *,
+        reached_expected_close: bool,
+        now: datetime | None = None,
+    ) -> dict:
         """루프를 멈추고 남은 큐를 비운 뒤 chunk 해시와 manifest를 확정한다."""
         if reason not in _VALID_REASONS:
             reason = "INCOMPLETE_BEFORE_1515"
         self._closed = True
+        now = now or datetime.now(KST)
         # 초기 manifest 태스크가 최종 manifest를 덮어쓰지 않도록 먼저 정리한다.
         if self._initial_task is not None and not self._initial_task.done():
             self._initial_task.cancel()
@@ -444,6 +486,8 @@ class TickCapture:
         await self._await_resume()
         # 권위 있는 최종 드레인.
         self._drain()
+        # 마감까지 표본이 돌아오지 않은 단절은 마감 시각까지를 공백으로 센다.
+        self._close_ws_outage(now)
         for fh in self._fh.values():
             try:
                 fh.close()
@@ -473,8 +517,8 @@ class TickCapture:
         elif reason in explicit_incomplete:
             data_complete = 0
             missing_reason = reason
-        elif self._ws_loss_before_close:
-            # 캡처 창(15:20) 이전 WS 단절은 재연결해도 불완전으로 남긴다.
+        elif self._ws_loss_before_close():
+            # 단절 뒤 표본 공백이 MAX_WS_OUTAGE_SEC를 넘긴 구간이 있었다.
             data_complete = 0
             missing_reason = "WS_LOSS"
         elif self._prior_interruption:
@@ -488,7 +532,6 @@ class TickCapture:
             data_complete = 0
             missing_reason = "INCOMPLETE_BEFORE_1515"
 
-        now = datetime.now(KST).isoformat()
         try:
             manifest = await db.upsert_price_path_manifest(
                 trade_date=self.trade_date,
@@ -510,7 +553,7 @@ class TickCapture:
                 writer_version=WRITER_VERSION,
                 schema_version=SCHEMA_VERSION,
                 content_hash=content_hash,
-                finalized_at=now,
+                finalized_at=now.isoformat(),
             )
         except Exception as exc:  # noqa: BLE001 — manifest 실패가 종료를 막지 않는다
             log(
@@ -529,6 +572,7 @@ class TickCapture:
             rows=self._rows_written,
             source_ts_reversals=self._source_ts_reversals,
             ws_disconnects=self._ws_disconnects,
+            max_ws_outage_sec=round(self._max_ws_outage_sec, 1),
         )
         return manifest
 
@@ -693,7 +737,13 @@ def start(
         return False
     try:
         if _capture is not None and _capture.ticker == ticker:
-            # idempotent — 같은 종목을 재시작하면 seq와 chunk가 끊긴다.
+            # idempotent — 같은 종목을 재시작하면 seq와 chunk가 끊긴다. 다만 F4가
+            # 09:00에 trade_id=None으로 먼저 붙고 F3가 체결 뒤 다시 부르는 순서라,
+            # 식별자는 여기서 받아들여야 manifest.trade_id가 NULL로 남지 않는다.
+            if _capture.trade_id is None and trade_id is not None:
+                _capture.trade_id = trade_id
+            if _capture.entry_at is None and entry_at:
+                _capture.entry_at = entry_at
             return True
         if _capture is not None:
             # F1이 잠근 종목과 F3 최종 선정·실제 체결 종목은 갈릴 수 있다. 낡은
