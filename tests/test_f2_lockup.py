@@ -39,10 +39,12 @@ def clean_state():
     s = _state_mod.get()
     s.day_skip = False
     s.target_ticker = None
+    s.observe_ticker = None
     s.target_candidates = None
     yield
     s.day_skip = False
     s.target_ticker = None
+    s.observe_ticker = None
     s.target_candidates = None
 
 
@@ -52,6 +54,21 @@ async def test_vi_safe_candidate_locked():
     """일반 갭 후보를 타겟으로 확정한다."""
     await _run([_candidate("005930", gap_pct=0.05)])
     assert _state_mod.get().target_ticker == "005930"
+
+
+async def test_lockup_pins_rank1_as_observe_ticker():
+    """처음 잠긴 1순위가 그날의 관측 종목이다 — F3의 후보 교체·소진이
+    target_ticker를 바꾸거나 지워도 이 값은 남아 F4가 15:20까지 찍는다."""
+    await _run([_candidate("017900", gap_pct=0.07), _candidate("042510", gap_pct=0.04)])
+    assert _state_mod.get().observe_ticker == "017900"
+
+
+async def test_relock_keeps_first_observe_ticker():
+    """같은 날 다시 잠가도(F1/F3 재시도) 관측 종목은 처음 것을 유지한다."""
+    await _run([_candidate("017900", gap_pct=0.07)])
+    await _run([_candidate("042510", gap_pct=0.04)])
+    assert _state_mod.get().target_ticker == "042510"
+    assert _state_mod.get().observe_ticker == "017900"
 
 
 async def test_vi_near_candidate_is_kept_for_f3_runtime_check():

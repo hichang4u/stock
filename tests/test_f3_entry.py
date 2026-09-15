@@ -4011,6 +4011,7 @@ async def test_all_candidates_vi_active_records_vi_active(monkeypatch):
     events = []
     _reset_state()
     state.get().target_ticker = "BAD001"
+    state.get().observe_ticker = "BAD001"
     state.get().target_candidates = [
         {"ticker": "BAD001", "name": "Bad", "expected_amount": 2_000_000.0},
         {"ticker": "BAD002", "name": "Bad2", "expected_amount": 1_000_000.0},
@@ -4046,6 +4047,9 @@ async def test_all_candidates_vi_active_records_vi_active(monkeypatch):
     send_buy.assert_not_awaited()
     assert state.get().day_skip is True
     assert state.get().close_reason == "VI_ACTIVE"
+    # 소진은 target_ticker만 지운다 — 1순위 관측(observe_ticker)은 남는다.
+    assert state.get().target_ticker is None
+    assert state.get().observe_ticker == "BAD001"
     skipped = [kwargs for event, kwargs in events if event == "ENTRY_CANDIDATE_EXHAUSTED"]
     assert skipped and skipped[-1]["reason"] == "NO_REMAINING_CANDIDATE"
     f3.db.record_skip.assert_awaited_once()

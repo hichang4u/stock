@@ -38,6 +38,9 @@ async def run(candidates: list[dict]) -> None:
     s.target_ticker = target["ticker"]
     s.target_name = target.get("name")
     s.target_candidates = locked_candidates
+    # 관측 종목은 그날 처음 잠긴 1순위로 고정한다(state.observe_ticker 참고).
+    if not s.observe_ticker:
+        s.observe_ticker = s.target_ticker
 
     log(
         "TARGET_LOCKED", level="INFO", ticker=s.target_ticker, name=s.target_name,

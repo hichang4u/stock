@@ -601,6 +601,16 @@ STRATEGY_TICK_SOFT_LIMIT_MB=100
   받지 않았다. 08-28 재부착 수정(`5a54d9e`) 전에는 재부착이 우연히 채워 가려져 있었다.
   이제 같은 종목 재호출은 `trade_id`·`entry_at`이 비어 있을 때만 받아들인다. 해당 기간
   행은 `trades`의 같은 거래일·종목으로 손으로 잇는다.
+- **후보 소진일의 관측(2026-09-15).** 2026-09-10과 09-15처럼 F3 후보가 전부
+  탈락하면 `ENTRY_CANDIDATE_EXHAUSTED`가 `target_ticker`를 지웠고, 관측 게이트가
+  `target_ticker`만 봐서 그 자리에서 관측이 끝났다 — 두 날 모두 캡처 파일이
+  0바이트다. "A는 못 샀는데 B는 살 수 있는 날"이 설계가 가장 원한 날인데 그날만
+  비었다. 이제 F2 락업이 그날 처음 잠긴 1순위를 `state.observe_ticker`에 고정하고,
+  F4는 `target_ticker or observe_ticker`를 관측한다(`_observed_ticker`). 후보 교체
+  중에는 현재 시도 종목을 따라가고(보유 시 손절 판정 종목과 일치), 소진 뒤에는
+  1순위로 돌아가 15:20까지 찍는다. `today_state.json`에 `observe_ticker`로
+  보존돼 재시작해도 이어쓴다. 매매 판단은 이 값을 보지 않는다. 미보유 구간의 REST
+  백업 억제(`_rest_backup_allowed`)는 그대로라 소진일 관측은 WS 전용이다.
 - 재시작 복원 스캔(하루치 gzip 전체)은 워커 스레드에서 돈다. 이 경로가 F4 스탑 감시
   무장보다 앞서므로 이벤트 루프를 막으면 포지션이 무방비가 된다. writer·manifest는
   복원이 끝난 뒤에만 기록해 seq 중복을 막는다.

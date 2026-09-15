@@ -148,7 +148,7 @@ def _price_observation_active(now: datetime | None = None) -> bool:
         return True  # 보유 중엔 무조건 — 수동 종료도 손절 추적을 끄지 못한다
     if s.post_close_tracking_stopped:
         return False
-    if not s.target_ticker:
+    if not _observed_ticker(s):
         return False
 
     now = now or datetime.now(KST)
@@ -183,7 +183,7 @@ def _price_observation_active(now: datetime | None = None) -> bool:
     # 캡처가 이 체결 종목에 활성이면 사후 관측을 고정 15:20까지 연장해 durable
     # 가격 경로가 실제 청산 이후에도 계속 기록되게 한다. 캡처 비활성이면 기존
     # 조기·수동 진입 동작(F4_POST_CLOSE_OBSERVE_UNTIL, 기본 09:10)을 보존한다.
-    if tick_capture.is_active() and tick_capture.active_ticker() == s.target_ticker:
+    if tick_capture.is_active() and tick_capture.active_ticker() == _observed_ticker(s):
         cutoff_hm = tick_capture.CAPTURE_UNTIL
     else:
         cutoff_hm = _get_observe_until()
@@ -191,6 +191,13 @@ def _price_observation_active(now: datetime | None = None) -> bool:
         hour=cutoff_hm[0], minute=cutoff_hm[1], second=0, microsecond=0
     )
     return entry_at.astimezone(KST).date() == now.date() and now < cutoff
+
+
+def _observed_ticker(s: state.State) -> str | None:
+    """지금 관측해야 할 종목. 현재 시도 중인 target_ticker가 있으면 그것 —
+    보유 시 손절 판정 종목과 같아야 한다. F3가 후보를 소진해 target_ticker를
+    지운 뒤에는 처음 잠긴 1순위(observe_ticker)로 돌아가 15:20까지 찍는다."""
+    return s.target_ticker or s.observe_ticker
 
 
 def _observation_should_continue(ticker: str, now: datetime | None = None) -> bool:
@@ -203,7 +210,7 @@ def _observation_should_continue(ticker: str, now: datetime | None = None) -> bo
     쓰므로 걸러주지 않는다. 종목이 바뀌면 구독을 끝내고 run_forever가 새 종목으로
     다시 붙게 한다.
     """
-    return _price_observation_active(now) and state.get().target_ticker == ticker
+    return _price_observation_active(now) and _observed_ticker(state.get()) == ticker
 
 
 def _rest_backup_allowed(position_status: str) -> bool:
@@ -236,7 +243,7 @@ def _should_attach_capture(s: state.State, now: datetime | None = None) -> bool:
     자세한 내역은 docs/DEV_ENV.md의 "F4 청산 후 관측과 EXITING 운영".
     그 시각 이후에 붙인 캡처는 어차피 즉시 최종화되므로 남길 것도 없다.
     """
-    if not s.target_ticker:
+    if not _observed_ticker(s):
         return False
     now = now or datetime.now(KST)
     return (now.hour, now.minute) < tick_capture.CAPTURE_UNTIL
@@ -259,7 +266,7 @@ def _capture_backup_active(now: datetime | None = None) -> bool:
         return False
     if not (
         tick_capture.is_active()
-        and tick_capture.active_ticker() == state.get().target_ticker
+        and tick_capture.active_ticker() == _observed_ticker(state.get())
     ):
         return False
     now = now or datetime.now(KST)
@@ -275,7 +282,7 @@ def _note_ws_loss(now: datetime | None = None) -> bool:
     """
     if not (
         tick_capture.is_active()
-        and tick_capture.active_ticker() == state.get().target_ticker
+        and tick_capture.active_ticker() == _observed_ticker(state.get())
     ):
         return False
     now = now or datetime.now(KST)
@@ -293,7 +300,7 @@ async def _finalize_capture_after_observation() -> None:
     """
     if not (
         tick_capture.is_active()
-        and tick_capture.active_ticker() == state.get().target_ticker
+        and tick_capture.active_ticker() == _observed_ticker(state.get())
     ):
         return
     if state.get().position_status == "HOLDING":
@@ -328,7 +335,7 @@ async def stop_post_close_observation() -> dict:
         cancelled += 1
 
     # 수동 중지는 캡처 창 이전 종료이므로 캡처를 불완전(MANUAL_STOP)으로 최종화한다.
-    if tick_capture.is_active() and tick_capture.active_ticker() == s.target_ticker:
+    if tick_capture.is_active() and tick_capture.active_ticker() == _observed_ticker(s):
         await tick_capture.finalize("MANUAL_STOP", reached_expected_close=False)
 
     persisted = True
@@ -406,15 +413,15 @@ async def run() -> None:
     """
     s = state.get()
     # 종목이 확정되거나 포지션이 열릴 때까지 대기. 종목만 잠겨도 관측을 시작해
-    # A가 진입하지 않는 날의 가격 경로를 확보한다.
-    while not (s.target_ticker or s.position_status in ("HOLDING", "CLOSED")):
+    # A가 진입하지 않는 날의 가격 경로를 확보한다. 후보 소진으로 target_ticker가
+    # 지워진 뒤에도 observe_ticker(1순위)로 관측을 이어간다.
+    while not (_observed_ticker(s) or s.position_status in ("HOLDING", "CLOSED")):
         await asyncio.sleep(0.5)
         s = state.get()
 
-    if not s.target_ticker or not _price_observation_active():
+    ticker = _observed_ticker(s)
+    if not ticker or not _price_observation_active():
         return
-
-    ticker = s.target_ticker
     spike_filter = SpikeFilter()
 
     if os.getenv("DRY_RUN", "0") == "1":

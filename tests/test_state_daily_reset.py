@@ -8,6 +8,7 @@ def _clear_state() -> None:
     s = state.get()
     s.trading_date = None
     s.target_ticker = None
+    s.observe_ticker = None
     s.target_name = None
     s.target_candidates = None
     s.entry_price = None
@@ -59,6 +60,16 @@ async def test_new_trading_day_clears_tick_history():
 
     assert changed is True
     assert live.tick_history() == []
+
+
+async def test_new_trading_day_clears_observe_ticker():
+    s = state.get()
+    s.trading_date = "20260702"
+    s.observe_ticker = "017900"
+
+    assert await state.ensure_trading_day("20260703") is True
+
+    assert state.get().observe_ticker is None
 
 
 async def test_same_trading_day_does_not_clear_day_skip():
@@ -223,6 +234,32 @@ async def test_target_candidates_persist_restore_round_trip(tmp_path):
         {"ticker": "005930", "expected_amount": 10_000.0},
         {"ticker": "000660", "expected_amount": 9_000.0},
     ]
+
+
+async def test_observe_ticker_persist_restore_round_trip(tmp_path):
+    """재시작해도 그날 관측 종목이 이어져야 캡처가 이어쓰기된다."""
+    s = state.get()
+    s.trading_date = "20260915"
+    s.observe_ticker = "017900"
+
+    await state.persist(str(tmp_path), "20260915")
+    _clear_state()
+    assert state.get().observe_ticker is None
+    state.restore_from(state.load(str(tmp_path)))
+
+    assert state.get().observe_ticker == "017900"
+
+
+async def test_reset_to_idle_keeps_observe_ticker():
+    """ENTRY_FAIL → IDLE 전환은 관측을 끝내는 사유가 아니다."""
+    s = state.get()
+    s.target_ticker = "017900"
+    s.observe_ticker = "017900"
+
+    await state.reset_to_idle("ENTRY_FAIL")
+
+    assert s.target_ticker is None
+    assert s.observe_ticker == "017900"
 
 
 async def test_pending_entry_persist_restore_round_trip(tmp_path):

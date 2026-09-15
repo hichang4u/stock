@@ -18,6 +18,11 @@ class State:
     trading_date: str | None = None
     target_ticker: str | None = None
     target_name: str | None = None
+    # 그날 처음 잠긴 1순위. F3의 후보 교체·소진은 target_ticker를 바꾸거나
+    # 지우지만 이 값은 건드리지 않아, A가 진입하지 않은 날에도 F4가 15:20까지
+    # 이 종목의 가격 경로를 찍는다(2026-09-10/15 소진일 캡처 0바이트 대응).
+    # 매매 판단은 이 값을 보지 않는다 — 관측 전용.
+    observe_ticker: str | None = None
     target_candidates: list[dict] | None = None
     entry_price: float | None = None
     entry_at: str | None = None
@@ -91,6 +96,7 @@ def _clear_for_trading_day(date_str: str) -> None:
     _state.trading_date = date_str
     _state.target_ticker = None
     _state.target_name = None
+    _state.observe_ticker = None
     _state.target_candidates = None
     _state.entry_price = None
     _state.entry_at = None
@@ -323,6 +329,7 @@ async def persist(state_dir: str, date_str: str) -> None:
         "date": date_str,
         "ticker": _state.target_ticker,
         "name": _state.target_name,
+        "observe_ticker": _state.observe_ticker,
         "target_candidates": _state.target_candidates or [],
         "entry_price": _state.entry_price,
         "entry_at": _state.entry_at,
@@ -389,6 +396,7 @@ def restore_from(data: dict) -> None:
     _state.trading_date = data.get("date")
     _state.target_ticker = data.get("ticker")
     _state.target_name = data.get("name")
+    _state.observe_ticker = data.get("observe_ticker")
     _state.target_candidates = data.get("target_candidates") or None
     _state.entry_price = data.get("entry_price")
     _state.entry_at = data.get("entry_at")

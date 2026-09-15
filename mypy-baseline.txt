@@ -81,7 +81,7 @@ src/modules/f4_tracking.py: Argument 1 to "_send_sell" has incompatible type "st
 src/modules/f4_tracking.py: Argument 1 to "float" has incompatible type "float | str | None"; expected "str | Buffer | SupportsFloat | SupportsIndex"  [arg-type]
 src/modules/f4_tracking.py: Argument 1 to "int" has incompatible type "Any | int | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"  [arg-type]
 src/modules/f4_tracking.py: Argument 2 to "getenv" has incompatible type "str"; expected "float | None"  [arg-type]
-src/modules/f4_tracking.py: Name "log_extra" already defined on line 1371  [no-redef]
+src/modules/f4_tracking.py: Name "log_extra" already defined on line 1378  [no-redef]
 src/modules/f5_timeout.py: Argument "expect_qty" to "_poll_fill" has incompatible type "int | None"; expected "int"  [arg-type]
 src/modules/f5_timeout.py: Argument "qty" to "submit_sell" has incompatible type "int | None"; expected "int"  [arg-type]
 src/modules/f5_timeout.py: Argument 1 to "_fetch_current_price" has incompatible type "str | None"; expected "str"  [arg-type]

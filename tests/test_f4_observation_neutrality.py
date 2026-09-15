@@ -26,6 +26,7 @@ class _State:
     def __init__(self, **kw):
         self.trading_date = kw.get("trading_date", TODAY)
         self.target_ticker = kw.get("target_ticker")
+        self.observe_ticker = kw.get("observe_ticker")
         self.position_status = kw.get("position_status", "IDLE")
         self.entry_at = kw.get("entry_at")
         self.post_close_tracking_stopped = kw.get("post_close_tracking_stopped", False)
@@ -62,6 +63,32 @@ def test_no_observation_without_target(monkeypatch):
     """종목이 없으면 관측할 대상이 없다."""
     _use(monkeypatch, _State(target_ticker=None, position_status="IDLE"))
     assert f4_tracking._price_observation_active(NOON) is False
+
+
+def test_observes_rank1_after_candidates_exhausted(monkeypatch):
+    """2026-09-10/15: 후보가 전부 탈락하면 F3가 target_ticker를 지우고 관측이
+    그 자리에서 끝나 캡처 파일이 0바이트로 남았다 — 설계가 가장 원한 날인데.
+    observe_ticker(처음 잠긴 1순위)는 소진과 무관하게 15:20까지 관측한다."""
+    _use(monkeypatch, _State(target_ticker=None, observe_ticker="017900", position_status="IDLE"))
+    assert f4_tracking._price_observation_active(NOON) is True
+    assert f4_tracking._should_attach_capture(f4_tracking.state.get(), NOON) is True
+    assert f4_tracking._observation_should_continue("017900", NOON) is True
+
+
+def test_observe_ticker_respects_session_cutoff(monkeypatch):
+    _use(monkeypatch, _State(target_ticker=None, observe_ticker="017900", position_status="IDLE"))
+    assert f4_tracking._price_observation_active(EVENING) is False
+    assert f4_tracking._observation_should_continue("017900", EVENING) is False
+
+
+def test_target_ticker_wins_over_observe_ticker_while_set(monkeypatch):
+    """후보 교체 중에는 현재 시도 종목을 따라간다(보유 시 손절 판정 종목과 일치)."""
+    _use(
+        monkeypatch,
+        _State(target_ticker="042510", observe_ticker="017900", position_status="ENTERING"),
+    )
+    assert f4_tracking._observation_should_continue("042510", NOON) is True
+    assert f4_tracking._observation_should_continue("017900", NOON) is False
 
 
 def test_no_observation_after_session_cutoff(monkeypatch):

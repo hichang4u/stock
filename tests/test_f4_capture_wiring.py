@@ -101,6 +101,37 @@ def test_note_ws_loss_marks_disconnect_before_1515(monkeypatch):
     assert marks == [1]
 
 
+async def test_finalize_after_observation_when_only_observe_ticker_remains(monkeypatch):
+    """소진일: target_ticker는 None, 캡처는 observe_ticker(1순위)에 활성.
+    15:20 도달 시 COMPLETE로 최종화돼야 한다 — target_ticker만 보면 여기서
+    빠져나가 프로세스 종료 때까지 INCOMPLETE로 남는다(2026-09-10 실측)."""
+    s = state.get()
+    s.target_ticker = None
+    s.observe_ticker = "017900"
+    s.position_status = "IDLE"
+    s.trade_id = 0
+    monkeypatch.setattr(tick_capture, "is_active", lambda: True)
+    monkeypatch.setattr(tick_capture, "active_ticker", lambda: "017900")
+    calls = []
+
+    async def finalize(reason, *, reached_expected_close):
+        calls.append((reason, reached_expected_close))
+
+    monkeypatch.setattr(tick_capture, "finalize", finalize)
+    fixed = datetime.now(KST).replace(hour=15, minute=20, second=0, microsecond=0)
+
+    class _Now(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    monkeypatch.setattr(f4_tracking, "datetime", _Now)
+
+    await f4_tracking._finalize_capture_after_observation()
+
+    assert calls == [("COMPLETE", True)]
+
+
 async def test_observation_extends_to_1515_when_capture_active(monkeypatch):
     _set_closed_today()
     monkeypatch.setattr(tick_capture, "active_ticker", lambda: "005930")
