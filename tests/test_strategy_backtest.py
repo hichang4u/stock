@@ -41,6 +41,7 @@ from src.modules.f3_entry import _evaluate_order_gap
         (0.020, 1_000_000_000),
         (0.050, 0),
         (0.079, 100_000),
+        (0.080, 999_999_999),
         (0.080, 1_000_000_000),
         (0.080, 5_000_000_000),
         (0.099, 6_000_000_000),
@@ -114,7 +115,7 @@ def test_overheat_penalty_removal_lifts_high_gap_candidate():
 
 def test_high_gap_amount_floor_gates_selection():
     """고갭 대금 하한을 낮추면 걸러지던 8%대 중소형주가 후보로 들어온다."""
-    row = {"ticker": "A", "gap_pct": 0.084, "expected_amount": 2_600_000_000,
+    row = {"ticker": "A", "gap_pct": 0.084, "expected_amount": 800_000_000,
            "avg_amount_5d": 1_000_000_000}
     assert selection_rejection(row, BASELINE) == "HIGH_GAP"
 

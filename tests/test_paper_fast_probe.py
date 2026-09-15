@@ -226,7 +226,8 @@ async def test_open_boundary_observes_prepared_tickers_without_trading(
             "output": [
                 _multi_row("006340", "대원전선", 14500, 13730, ask=14510),
                 _multi_row("477850", "마키나락스", 25200, 24250, ask=25250),
-                _multi_row("439960", "코스모로보틱스", 15480, 14310, ask=15490),
+                # 갭 8.18%·예상 대금 7.7억: 고갭 대금 하한(10억) 미달로 그림자 후보에서 빠진다.
+                _multi_row("439960", "코스모로보틱스", 15480, 14310, expected_qty=50000, ask=15490),
             ],
         }
     )

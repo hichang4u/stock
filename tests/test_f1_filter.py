@@ -101,7 +101,7 @@ async def test_gap_7_99_pct_passes():
 
 async def test_high_gap_excluded_when_amount_low():
     """GAP_MAX 이상 high gap은 금액 기준 미달 시 제외."""
-    result = await _run([_classified_candidate(GAP_MAX + 0.001, amount=1e9, vi_gap=0.03)])
+    result = await _run([_classified_candidate(GAP_MAX + 0.001, amount=8e8, vi_gap=0.03)])
     assert result == []
 
 

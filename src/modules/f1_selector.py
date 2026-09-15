@@ -53,9 +53,12 @@ GAP_HARD_MAX = _env_float("F1_GAP_HARD_MAX", 0.100)
 # 2026-07-20: 예상 체결대금 수백만원짜리 후보가 통과해 미체결(VI)·유동성 제로
 # 진입 시도로 이어졌다. 주문금액(약 900만원)이 예상 체결대금을 넘지 않도록 1억 하한.
 MIN_EXPECTED_AMOUNT = _env_float("F1_MIN_EXPECTED_AMOUNT", 100_000_000)
+# 2026-09-15: 50억 하한은 2026-07-06 밴드 도입 때 근거 없이 넣은 초기값이었고,
+# 08/20 백테스트에서 갭 8~10% 강세 종목 12건 중 7건(12~48억)이 이 하나에 막혔다.
+# 09/15 광전자(45.8억)도 같은 이유로 탈락해 10억으로 내린다.
 HIGH_GAP_MIN_EXPECTED_AMOUNT = _env_float(
     "F1_HIGH_GAP_MIN_EXPECTED_AMOUNT",
-    5_000_000_000,
+    1_000_000_000,
 )
 MIN_VOLUME_SURGE = _env_float("F1_MIN_VOLUME_SURGE", 0.0)
 

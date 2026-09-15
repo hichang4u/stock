@@ -83,7 +83,7 @@ class Policy:
     gap_core_max: float = 0.080
     gap_hard_max: float = 0.100
     min_expected_amount: float = 100_000_000
-    high_gap_min_amount: float = 5_000_000_000
+    high_gap_min_amount: float = 1_000_000_000
     w_gap: float = 25.0
     w_amount: float = 25.0
     w_surge: float = 25.0
@@ -94,7 +94,7 @@ class Policy:
     recheck_gap_min: float = 0.020
     recheck_gap_max: float = 0.100
     recheck_high_band: float = 0.080
-    recheck_high_gap_min_amount: float = 5_000_000_000
+    recheck_high_gap_min_amount: float = 1_000_000_000
     # 후보 교체: 상위 몇 개까지 순서대로 시도하는가
     depth: int = 3
     # 진입 봉 (0900=지연 없음, 0901=레거시 약 82초 지연)

@@ -5481,7 +5481,7 @@ def test_f3_gap_thresholds_are_sourced_from_f1():
     # 기본 정책값 회귀 방지
     assert f3.GAP_HIGH_BAND == pytest.approx(0.08)
     assert f3.GAP_MAX_ORDER == pytest.approx(0.10)
-    assert f3.HIGH_GAP_MIN_EXPECTED_AMOUNT == pytest.approx(5_000_000_000)
+    assert f3.HIGH_GAP_MIN_EXPECTED_AMOUNT == pytest.approx(1_000_000_000)
 
 
 def test_amount_qualifies_high_gap_fails_closed_on_missing_or_invalid():

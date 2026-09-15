@@ -6,7 +6,7 @@ def test_default_policy_thresholds_are_intentional():
     assert f1_selector.GAP_CORE_MAX == 0.080
     assert f1_selector.GAP_HARD_MAX == 0.100
     assert f1_selector.MIN_EXPECTED_AMOUNT == 100_000_000
-    assert f1_selector.HIGH_GAP_MIN_EXPECTED_AMOUNT == 5_000_000_000
+    assert f1_selector.HIGH_GAP_MIN_EXPECTED_AMOUNT == 1_000_000_000
     assert not hasattr(f1_selector, "MIN_VI_GAP")
     assert not hasattr(f1_selector, "SAFE_VI_GAP")
     assert f1_selector.BUY_PRESSURE_WEIGHT == 0
@@ -46,7 +46,7 @@ def test_volume_surge_can_outrank_larger_absolute_amount():
 def test_high_gap_requires_amount_but_not_static_vi_distance():
     ranked = f1_selector.select_candidates([
         _candidate(
-            "LOW_AMOUNT", expected_amount=1_000_000_000,
+            "LOW_AMOUNT", expected_amount=800_000_000,
             avg_amount_5d=100_000_000, gap_pct=0.085,
         ),
         _candidate(

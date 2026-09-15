@@ -52,7 +52,7 @@ def _env_float(name: str, default: float) -> float:
 
 
 GAP_MIN_RECHECK = 0.020  # 재검증 하한 (F1 3%보다 낮음 — 완충). F3 로컬 완충값.
-# F1 고갭 유동성 정책과 정확히 일치시키기 위해 8%/10%/50억원 임계값은 F1에서 가져온다.
+# F1 고갭 유동성 정책과 정확히 일치시키기 위해 8%/10%/10억원 임계값은 F1에서 가져온다.
 # F3가 자체 상수를 복제하면 정책이 갈라져 F1 이후 우회가 생긴다.
 GAP_HIGH_BAND = f1_selector.GAP_CORE_MAX  # >=8%: 고갭 유동성 요건 적용 경계
 GAP_MAX_ORDER = f1_selector.GAP_HARD_MAX  # F1 고갭 후보 범위와 동일: +10% 미만
