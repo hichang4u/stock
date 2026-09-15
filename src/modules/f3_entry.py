@@ -3481,10 +3481,24 @@ async def _refresh_entry_candidate(picked: dict) -> dict | None:
     if not isinstance(candidate, dict):
         candidate = None
     fallback_prev_close = _candidate_prev_close(candidate)
-    expected_price, prev_close = await _fetch_expected_price(
-        ticker,
-        fallback_prev_close=fallback_prev_close,
-    )
+    # 2026-09-15: 1순위가 가격 사유로 탈락한 뒤 2·3순위가 단건 inquire-price로
+    # 갔고, VTS의 그 응답이 개장 전환 stale(현재가=전일종가, 시가 0)이라 3회
+    # 재시도 끝에 GAP_RECHECK_UNAVAILABLE로 소진됐다. 09:00:00 FAST_MULTI
+    # 스냅샷은 같은 종목의 유효한 예상가를 이미 갖고 있었다. 1순위 경로
+    # (_run_pipeline 단일 후보 분기)와 같은 나이 한도로 그 행을 먼저 쓰고,
+    # 없거나 낡았으면 기존 단건 조회로 폴백한다 — PAPER 유량(초당 1건)에서는
+    # 호출 한 건이 곧 1.1초다.
+    recheck_source = "SINGLE_QUOTE"
+    fast_rows = _fast_recheck_rows([ticker], {ticker: candidate} if candidate else {})
+    if fast_rows:
+        recheck_source = "FAST_MULTI"
+        expected_price = float(fast_rows[0]["expected_price"])
+        prev_close = float(fast_rows[0]["prev_close"])
+    else:
+        expected_price, prev_close = await _fetch_expected_price(
+            ticker,
+            fallback_prev_close=fallback_prev_close,
+        )
     if prev_close <= 0:
         prev_close = fallback_prev_close
     if not expected_price or prev_close <= 0:
@@ -3520,6 +3534,7 @@ async def _refresh_entry_candidate(picked: dict) -> dict | None:
         gap_min_pct=round(GAP_MIN_RECHECK * 100, 2),
         gap_max_pct=round(GAP_MAX_ORDER * 100, 2),
         freshness_check=True,
+        source=recheck_source,
     )
     cand_amount = _candidate_expected_amount(candidate)
     gap_allowed, gap_reason = _evaluate_order_gap(gap, cand_amount)

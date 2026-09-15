@@ -6172,6 +6172,93 @@ async def test_refresh_entry_candidate_rejects_crossing_to_high_gap_low_amount(m
 
 
 @pytest.mark.asyncio
+async def test_refresh_entry_candidate_reuses_fresh_fast_multi_row(monkeypatch):
+    """2026-09-15: 1순위가 가격 사유로 탈락한 뒤 2·3순위 리프레시가 단건
+    inquire-price로 갔고, VTS의 그 응답이 개장 전환 stale(현재가=전일종가,
+    시가 0)이라 3회 재시도 후 GAP_RECHECK_UNAVAILABLE로 소진됐다. 09:00:00의
+    FAST_MULTI 스냅샷은 같은 종목의 유효한 예상가를 이미 갖고 있었다(4초 전).
+    1순위 경로가 이미 그 스냅샷을 재사용하듯 후보 교체 경로도 재사용해야 한다
+    — PAPER 유량(초당 1건)에서는 호출 한 건이 곧 1.1초다."""
+    _reset_state()
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+    fetch_single = AsyncMock(return_value=(0.0, 11_300.0))
+    monkeypatch.setattr(f3, "_fetch_expected_price", fetch_single)
+    fast = {
+        "ticker": "042510",
+        "name": "라온시큐어",
+        "expected_price": 11_800.0,
+        "prev_close": 11_300.0,
+        "expected_amount": 435_833_000.0,
+        "fast_observed_monotonic": 100.0,
+    }
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: [fast])
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 104.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    picked = {
+        "ticker": "042510",
+        "candidate": fast,
+        "candidate_rank": 2,
+        "expected_price": 11_800.0,
+        "prev_close": 11_300.0,
+        "total_amount": 1_000_000,
+        "cash": 1_000_000,
+    }
+
+    refreshed = await f3._refresh_entry_candidate(picked)
+
+    fetch_single.assert_not_awaited()
+    assert refreshed is not None
+    assert refreshed["expected_price"] == 11_800.0
+    assert refreshed["prev_close"] == 11_300.0
+    recheck = [k for e, k in events if e == "F3_RECHECK"][-1]
+    assert recheck["source"] == "FAST_MULTI"
+    assert recheck["gap_pct"] == pytest.approx(4.42, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_refresh_entry_candidate_falls_back_to_single_quote_when_fast_row_stale(
+    monkeypatch,
+):
+    """FAST_MULTI 스냅샷이 나이 한도를 넘었으면(예: 1순위 VI 해제 대기 후)
+    기존대로 단건 시세를 조회한다 — fail-closed 폴백은 그대로."""
+    _reset_state()
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+    fetch_single = AsyncMock(return_value=(11_750.0, 11_300.0))
+    monkeypatch.setattr(f3, "_fetch_expected_price", fetch_single)
+    fast = {
+        "ticker": "042510",
+        "expected_price": 11_800.0,
+        "prev_close": 11_300.0,
+        "expected_amount": 435_833_000.0,
+        "fast_observed_monotonic": 100.0,
+    }
+    monkeypatch.setattr(f3.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(f3.paper_fast_probe, "get_open_candidates", lambda: [fast])
+    monkeypatch.setattr(f3.time, "monotonic", lambda: 200.0)
+    monkeypatch.setattr(f3, "F3_FAST_RECHECK_MAX_AGE_SEC", 15.0)
+    picked = {
+        "ticker": "042510",
+        "candidate": fast,
+        "candidate_rank": 2,
+        "expected_price": 11_800.0,
+        "prev_close": 11_300.0,
+        "total_amount": 1_000_000,
+        "cash": 1_000_000,
+    }
+
+    refreshed = await f3._refresh_entry_candidate(picked)
+
+    fetch_single.assert_awaited_once()
+    assert refreshed is not None
+    assert refreshed["expected_price"] == 11_750.0
+    recheck = [k for e, k in events if e == "F3_RECHECK"][-1]
+    assert recheck["source"] == "SINGLE_QUOTE"
+
+
+@pytest.mark.asyncio
 async def test_vi_release_then_fresh_quote_crossing_high_gap_low_amount_no_order(monkeypatch):
     """VI 해제 확인 후에도 최종 호가가 8.5% 저대금이면 주문을 보내지 않는다."""
     _reset_state()
