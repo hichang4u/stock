@@ -144,6 +144,63 @@ async def test_ws_outage_still_open_at_finalize_counts_to_finalize_time(
     assert m["missing_reason"] == "WS_LOSS"
 
 
+async def test_ws_reconnect_closes_the_outage_before_the_next_sample(
+    mem, tmp_path, monkeypatch
+):
+    """2026-09-11: 09:00:01 단절 → 09:00:03 재접속(구독 요청 송신) → 첫 체결 틱은
+    09:00:15. 소켓이 살아 있는 동안의 침묵은 거래가 없었다는 뜻이지 손실이
+    아니므로, 공백은 재접속 시각에서 닫혀야 한다."""
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_tick(0))
+    cap.mark_ws_disconnect(at=_at(second="10"))
+    cap.mark_ws_reconnect(at=_at(second="12"))
+    cap.enqueue(_tick(1, second="40"))  # 첫 표본은 30초 뒤
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+    m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m["data_complete"] == 1
+    assert m["missing_reason"] is None
+    assert m["ws_disconnects"] == 1
+    assert cap._max_ws_outage_sec == pytest.approx(2.0)
+
+
+async def test_queued_sample_before_reconnect_closes_the_outage_first(
+    mem, tmp_path, monkeypatch
+):
+    """재접속은 즉시 반영되지만 표본은 0.5초 드레인 뒤에 쓰인다. 큐에 이미 들어온
+    단절 이후 표본이 재접속보다 앞서면 그 표본이 공백을 닫아야 한다."""
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_tick(0))
+    cap.mark_ws_disconnect(at=_at(second="10"))
+    rest = _tick(1, second="19")  # 큐에만 있고 아직 드레인되지 않음
+    rest["source"] = "rest"
+    rest["source_ts"] = None
+    cap.enqueue(rest)
+    cap.mark_ws_reconnect(at=_at(second="21"))  # 표본 기준이면 9초, 재접속 기준이면 11초
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+    m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m["data_complete"] == 1
+    assert cap._max_ws_outage_sec == pytest.approx(9.0)
+
+
+async def test_slow_ws_reconnect_is_still_a_loss(mem, tmp_path, monkeypatch):
+    """2026-09-08: 재접속 자체가 수백 초 걸린 날은 그대로 WS_LOSS다."""
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_tick(0))
+    cap.mark_ws_disconnect(at=_at(second="10"))
+    cap.mark_ws_reconnect(at=_at(second="40"))  # 30초 만에 재접속
+    cap.enqueue(_tick(1, second="41"))
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+    m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m["data_complete"] == 0
+    assert m["missing_reason"] == "WS_LOSS"
+
+
 async def test_worst_ws_outage_is_the_max_not_the_last(mem, tmp_path, monkeypatch):
     monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
     cap = _new_capture(tmp_path)

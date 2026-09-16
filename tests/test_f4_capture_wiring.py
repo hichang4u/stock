@@ -101,6 +101,20 @@ def test_note_ws_loss_marks_disconnect_before_1515(monkeypatch):
     assert marks == [1]
 
 
+def test_note_ws_recovery_marks_reconnect_before_1520(monkeypatch):
+    """재접속(구독 요청 송신)은 단절과 같은 게이트로 캡처에 전달된다."""
+    _set_closed_today()
+    marks = []
+    monkeypatch.setattr(tick_capture, "is_active", lambda: True)
+    monkeypatch.setattr(tick_capture, "active_ticker", lambda: "005930")
+    monkeypatch.setattr(tick_capture, "mark_ws_reconnect", lambda: marks.append(1))
+    base = datetime.now(KST).replace(second=0, microsecond=0)
+    assert f4_tracking._note_ws_recovery(base.replace(hour=11, minute=0)) is True
+    assert marks == [1]
+    assert f4_tracking._note_ws_recovery(base.replace(hour=15, minute=20)) is False
+    assert marks == [1]
+
+
 async def test_finalize_after_observation_when_only_observe_ticker_remains(monkeypatch):
     """소진일: target_ticker는 None, 캡처는 observe_ticker(1순위)에 활성.
     15:20 도달 시 COMPLETE로 최종화돼야 한다 — target_ticker만 보면 여기서

@@ -274,21 +274,41 @@ def _capture_backup_active(now: datetime | None = None) -> bool:
     return tick_capture.CAPTURE_BACKUP_START <= now_hm < tick_capture.CAPTURE_BACKUP_STOP
 
 
-def _note_ws_loss(now: datetime | None = None) -> bool:
-    """캡처 창(15:20) 이전 WS 단절을 캡처에 실제 증거로 기록한다.
-
-    재연결하더라도 그 사이 구간이 비어 완전 커버가 깨지므로, 캡처는 이 거래를
-    ``data_complete=0``/``missing_reason=WS_LOSS``로 최종화한다.
-    """
+def _capture_ws_event_allowed(now: datetime | None = None) -> bool:
+    """WS 단절·재접속을 캡처에 전달할 조건. 두 이벤트가 같은 게이트를 지나야
+    단절만 기록되고 재접속은 무시되는 식의 어긋남이 생기지 않는다."""
     if not (
         tick_capture.is_active()
         and tick_capture.active_ticker() == _observed_ticker(state.get())
     ):
         return False
     now = now or datetime.now(KST)
-    if (now.hour, now.minute) >= tick_capture.CAPTURE_UNTIL:
+    return (now.hour, now.minute) < tick_capture.CAPTURE_UNTIL
+
+
+def _note_ws_loss(now: datetime | None = None) -> bool:
+    """캡처 창(15:20) 이전 WS 단절을 캡처에 실제 증거로 기록한다.
+
+    여기서 공백 측정이 시작되고, 재접속(``_note_ws_recovery``) 또는 다음 표본이
+    닫는다. 그 공백이 ``STRATEGY_TICK_MAX_WS_OUTAGE_SEC``를 넘기면 캡처는 이
+    거래를 ``data_complete=0``/``missing_reason=WS_LOSS``로 최종화한다.
+    """
+    if not _capture_ws_event_allowed(now):
         return False
     tick_capture.mark_ws_disconnect()
+    return True
+
+
+def _note_ws_recovery(now: datetime | None = None) -> bool:
+    """WS 재접속(구독 요청 송신 성공)을 캡처에 전달해 열린 단절을 닫는다.
+
+    kis_ws는 서버의 구독 응답을 확인하지 않으므로 이 시점은 "구독 요청을 보냈다"
+    까지만 보장한다. 이후의 표본 공백은 소켓이 살아 있는 동안의 무체결로 보고
+    손실로 세지 않는다.
+    """
+    if not _capture_ws_event_allowed(now):
+        return False
+    tick_capture.mark_ws_reconnect()
     return True
 
 
@@ -513,12 +533,15 @@ async def run() -> None:
         nonlocal ws_transport_known
         ws_transport_known = True
         live.ws_connected = connected
-        # 캡처 창 이전 WS 단절을 캡처에 실제 증거로 남긴다(재연결해도 불완전).
-        if not connected:
-            try:
+        # 캡처 창 이전 WS 단절·재접속을 캡처에 실제 증거로 남긴다. 공백은
+        # 단절부터 재접속(구독 요청 송신) 또는 다음 표본 중 먼저 오는 쪽까지다.
+        try:
+            if connected:
+                _note_ws_recovery()
+            else:
                 _note_ws_loss()
-            except Exception:  # noqa: BLE001 — 관측 전용, 전파 금지
-                pass
+        except Exception:  # noqa: BLE001 — 관측 전용, 전파 금지
+            pass
         # Re-evaluate REST fallback immediately instead of waiting for the
         # normal polling interval after a transport disconnect.
         rest_wakeup.set()

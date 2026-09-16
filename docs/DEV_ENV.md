@@ -585,9 +585,13 @@ STRATEGY_TICK_SOFT_LIMIT_MB=100
   `F4_POST_CLOSE_REST_BACKUP_ENABLED`(기본 0)를 우회하므로, 우회 자체를
   `STRATEGY_TICK_REST_BACKUP_ENABLED`로 명시해 운영자가 끈 설정을 캡처가 조용히
   되살리지 않게 한다.
-- 캡처 창(15:20) 이전 WS 단절은 **다음 표본까지의 공백**으로 잰다(2026-09-14부터).
-  단절 뒤 WS든 REST든 표본이 `STRATEGY_TICK_MAX_WS_OUTAGE_SEC`(기본 10초) 안에
-  돌아오면 완전하고, 넘기면 `data_complete=0`/`missing_reason=WS_LOSS`다. 그 전에는
+- 캡처 창(15:20) 이전 WS 단절은 **재접속(구독 요청 송신 성공) 또는 다음 표본 중 먼저
+  오는 쪽까지의 공백**으로 잰다(2026-09-14부터 표본 기준, 2026-09-16부터 재접속도 닫음).
+  그 공백이 `STRATEGY_TICK_MAX_WS_OUTAGE_SEC`(기본 10초) 안이면 완전하고, 넘기면
+  `data_complete=0`/`missing_reason=WS_LOSS`다. 소켓이 살아 있는 동안 표본이 없는
+  것은 체결이 없었다는 뜻이지 손실이 아니다 — 9/11은 2초 만에 재접속했지만 첫 체결이
+  13.5초 뒤였고, 9/16은 REST 백업이 rate-limit에 걸려 9.0초였는데, 표본 기준으로만
+  재면 이런 날이 종목 유동성에 따라 무작위로 WS_LOSS가 된다. 그 전에는
   단절 유무만 봤는데, 모의서버가 매시 정각에 WS를 끊고 2초 뒤 다시 붙이므로 어떤
   날도 완전할 수 없었다(9/14 기준 manifest 22행 중 `data_complete=1`이 0행). 단절
   횟수는 `ws_disconnects`에, 최장 공백은 `TICK_CAPTURE_FINALIZED.max_ws_outage_sec`에

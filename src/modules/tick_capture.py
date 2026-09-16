@@ -70,7 +70,8 @@ REST_BACKUP_ENABLED = os.getenv("STRATEGY_TICK_REST_BACKUP_ENABLED", "1") == "1"
 # 완전성은 "단절이 있었나"가 아니라 "표본이 이만큼 비었나"로 판정한다. 모의서버는
 # 매시 정각에 WS를 끊고 2초 뒤 다시 붙이므로, 단절 유무로 판정하면 어떤 날도
 # 완전할 수 없다(2026-09-14 기준 manifest 22행 중 data_complete=1이 0행).
-# 단절 뒤 다음 표본(WS·REST 무관)까지의 공백이 이 값을 넘을 때만 WS_LOSS다.
+# 단절 뒤 재접속 또는 다음 표본(WS·REST 무관) 중 먼저 오는 쪽까지의 공백이 이 값을
+# 넘을 때만 WS_LOSS다. 소켓이 살아 있는 동안의 무표본은 무체결이지 손실이 아니다.
 # 단절 횟수 자체는 ws_disconnects 컬럼에 그대로 남는다.
 MAX_WS_OUTAGE_SEC = max(0.0, _env_float("STRATEGY_TICK_MAX_WS_OUTAGE_SEC", 10.0))
 
@@ -133,7 +134,8 @@ class TickCapture:
         self._write_errors = 0
         self._source_ts_reversals = 0
         self._ws_disconnects = 0
-        # 열린 단절의 시각과 지금까지의 최장 공백(초). 공백은 다음 표본이 닫는다.
+        # 열린 단절의 시각과 지금까지의 최장 공백(초). 공백은 다음 표본 또는
+        # 재접속 중 먼저 오는 쪽이 닫는다.
         self._ws_outage_since: datetime | None = None
         self._max_ws_outage_sec = 0.0
         self._prior_interruption = False
@@ -276,8 +278,25 @@ class TickCapture:
         if self._ws_outage_since is None:
             self._ws_outage_since = at or datetime.now(KST)
 
+    def mark_ws_reconnect(self, at: datetime | None = None) -> None:
+        """WS 재접속(구독 요청 송신 성공)으로 열린 단절을 닫는다.
+
+        소켓이 살아 있는 동안 표본이 없는 것은 체결이 없었다는 뜻이지 손실이
+        아니다(2026-09-11: 2초 만에 재접속했지만 첫 체결까지 13.5초).
+        재접속은 즉시 반영되지만 표본은 드레인 뒤에 쓰이므로, 큐에 이미 들어온
+        단절 이후 표본이 재접속보다 앞서면 그 표본 시각으로 닫는다.
+        """
+        until = at or datetime.now(KST)
+        since = self._ws_outage_since
+        if since is not None:
+            for row in self._queue:
+                ts = _parse_ts(row.get("received_at"))
+                if ts is not None and since < ts < until:
+                    until = ts
+        self._close_ws_outage(until)
+
     def _close_ws_outage(self, until: datetime | None) -> None:
-        """열린 단절을 표본 시각으로 닫고 최장 공백을 갱신한다."""
+        """열린 단절을 표본 시각 또는 재접속 시각으로 닫고 최장 공백을 갱신한다."""
         if self._ws_outage_since is None or until is None:
             return
         if until <= self._ws_outage_since:
@@ -486,7 +505,7 @@ class TickCapture:
         await self._await_resume()
         # 권위 있는 최종 드레인.
         self._drain()
-        # 마감까지 표본이 돌아오지 않은 단절은 마감 시각까지를 공백으로 센다.
+        # 마감까지 표본도 재접속도 오지 않은 단절은 마감 시각까지를 공백으로 센다.
         self._close_ws_outage(now)
         for fh in self._fh.values():
             try:
@@ -518,7 +537,7 @@ class TickCapture:
             data_complete = 0
             missing_reason = reason
         elif self._ws_loss_before_close():
-            # 단절 뒤 표본 공백이 MAX_WS_OUTAGE_SEC를 넘긴 구간이 있었다.
+            # 단절 뒤 재접속·표본까지의 공백이 MAX_WS_OUTAGE_SEC를 넘긴 구간이 있었다.
             data_complete = 0
             missing_reason = "WS_LOSS"
         elif self._prior_interruption:
@@ -827,6 +846,13 @@ def mark_ws_disconnect() -> None:
     cap = _capture
     if cap is not None:
         cap.mark_ws_disconnect()
+
+
+def mark_ws_reconnect() -> None:
+    """활성 캡처에 WS 재접속(구독 요청 송신 성공)을 알려 열린 단절을 닫는다."""
+    cap = _capture
+    if cap is not None:
+        cap.mark_ws_reconnect()
 
 
 async def finalize(reason: str, *, reached_expected_close: bool) -> None:
