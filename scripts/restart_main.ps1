@@ -78,7 +78,12 @@ $launcherCandidates = @(
     $allProcesses | Where-Object {
         $_.ExecutablePath -and
         [System.IO.Path]::GetFullPath($_.ExecutablePath) -eq $venvPython -and
-        $_.CommandLine -match '(^|[\s"''])main\.py([\s"'']|$)'
+        # 런처는 `main.py`(상대경로), watchdog_check.py는 `D:\...\main.py`
+        # (절대경로)로 띄운다. 경로 구분자 뒤의 main.py도 잡아야 watchdog이
+        # 기동한 봇을 재시작할 수 있다(2026-09-16 승격 실패 — 종료를 건너뛰고
+        # 포트 프로브에서 살아 있는 봇과 충돌). 실행 파일이 이 저장소의 venv
+        # python이라는 조건이 위에 있어 다른 저장소의 main.py는 걸리지 않는다.
+        $_.CommandLine -match '(^|[\s"''\\/])main\.py([\s"'']|$)'
     }
 )
 if ($launcherCandidates.Count -gt 1) {
