@@ -138,9 +138,42 @@ H1과 같은 "제외 후 랭크 최상위" 구조다. 두 가설을 같은 하�
 - 이 표본은 H1의 사후 탐색 표본과 겹친다. H2의 라벨 축은 H1 §6의 닫힌 축 목록에 없으므로
   같은 표본을 다시 보는 것 자체는 허용되지만, 여기서 나온 어떤 숫자도 판정 근거가 아니다.
 
-| 라벨 | 쌍 n | HARD_STOP 비율 | 평균 | 비고 |
-|---|---|---|---|---|
-| (소급 탐색 전 — 등록 시점에는 비어 있다) | | | | |
+### 5.1 소급 탐색 결과 (2026-09-17, 등록 당일 — 체)
+
+`scripts/catalyst_label.py` → `data/catalyst/labels.jsonl`, `scripts/h2_sieve.py` →
+`data/replay/h2_sieve_20260917.json`. 유니버스 52거래일 / 149쌍(2026-07-01~09-10, 랭크 1~3).
+
+**라벨 분포**: `MATERIAL` 10 · `OTHER` 19 · `NONE` 120. 직전 거래일에 DART 공시가 하나라도
+있는 쌍은 29/149(19%)이고 재료 공시는 **10/149(6.7%)**뿐이다. 이 유니버스의 갭 대부분은
+DART 공시로 설명되지 않는다 — 원인이 있다면 뉴스·테마·수급 쪽이고, 그것은 이 가설의 범위
+밖(§8·§9)이다.
+
+**진입 시뮬레이션** 134쌍 (봉 없음 12, 09:01봉 없음 3):
+
+| 라벨 | 쌍 n | HARD_STOP 비율 | 평균 | 95% CI | 비고 |
+|---|---|---|---|---|---|
+| `MATERIAL` | 9 | **55.6%** (5/9) | +0.22% | [−1.44, +2.17] | 대량보유 보고서가 5/9 |
+| `OTHER` | 13 | 53.8% | +0.31% | [−1.23, +1.85] | |
+| `NONE` | 112 | 59.8% | −0.26% | [−0.71, +0.23] | |
+
+- **P1 (MATERIAL < NONE 손절률)**: 55.6% < 59.8% — 충족. 다만 차이 4%p, n=9.
+- **P2 (MATERIAL < 50%)**: **불충족.** 9쌍 중 5쌍이 진입 직후 −2%.
+- 세 라벨 모두 손절률이 54~60%다. 라벨과 무관하게 09:01 시가 진입의 절반 이상이 −2%로
+  끝난다 — "시초가가 고점"은 재료 유무로 갈리지 않았다. 이 표본에서 §1의 메커니즘은
+  관찰되지 않는다.
+- `MATERIAL` 9건 중 5건이 `주식등의대량보유상황보고서`다. 5% 보고서는 화이트리스트에
+  있어 `MATERIAL`이지만 펀드 지분 변동 같은 루틴 보고가 섞인다. **바꾸지 않는다** — 바꾸면
+  결과를 보고 라벨을 고친 것이다. H3를 등록한다면 이 키워드의 처리가 첫 검토 대상이다.
+- 수급(`FLOW_POS`, 보고용): KIS가 약 30거래일만 돌려줘 2026-08-07 이후 64쌍만 라벨됐다.
+  `MATERIAL` 중 수급 라벨이 있는 것은 3쌍이라 갈라 볼 수 없다. `NONE/FLOW_NEG` 31쌍은
+  −0.77% [−1.44, −0.02]로 CI가 0을 벗어나지만, 체 위의 부분집합이라 보고만 한다.
+
+**판정 시점에 대한 함의**: `MATERIAL` 후보가 하나라도 있는 날은 52거래일 중 **7일(13.5%)**
+이다. 이 비율이 유지되면 §4의 n ≥ 50에 닿는 데 약 **370거래일(1년 반, 2028년 초)**이
+걸린다. §4대로 n을 낮추지 않는다. 이 사실을 여기 적고 기다린다.
+
+**이 결과로 바꾸는 것은 없다.** 규칙·화이트리스트·창·예측·판정 기준 전부 등록 시점 그대로다.
+등록 전 표본에서 P2가 반대로 나왔다는 사실은 판정 때 나란히 놓고 읽는다.
 
 ## 6. 재평가 절차
 
@@ -153,13 +186,15 @@ KIS 분봉 백필)에 **외부 소급 라벨 두 가지**(DART 공시목록, KIS
 .\.venv\Scripts\python.exe scripts\replay_universe.py --out data\replay\universes.json
 .\.venv\Scripts\python.exe scripts\track_b_backfill.py --universes data\replay\universes.json --warmup-days 0
 .\.venv\Scripts\python.exe scripts\catalyst_label.py --universes data\replay\universes.json --out data\catalyst\labels.jsonl
+.\.venv\Scripts\python.exe scripts\h2_sieve.py --labels data\catalyst\labels.jsonl
 ```
 
-`scripts/catalyst_label.py`는 아직 없다. **§5의 소급 탐색 작업에서 처음부터 `scripts/`
-아래에 만든다** — H1은 등록 시 분석 코드를 스크래치패드에 뒀다가 첫 재평가 때 옮기기로
-했는데, 같은 일을 반복하지 않는다. 라벨 파일은 쌍 단위(`date`, `ticker`, `label`,
-`matched_report_nm`, `flow_pos`, `flow_source`)로 기록하고, 판정은 H1 재생 하네스에 이
-파일을 조인해서 돌린다. 스크립트 경로가 확정되면 이 절에 적는다.
+라벨은 `scripts/catalyst_label.py`가 쌍 단위(`date`, `ticker`, `rank`, `label`,
+`matched_report_nm`, `report_nm`, `window_bgn/end`, `flow_pos`, `flow_source`)로
+`data/catalyst/labels.jsonl`에 쓴다. DART만 먼저 돌리려면 `--skip-flow`. 우선주는 보통주의
+`corp_code`로 폴백한다(005935 → 005930). 조인·집계는 `scripts/h2_sieve.py`
+(`python scripts/h2_sieve.py --labels data/catalyst/labels.jsonl`)이며, 판정 때도 같은
+스크립트를 §4의 표본 범위로 돌린다. 테스트는 `tests/test_catalyst_label.py`·`tests/test_h2_sieve.py`.
 
 DART 키는 `.env`의 `DART_API_KEY`로 읽는다. 등록 시점에는 키가 없다 — 발급 후 §5를
 시작한다.
