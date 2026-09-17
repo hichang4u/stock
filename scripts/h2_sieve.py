@@ -91,31 +91,39 @@ def summarize(
             subset = [r for r in rows if r["label"] == label and r.get("flow_pos") is flow]
             by_flow[f"{label}/{'FLOW_POS' if flow else 'FLOW_NEG'}"] = _group(subset, seed)
 
-    return {
+    report = {
         "treatment": treatment,
         "control": control,
         "by_label": by_label,
         "p1_treatment_below_control": p1,
         "p2_treatment_below_half": p2,
-        # H2 문서·테스트가 쓰는 이름. 같은 값이다.
-        "p1_material_below_none": p1,
-        "p2_material_below_half": p2,
         "by_label_and_flow": by_flow,
     }
+    if (treatment, control) == (DEFAULT_TREATMENT, DEFAULT_CONTROL):
+        # H2 문서가 쓰는 이름. 다른 라벨 쌍의 산출물에 섞이지 않게 H2일 때만 붙인다.
+        report["p1_material_below_none"] = p1
+        report["p2_material_below_half"] = p2
+    return report
 
 
-def join_labels_with_bars(labels: list[dict]) -> tuple[list[dict], dict]:
-    """쌍마다 봉을 찾아 진입을 시뮬레이션한다. 빠진 쌍은 사유별로 센다."""
+def join_labels_with_bars(labels: list[dict], *, read_bars=read_cached_bars) -> tuple[list[dict], dict]:
+    """쌍마다 봉을 찾아 진입을 시뮬레이션한다. 빠진 쌍은 사유별로 센다.
+
+    DATA_END(봉이 15:15 전에 끝남)는 청산 결과가 아니라 결측이다 — 집계에서 빼고 센다.
+    """
     rows: list[dict] = []
-    missing = {"NO_BARS": 0, "NO_0901_BAR": 0}
+    missing = {"NO_BARS": 0, "NO_0901_BAR": 0, "DATA_END": 0}
     for label in labels:
-        bars = read_cached_bars(label["date"], label["ticker"])
+        bars = read_bars(label["date"], label["ticker"])
         if not bars:
             missing["NO_BARS"] += 1
             continue
         result = simulate_open_entry(bars)
         if result is None:
             missing["NO_0901_BAR"] += 1
+            continue
+        if result["reason"] == "DATA_END":
+            missing["DATA_END"] += 1
             continue
         rows.append({**label, **result})
     return rows, missing
@@ -132,12 +140,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="H2 소급 탐색 (체)")
     parser.add_argument("--labels", type=Path, default=ROOT / "data/catalyst/labels.jsonl")
     parser.add_argument(
-        "--out", type=Path,
-        default=ROOT / f"data/replay/h2_sieve_{datetime.now().strftime('%Y%m%d')}.json",
+        "--out", type=Path, default=None,
+        help="기본값 data/replay/h2_sieve_<날짜>.json, 다른 라벨 쌍이면 sieve_<treatment>_<날짜>.json",
     )
     parser.add_argument("--treatment", default=DEFAULT_TREATMENT, help="규칙이 통과시키는 라벨")
     parser.add_argument("--control", default=DEFAULT_CONTROL, help="P1의 비교 대상 라벨")
     args = parser.parse_args(argv)
+    if args.out is None:
+        stamp = datetime.now().strftime("%Y%m%d")
+        stem = "h2_sieve" if args.treatment == DEFAULT_TREATMENT else f"sieve_{args.treatment.lower()}"
+        args.out = ROOT / f"data/replay/{stem}_{stamp}.json"
 
     labels = [json.loads(line) for line in args.labels.read_text(encoding="utf-8").splitlines() if line.strip()]
     rows, missing = join_labels_with_bars(labels)
@@ -157,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     args.out.write_text(
         json.dumps({"labels_source": str(args.labels), "missing": missing,
                     "rows": rows, "report": report}, ensure_ascii=False, indent=1),
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
     print(f"→ {args.out}")
     return 0

@@ -83,6 +83,23 @@ def build_document(days: dict[str, list[str]], log_dirs: list[Path]) -> dict:
     }
 
 
+def load_universe_pairs(path: Path) -> tuple[list[str], list[dict]]:
+    """이 스크립트의 산출물 → (유니버스에 후보가 있던 날짜, 쌍 목록).
+
+    날짜 목록은 거래일 달력이 아니다 — 봇이 후보를 잠그지 못한 거래일은 빠진다.
+    거래일이 필요한 계산은 캘린더를 따로 받아야 한다(catalyst_label.trading_days).
+    """
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    days = doc["days"]
+    dates = sorted(days)
+    pairs = [
+        {"date": date, "ticker": str(row["ticker"]), "rank": int(row["rank"])}
+        for date in dates
+        for row in days[date]
+    ]
+    return dates, pairs
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="로그에서 트랙 B 재생 유니버스 복원")
     parser.add_argument(

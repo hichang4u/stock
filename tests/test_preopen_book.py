@@ -116,3 +116,21 @@ def test_h3_label_is_none_without_a_preopen_row_or_with_an_empty_ask_side():
 
     assert h3_label({"preopen": None})["label"] == "NONE"
     assert h3_label({"preopen": {"bid_ask_ratio": None}})["label"] == "NONE"
+
+
+# ── 리뷰 반영: 비숫자 잔량은 0이 아니라 null, phase 필터 ─────────────────
+
+
+def test_non_numeric_residual_quantity_gives_null_ratio_not_ask_dominant():
+    from scripts.preopen_book import h3_label
+
+    feats = book_features(_row("111111", "", "100"))
+    assert feats["total_bid"] is None
+    assert feats["bid_ask_ratio"] is None
+    assert h3_label({"preopen": feats})["label"] == "NONE"
+
+
+def test_multi_event_with_a_non_preopen_phase_is_ignored():
+    line = json.loads(_multi("PAPER_FAST_PROBE_MULTI", "J", [_row("111111", "1", "1")]))
+    line["phase"] = "OPEN"
+    assert parse_probe_lines([json.dumps(line)])["PREOPEN"] == {}

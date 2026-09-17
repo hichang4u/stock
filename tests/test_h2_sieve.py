@@ -62,3 +62,24 @@ def test_summarize_takes_treatment_and_control_labels_for_h3():
     assert report["by_label"]["ASK_DOMINANT"]["hard_stop_rate"] == 2 / 3
     assert report["p1_treatment_below_control"] is True
     assert report["p2_treatment_below_half"] is False
+
+
+def test_data_end_exits_are_excluded_and_counted():
+    """봉이 15:15 전에 끝난 쌍은 청산 결과가 아니다 — 집계에서 빼고 몇 건인지 보고한다."""
+    from scripts.h2_sieve import join_labels_with_bars
+
+    bars = [_bar("090000", 100, 101, 99, 100), _bar("090100", 100, 101, 99, 100), _bar("090200", 100, 101, 99, 100)]
+    rows, missing = join_labels_with_bars(
+        [{"date": "20260910", "ticker": "111111", "label": "NONE"}],
+        read_bars=lambda date, ticker: bars,
+    )
+    assert rows == []
+    assert missing["DATA_END"] == 1
+
+
+def test_h2_alias_keys_only_appear_for_the_h2_labels():
+    rows = [{"label": "BID_DOMINANT", "reason": "TRAILING", "pct": 1.0},
+            {"label": "ASK_DOMINANT", "reason": "HARD_STOP", "pct": -2.0}]
+    report = summarize(rows, treatment="BID_DOMINANT", control="ASK_DOMINANT", seed=1)
+    assert "p1_material_below_none" not in report
+    assert "p1_material_below_none" in summarize([{"label": "MATERIAL", "reason": "TRAILING", "pct": 1.0}], seed=1)

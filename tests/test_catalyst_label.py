@@ -104,11 +104,49 @@ def test_preferred_share_falls_back_to_the_common_stock_corp_code():
     from scripts.catalyst_label import corp_code_for
 
     mapping = {"005930": "00126380"}
-    assert corp_code_for(mapping, "005935") == "00126380"
-    assert corp_code_for(mapping, "005930") == "00126380"
-    assert corp_code_for(mapping, "999999") is None
+    assert corp_code_for(mapping, "005935")[0] == "00126380"
+    assert corp_code_for(mapping, "999999")[0] is None
 
 
 def test_pair_label_keeps_every_report_name_for_the_record():
     result = label_pair(["주주총회소집결의", "무상증자결정"])
     assert result["report_nm"] == ["주주총회소집결의", "무상증자결정"]
+
+
+# ── 리뷰 반영: 거래일 캘린더·KIS 오류·결측 필드·폴백 기록 ──────────────────
+
+
+def test_trading_days_come_from_daily_chart_rows():
+    from scripts.catalyst_label import trading_days_from_daily_chart
+
+    rows = [{"stck_bsop_date": "20260908"}, {"stck_bsop_date": "20260907"}, {"stck_bsop_date": ""}, {}]
+    assert trading_days_from_daily_chart(rows) == {"20260907", "20260908"}
+
+
+def test_window_uses_the_calendar_not_the_universe():
+    """9/7은 거래일이지만 유니버스에 없다. 창은 유니버스가 아니라 캘린더로 계산한다."""
+    calendar = ["20260904", "20260907", "20260908"]
+    assert label_window("20260908", calendar) == ("20260907", "20260907")
+
+
+def test_investor_response_error_is_recorded_not_swallowed():
+    from scripts.catalyst_label import investor_rows_or_error
+
+    assert investor_rows_or_error({"rt_cd": "0", "output": [{"stck_bsop_date": "20260910"}]}) == (
+        [{"stck_bsop_date": "20260910"}], None
+    )
+    assert investor_rows_or_error({"rt_cd": "1", "msg_cd": "EGW00123"}) == ([], "KIS_ERROR:EGW00123")
+
+
+def test_flow_with_missing_quantity_fields_is_null():
+    rows = [{"stck_bsop_date": "20260910"}]
+    assert flow_from_investor_rows(rows, "20260910") == (None, "MISSING_FIELD")
+
+
+def test_corp_code_lookup_reports_whether_the_common_stock_fallback_was_used():
+    from scripts.catalyst_label import corp_code_for
+
+    mapping = {"005930": "00126380"}
+    assert corp_code_for(mapping, "005935") == ("00126380", True)
+    assert corp_code_for(mapping, "005930") == ("00126380", False)
+    assert corp_code_for(mapping, "999999") == (None, False)

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.catalyst_label import load_universe_pairs  # noqa: E402
+from scripts.replay_universe import load_universe_pairs  # noqa: E402
 
 PHASE_EVENTS = {
     "PAPER_FAST_PROBE_MULTI": "PREOPEN",
@@ -33,11 +33,12 @@ PHASE_EVENTS = {
 BOOK_FIELDS = ("total_bidp_rsqn", "total_askp_rsqn")
 
 
-def _to_int(value) -> int:
+def _to_int(value) -> int | None:
+    """비숫자·빈 값은 0이 아니라 None — 0으로 만들면 비율이 0이 되어 ASK_DOMINANT로 새는다."""
     try:
         return int(float(value))
     except (TypeError, ValueError):
-        return 0
+        return None
 
 
 def _to_float(value) -> float:
@@ -47,8 +48,10 @@ def _to_float(value) -> float:
         return 0.0
 
 
-def _ratio(num: int, den: int) -> float | None:
-    return num / den if den > 0 else None
+def _ratio(num: int | None, den: int | None) -> float | None:
+    if num is None or den is None or den <= 0:
+        return None
+    return num / den
 
 
 def parse_probe_lines(lines) -> dict[str, dict[str, dict]]:
@@ -64,6 +67,9 @@ def parse_probe_lines(lines) -> dict[str, dict[str, dict]]:
             continue
         phase = PHASE_EVENTS.get(event.get("event"))
         if phase is None:
+            continue
+        # 운영 파서(paper_fast_probe)와 같은 조건 — 이벤트 이름과 phase 필드가 함께 맞아야 한다.
+        if event.get("phase") not in (None, phase):
             continue
         rows = (event.get("response") or {}).get("output") or []
         for row in rows:
@@ -145,7 +151,9 @@ def quantiles(values: list[float | None]) -> dict:
 
 def load_probe_dir(probe_dir: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    for path in sorted(probe_dir.glob("2026*.jsonl")):
+    for path in sorted(probe_dir.glob("*.jsonl")):
+        if not path.stem[:8].isdigit():
+            continue
         with path.open(encoding="utf-8") as handle:
             out[path.stem[:8]] = parse_probe_lines(handle)
     return out
@@ -167,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     rows = label_pairs(pairs, probe)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", encoding="utf-8") as handle:
+    with args.out.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
@@ -184,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.h3_labels:
         counts: dict[str, int] = {}
-        with args.h3_labels.open("w", encoding="utf-8") as handle:
+        with args.h3_labels.open("w", encoding="utf-8", newline="\n") as handle:
             for row in rows:
                 labelled = {k: row[k] for k in ("date", "ticker", "rank", "book_source")}
                 labelled.update(h3_label(row))

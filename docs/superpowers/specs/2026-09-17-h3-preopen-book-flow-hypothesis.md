@@ -96,7 +96,8 @@ H1·H2와 같은 "제외 후 랭크 최상위" 구조다.
 
 `scripts/preopen_book.py --h3-labels` → `data/catalyst/h3_labels.jsonl`,
 `scripts/h2_sieve.py --treatment BID_DOMINANT --control ASK_DOMINANT` →
-`data/replay/h3_sieve_20260917.json`.
+`data/replay/sieve_bid_dominant_20260917.json` (파일명은 treatment에서 자동으로 파생돼
+같은 날 돌린 H2 산출물을 덮지 않는다).
 
 **라벨 분포** (149쌍): `BID_DOMINANT` 23 · `ASK_DOMINANT` 13 · `NONE` 113.
 
