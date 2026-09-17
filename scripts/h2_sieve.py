@@ -27,7 +27,9 @@ from scripts.track_b_backtest import bootstrap_ci  # noqa: E402
 from scripts.track_b_rules import simulate_exit  # noqa: E402
 
 ENTRY_BAR = "090100"
-LABELS = ("MATERIAL", "OTHER", "NONE")
+# H2 기본값. H3는 --treatment BID_DOMINANT --control ASK_DOMINANT 로 같은 집계를 쓴다.
+DEFAULT_TREATMENT = "MATERIAL"
+DEFAULT_CONTROL = "NONE"
 
 
 def simulate_open_entry(bars: list[dict]) -> dict | None:
@@ -62,25 +64,40 @@ def _group(rows: list[dict], seed: int) -> dict:
     }
 
 
-def summarize(rows: list[dict], *, seed: int = 20260917) -> dict:
-    """라벨별 요약과 §3 예측. 한쪽이 비면 예측은 None(판정 불가)."""
-    by_label = {label: _group([r for r in rows if r["label"] == label], seed) for label in LABELS}
-    material = by_label["MATERIAL"]
-    none = by_label["NONE"]
+def summarize(
+    rows: list[dict],
+    *,
+    treatment: str = DEFAULT_TREATMENT,
+    control: str = DEFAULT_CONTROL,
+    seed: int = 20260917,
+) -> dict:
+    """라벨별 요약과 §3 예측. 한쪽이 비면 예측은 None(판정 불가).
+
+    P1: treatment 손절률 < control 손절률. P2: treatment 손절률 < 50%.
+    """
+    labels = [treatment, control] + sorted({r["label"] for r in rows} - {treatment, control})
+    by_label = {label: _group([r for r in rows if r["label"] == label], seed) for label in labels}
+    treated = by_label[treatment]
+    controlled = by_label[control]
     p1 = p2 = None
-    if material["n"] and none["n"]:
-        p1 = material["hard_stop_rate"] < none["hard_stop_rate"]
-    if material["n"]:
-        p2 = material["hard_stop_rate"] < 0.5
+    if treated["n"] and controlled["n"]:
+        p1 = treated["hard_stop_rate"] < controlled["hard_stop_rate"]
+    if treated["n"]:
+        p2 = treated["hard_stop_rate"] < 0.5
 
     by_flow: dict[str, dict] = {}
-    for label in LABELS:
+    for label in labels:
         for flow in (True, False):
             subset = [r for r in rows if r["label"] == label and r.get("flow_pos") is flow]
             by_flow[f"{label}/{'FLOW_POS' if flow else 'FLOW_NEG'}"] = _group(subset, seed)
 
     return {
+        "treatment": treatment,
+        "control": control,
         "by_label": by_label,
+        "p1_treatment_below_control": p1,
+        "p2_treatment_below_half": p2,
+        # H2 문서·테스트가 쓰는 이름. 같은 값이다.
         "p1_material_below_none": p1,
         "p2_material_below_half": p2,
         "by_label_and_flow": by_flow,
@@ -118,17 +135,19 @@ def main(argv: list[str] | None = None) -> int:
         "--out", type=Path,
         default=ROOT / f"data/replay/h2_sieve_{datetime.now().strftime('%Y%m%d')}.json",
     )
+    parser.add_argument("--treatment", default=DEFAULT_TREATMENT, help="규칙이 통과시키는 라벨")
+    parser.add_argument("--control", default=DEFAULT_CONTROL, help="P1의 비교 대상 라벨")
     args = parser.parse_args(argv)
 
     labels = [json.loads(line) for line in args.labels.read_text(encoding="utf-8").splitlines() if line.strip()]
     rows, missing = join_labels_with_bars(labels)
-    report = summarize(rows)
+    report = summarize(rows, treatment=args.treatment, control=args.control)
 
     print(f"라벨 {len(labels)}쌍 → 진입 시뮬레이션 {len(rows)}쌍, 빠짐 {missing}")
-    for label in LABELS:
-        print(f"  {label:9} {_fmt(report['by_label'][label])}")
-    print(f"P1 MATERIAL 손절률 < NONE 손절률: {report['p1_material_below_none']}")
-    print(f"P2 MATERIAL 손절률 < 50%:        {report['p2_material_below_half']}")
+    for label, group in report["by_label"].items():
+        print(f"  {label:13} {_fmt(group)}")
+    print(f"P1 {args.treatment} 손절률 < {args.control} 손절률: {report['p1_treatment_below_control']}")
+    print(f"P2 {args.treatment} 손절률 < 50%: {report['p2_treatment_below_half']}")
     print("참고 — 수급으로 한 번 더 가름 (규칙과 무관):")
     for key, group in report["by_label_and_flow"].items():
         if group["n"]:

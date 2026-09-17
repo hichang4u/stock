@@ -47,3 +47,18 @@ def test_predictions_are_none_when_a_side_is_empty():
     report = summarize([{"label": "NONE", "reason": "HARD_STOP", "pct": -2.0}], seed=1)
     assert report["p1_material_below_none"] is None
     assert report["p2_material_below_half"] is None
+
+
+def test_summarize_takes_treatment_and_control_labels_for_h3():
+    rows = [
+        {"label": "BID_DOMINANT", "reason": "TRAILING", "pct": 3.0},
+        {"label": "BID_DOMINANT", "reason": "HARD_STOP", "pct": -2.0},
+        {"label": "ASK_DOMINANT", "reason": "HARD_STOP", "pct": -2.0},
+        {"label": "ASK_DOMINANT", "reason": "HARD_STOP", "pct": -2.0},
+        {"label": "ASK_DOMINANT", "reason": "TRAILING", "pct": 1.0},
+    ]
+    report = summarize(rows, treatment="BID_DOMINANT", control="ASK_DOMINANT", seed=1)
+    assert report["by_label"]["BID_DOMINANT"]["hard_stop_rate"] == 0.5
+    assert report["by_label"]["ASK_DOMINANT"]["hard_stop_rate"] == 2 / 3
+    assert report["p1_treatment_below_control"] is True
+    assert report["p2_treatment_below_half"] is False

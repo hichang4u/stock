@@ -99,3 +99,20 @@ def test_label_pairs_reports_which_phases_covered_each_pair():
 def test_quantiles_skip_nulls():
     assert quantiles([3.0, None, 1.0, 2.0]) == {"n": 3, "min": 1.0, "p25": 1.5, "median": 2.0, "p75": 2.5, "max": 3.0}
     assert quantiles([None]) == {"n": 0, "min": None, "p25": None, "median": None, "p75": None, "max": None}
+
+
+# ── H3 라벨 (문서 §2.2) ───────────────────────────────────────────────────
+
+
+def test_h3_label_uses_the_preopen_total_ratio_at_the_natural_boundary():
+    from scripts.preopen_book import h3_label
+
+    assert h3_label({"preopen": {"bid_ask_ratio": 1.0}})["label"] == "BID_DOMINANT"
+    assert h3_label({"preopen": {"bid_ask_ratio": 0.99}})["label"] == "ASK_DOMINANT"
+
+
+def test_h3_label_is_none_without_a_preopen_row_or_with_an_empty_ask_side():
+    from scripts.preopen_book import h3_label
+
+    assert h3_label({"preopen": None})["label"] == "NONE"
+    assert h3_label({"preopen": {"bid_ask_ratio": None}})["label"] == "NONE"

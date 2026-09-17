@@ -114,6 +114,22 @@ def label_pairs(pairs: list[dict], probe_by_day: dict[str, dict]) -> list[dict]:
     return rows
 
 
+H3_THRESHOLD = 1.0  # 문서 §2.2 — 자연 경계, 판정까지 고정
+
+
+def h3_label(row: dict) -> dict:
+    """문서 §2.2. PREOPEN 총잔량 비율 ≥ 1.0 → BID_DOMINANT, < 1.0 → ASK_DOMINANT, 없음 → NONE."""
+    pre = row.get("preopen")
+    ratio = pre.get("bid_ask_ratio") if pre else None
+    if ratio is None:
+        label = "NONE"
+    elif ratio >= H3_THRESHOLD:
+        label = "BID_DOMINANT"
+    else:
+        label = "ASK_DOMINANT"
+    return {"label": label, "preopen_bid_ask_ratio": ratio}
+
+
 def quantiles(values: list[float | None]) -> dict:
     xs = sorted(v for v in values if v is not None)
     if not xs:
@@ -140,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--universes", type=Path, default=ROOT / "data/replay/universes.json")
     parser.add_argument("--probe-dir", type=Path, default=ROOT / "data/paper_fast_probe")
     parser.add_argument("--out", type=Path, default=ROOT / "data/catalyst/preopen_book.jsonl")
+    parser.add_argument(
+        "--h3-labels", type=Path, default=None,
+        help="문서 §2.2 라벨(BID_DOMINANT/ASK_DOMINANT/NONE)을 쌍 단위로 이 파일에 쓴다",
+    )
     args = parser.parse_args(argv)
 
     _dates, pairs = load_universe_pairs(args.universes)
@@ -161,6 +181,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {phase:8} 총잔량 매수/매도 {quantiles(ratios)}")
         print(f"  {phase:8} 1호가  매수/매도 {quantiles(top1)}")
     print(f"→ {args.out}")
+
+    if args.h3_labels:
+        counts: dict[str, int] = {}
+        with args.h3_labels.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                labelled = {k: row[k] for k in ("date", "ticker", "rank", "book_source")}
+                labelled.update(h3_label(row))
+                counts[labelled["label"]] = counts.get(labelled["label"], 0) + 1
+                handle.write(json.dumps(labelled, ensure_ascii=False) + "\n")
+        print(f"H3 라벨 {counts} → {args.h3_labels}")
     return 0
 
 
