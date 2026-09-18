@@ -95,6 +95,13 @@ $writer.AutoFlush = $true
 $output = New-Object System.Collections.Generic.List[string]
 $code = 0
 Push-Location -LiteralPath $repoRoot
+# 파이썬 호출 구간만 "Continue"로 낮춘다. PS 5.1은 $ErrorActionPreference="Stop"
+# 상태에서 네이티브 명령의 stderr를 2>&1로 받으면 첫 줄에서 NativeCommandError로
+# 스크립트를 끝내 버린다 — 아래 ForEach-Object의 ErrorRecord 분기에 닿기도 전에.
+# 20260918 15:45 예약 실행이 그렇게 죽어 트레이스백 없이 exit 1만 남았고,
+# 백필 뒤의 백업까지 건너뛰었다. 복원은 finally에서 한다.
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 try {
     & $venvPython $pyArgs 2>&1 | ForEach-Object {
         $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
@@ -104,6 +111,7 @@ try {
     }
     $code = $LASTEXITCODE
 } finally {
+    $ErrorActionPreference = $previousErrorAction
     Pop-Location
     $writer.Dispose()
     [Console]::OutputEncoding = $previousOutputEncoding
@@ -159,6 +167,8 @@ $appender = [System.IO.StreamWriter]::new(
 $appender.AutoFlush = $true
 $backupCode = 0
 Push-Location -LiteralPath $repoRoot
+# 백필 구간과 같은 이유로 stderr가 스크립트를 끝내지 않게 한다.
+$ErrorActionPreference = "Continue"
 try {
     & $venvPython "-u" $backupScript "--skip-if-today" 2>&1 | ForEach-Object {
         $line = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
@@ -167,6 +177,7 @@ try {
     }
     $backupCode = $LASTEXITCODE
 } finally {
+    $ErrorActionPreference = $previousErrorAction
     Pop-Location
     $appender.Dispose()
     [Console]::OutputEncoding = $previousOutputEncoding
