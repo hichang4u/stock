@@ -146,7 +146,10 @@ def quantiles(values: list[float | None]) -> dict:
         lo, hi = int(pos), min(int(pos) + 1, len(xs) - 1)
         return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
 
-    return {"n": len(xs), "min": xs[0], "p25": q(0.25), "median": q(0.5), "p75": q(0.75), "max": xs[-1]}
+    return {
+        "n": len(xs), "min": xs[0], "p25": q(0.25), "median": q(0.5), "p75": q(0.75),
+        "max": xs[-1],
+    }
 
 
 def load_probe_dir(probe_dir: Path) -> dict[str, dict]:

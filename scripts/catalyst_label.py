@@ -140,7 +140,10 @@ def investor_rows_or_error(resp: dict) -> tuple[list[dict], str | None]:
 
 
 def flow_from_investor_rows(rows: list[dict], date: str) -> tuple[bool | None, str]:
-    """해당일 외국인+기관 순매수 부호. 행이 없으면 OUT_OF_RANGE, 수량 필드가 없으면 MISSING_FIELD."""
+    """해당일 외국인+기관 순매수 부호.
+
+    행이 없으면 OUT_OF_RANGE, 수량 필드가 없으면 MISSING_FIELD.
+    """
     for row in rows:
         if str(row.get("stck_bsop_date")) != date:
             continue
@@ -186,7 +189,9 @@ def _dart_key() -> str:
     return key
 
 
-def load_corp_codes(client: httpx.Client, key: str, cache: Path = CORP_CODE_CACHE) -> dict[str, str]:
+def load_corp_codes(
+    client: httpx.Client, key: str, cache: Path = CORP_CODE_CACHE
+) -> dict[str, str]:
     """종목코드 → corp_code. 한 번 받아 캐시한다 (zip 안의 CORPCODE.xml).
 
     캐시는 영구다 — 신규 상장 종목이 NO_CORP_CODE로 나오면 캐시 파일을 지우고 다시 받는다.
@@ -282,11 +287,16 @@ async def _kis_session():
 
 
 async def fetch_trading_days(first_date: str, last_date: str, interval: float) -> set[str]:
-    """[first_date − 2주, last_date]의 거래일. 일봉 API는 호출당 최대 100봉이라 뒤에서 앞으로 민다."""
+    """[first_date − 2주, last_date]의 거래일.
+
+    일봉 API는 호출당 최대 100봉이라 뒤에서 앞으로 민다.
+    """
     from scripts.fast_path_counterfactual import _assert_success
     from src.api import kis_rest
 
-    start = (datetime.strptime(first_date, "%Y%m%d") - timedelta(days=CALENDAR_LOOKBACK_DAYS)).strftime("%Y%m%d")
+    start = (
+        datetime.strptime(first_date, "%Y%m%d") - timedelta(days=CALENDAR_LOOKBACK_DAYS)
+    ).strftime("%Y%m%d")
     days: set[str] = set()
     cursor = last_date
     while cursor >= start:
@@ -369,7 +379,10 @@ async def main_async(args: argparse.Namespace) -> int:
         try:
             calendar |= await fetch_trading_days(first, last, args.interval)
             save_trading_days(calendar)
-            print(f"거래일 캘린더 {len(calendar)}일 (KIS 일봉 {CALENDAR_TICKER}) → {TRADING_DAYS_CACHE}")
+            print(
+                f"거래일 캘린더 {len(calendar)}일 (KIS 일봉 {CALENDAR_TICKER}) "
+                f"→ {TRADING_DAYS_CACHE}"
+            )
             trading_dates = sorted(calendar)
             rows = label_disclosures(trading_dates, pairs, window_source="CALENDAR")
             await label_flows(trading_dates, rows, args.interval)

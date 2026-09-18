@@ -10,7 +10,6 @@ from scripts.catalyst_label import (
     label_window,
 )
 
-
 # ── §2.1 보고서명 → MATERIAL / OTHER ─────────────────────────────────────
 
 
@@ -38,11 +37,15 @@ def test_convertible_bond_is_other():
 
 
 def test_pair_with_no_disclosure_is_none():
-    assert label_pair([]) == {"label": "NONE", "matched_report_nm": [], "report_nm": [], "disclosure_count": 0}
+    assert label_pair([]) == {
+        "label": "NONE", "matched_report_nm": [], "report_nm": [], "disclosure_count": 0,
+    }
 
 
 def test_pair_is_material_if_any_report_matches():
-    result = label_pair(["주주총회소집결의", "무상증자결정", "임원ㆍ주요주주특정증권등소유상황보고서"])
+    result = label_pair(
+        ["주주총회소집결의", "무상증자결정", "임원ㆍ주요주주특정증권등소유상황보고서"]
+    )
     assert result["label"] == "MATERIAL"
     assert result["matched_report_nm"] == ["무상증자결정"]
     assert result["disclosure_count"] == 3
@@ -119,7 +122,9 @@ def test_pair_label_keeps_every_report_name_for_the_record():
 def test_trading_days_come_from_daily_chart_rows():
     from scripts.catalyst_label import trading_days_from_daily_chart
 
-    rows = [{"stck_bsop_date": "20260908"}, {"stck_bsop_date": "20260907"}, {"stck_bsop_date": ""}, {}]
+    rows = [
+        {"stck_bsop_date": "20260908"}, {"stck_bsop_date": "20260907"}, {"stck_bsop_date": ""}, {},
+    ]
     assert trading_days_from_daily_chart(rows) == {"20260907", "20260908"}
 
 
@@ -135,7 +140,9 @@ def test_investor_response_error_is_recorded_not_swallowed():
     assert investor_rows_or_error({"rt_cd": "0", "output": [{"stck_bsop_date": "20260910"}]}) == (
         [{"stck_bsop_date": "20260910"}], None
     )
-    assert investor_rows_or_error({"rt_cd": "1", "msg_cd": "EGW00123"}) == ([], "KIS_ERROR:EGW00123")
+    assert investor_rows_or_error({"rt_cd": "1", "msg_cd": "EGW00123"}) == (
+        [], "KIS_ERROR:EGW00123",
+    )
 
 
 def test_flow_with_missing_quantity_fields_is_null():

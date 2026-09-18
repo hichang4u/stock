@@ -106,7 +106,9 @@ def summarize(
     return report
 
 
-def join_labels_with_bars(labels: list[dict], *, read_bars=read_cached_bars) -> tuple[list[dict], dict]:
+def join_labels_with_bars(
+    labels: list[dict], *, read_bars=read_cached_bars
+) -> tuple[list[dict], dict]:
     """쌍마다 봉을 찾아 진입을 시뮬레이션한다. 빠진 쌍은 사유별로 센다.
 
     DATA_END(봉이 15:15 전에 끝남)는 청산 결과가 아니라 결측이다 — 집계에서 빼고 센다.
@@ -141,24 +143,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--labels", type=Path, default=ROOT / "data/catalyst/labels.jsonl")
     parser.add_argument(
         "--out", type=Path, default=None,
-        help="기본값 data/replay/h2_sieve_<날짜>.json, 다른 라벨 쌍이면 sieve_<treatment>_<날짜>.json",
+        help=(
+            "기본값 data/replay/h2_sieve_<날짜>.json, "
+            "다른 라벨 쌍이면 sieve_<treatment>_<날짜>.json"
+        ),
     )
     parser.add_argument("--treatment", default=DEFAULT_TREATMENT, help="규칙이 통과시키는 라벨")
     parser.add_argument("--control", default=DEFAULT_CONTROL, help="P1의 비교 대상 라벨")
     args = parser.parse_args(argv)
     if args.out is None:
         stamp = datetime.now().strftime("%Y%m%d")
-        stem = "h2_sieve" if args.treatment == DEFAULT_TREATMENT else f"sieve_{args.treatment.lower()}"
+        stem = (
+            "h2_sieve" if args.treatment == DEFAULT_TREATMENT
+            else f"sieve_{args.treatment.lower()}"
+        )
         args.out = ROOT / f"data/replay/{stem}_{stamp}.json"
 
-    labels = [json.loads(line) for line in args.labels.read_text(encoding="utf-8").splitlines() if line.strip()]
+    labels = [
+        json.loads(line)
+        for line in args.labels.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     rows, missing = join_labels_with_bars(labels)
     report = summarize(rows, treatment=args.treatment, control=args.control)
 
     print(f"라벨 {len(labels)}쌍 → 진입 시뮬레이션 {len(rows)}쌍, 빠짐 {missing}")
     for label, group in report["by_label"].items():
         print(f"  {label:13} {_fmt(group)}")
-    print(f"P1 {args.treatment} 손절률 < {args.control} 손절률: {report['p1_treatment_below_control']}")
+    print(
+        f"P1 {args.treatment} 손절률 < {args.control} 손절률: "
+        f"{report['p1_treatment_below_control']}"
+    )
     print(f"P2 {args.treatment} 손절률 < 50%: {report['p2_treatment_below_half']}")
     print("참고 — 수급으로 한 번 더 가름 (규칙과 무관):")
     for key, group in report["by_label_and_flow"].items():

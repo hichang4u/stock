@@ -40,7 +40,9 @@ def test_parses_preopen_and_open_rows_by_phase_and_ticker():
 
 def test_rows_without_book_fields_are_ignored():
     """7/27처럼 잔량 필드가 없는 응답은 라벨 재료가 아니다."""
-    lines = [_multi("PAPER_FAST_PROBE_MULTI", "J", [{"inter_shrn_iscd": "111111", "inter2_prpr": "100"}])]
+    lines = [
+        _multi("PAPER_FAST_PROBE_MULTI", "J", [{"inter_shrn_iscd": "111111", "inter2_prpr": "100"}])
+    ]
     assert parse_probe_lines(lines)["PREOPEN"] == {}
 
 
@@ -97,8 +99,12 @@ def test_label_pairs_reports_which_phases_covered_each_pair():
 
 
 def test_quantiles_skip_nulls():
-    assert quantiles([3.0, None, 1.0, 2.0]) == {"n": 3, "min": 1.0, "p25": 1.5, "median": 2.0, "p75": 2.5, "max": 3.0}
-    assert quantiles([None]) == {"n": 0, "min": None, "p25": None, "median": None, "p75": None, "max": None}
+    assert quantiles([3.0, None, 1.0, 2.0]) == {
+        "n": 3, "min": 1.0, "p25": 1.5, "median": 2.0, "p75": 2.5, "max": 3.0,
+    }
+    assert quantiles([None]) == {
+        "n": 0, "min": None, "p25": None, "median": None, "p75": None, "max": None,
+    }
 
 
 # ── H3 라벨 (문서 §2.2) ───────────────────────────────────────────────────

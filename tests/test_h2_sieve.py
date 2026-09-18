@@ -3,8 +3,11 @@
 from scripts.h2_sieve import simulate_open_entry, summarize
 
 
-def _bar(time: str, o: float, h: float, l: float, c: float) -> dict:
-    return {"date": "20260910", "time": time, "open": o, "high": h, "low": l, "close": c, "volume": 1.0}
+def _bar(time: str, o: float, h: float, lo: float, c: float) -> dict:
+    return {
+        "date": "20260910", "time": time, "open": o, "high": h, "low": lo, "close": c,
+        "volume": 1.0,
+    }
 
 
 def test_enters_at_the_0901_bar_open_and_hard_stops_on_low_first():
@@ -21,7 +24,9 @@ def test_enters_at_the_0901_bar_open_and_hard_stops_on_low_first():
 
 def test_returns_none_without_a_0901_bar():
     """09:01봉이 없으면(VI·결측) 그 쌍은 진입 불가로 센다 — 다른 봉으로 대체하지 않는다."""
-    assert simulate_open_entry([_bar("090000", 100, 101, 99, 100), _bar("090300", 100, 101, 99, 100)]) is None
+    assert simulate_open_entry(
+        [_bar("090000", 100, 101, 99, 100), _bar("090300", 100, 101, 99, 100)]
+    ) is None
 
 
 def test_summarize_reports_hard_stop_rate_per_label_and_the_two_predictions():
@@ -68,7 +73,11 @@ def test_data_end_exits_are_excluded_and_counted():
     """봉이 15:15 전에 끝난 쌍은 청산 결과가 아니다 — 집계에서 빼고 몇 건인지 보고한다."""
     from scripts.h2_sieve import join_labels_with_bars
 
-    bars = [_bar("090000", 100, 101, 99, 100), _bar("090100", 100, 101, 99, 100), _bar("090200", 100, 101, 99, 100)]
+    bars = [
+        _bar("090000", 100, 101, 99, 100),
+        _bar("090100", 100, 101, 99, 100),
+        _bar("090200", 100, 101, 99, 100),
+    ]
     rows, missing = join_labels_with_bars(
         [{"date": "20260910", "ticker": "111111", "label": "NONE"}],
         read_bars=lambda date, ticker: bars,
@@ -82,4 +91,6 @@ def test_h2_alias_keys_only_appear_for_the_h2_labels():
             {"label": "ASK_DOMINANT", "reason": "HARD_STOP", "pct": -2.0}]
     report = summarize(rows, treatment="BID_DOMINANT", control="ASK_DOMINANT", seed=1)
     assert "p1_material_below_none" not in report
-    assert "p1_material_below_none" in summarize([{"label": "MATERIAL", "reason": "TRAILING", "pct": 1.0}], seed=1)
+    assert "p1_material_below_none" in summarize(
+        [{"label": "MATERIAL", "reason": "TRAILING", "pct": 1.0}], seed=1
+    )
