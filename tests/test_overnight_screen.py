@@ -199,6 +199,27 @@ def test_screen_dedupes_tickers_across_markets_and_marks_zero_candidate_days():
     assert summary["universe"] == 1 and summary["candidates"] == 0 and not summary["degraded"]
 
 
+def test_screen_isolates_a_daily_fetch_exception_to_one_ticker():
+    async def fetch_ranking(market: str) -> list[dict]:
+        return _ranking_output("000001", "000002")
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        if ticker == "000002":
+            raise RuntimeError("boom")
+        rows = [_daily_row("20260921", 10800.0, 5e9, high=11000.0, low=9900.0, open_=10000.0)]
+        rows += [_daily_row(f"202608{d:02d}", 100.0, 1e9) for d in range(1, 26)]
+        return rows, None
+
+    rows, summary = asyncio.run(
+        screen("20260921", fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+    )
+    by_ticker = {r["ticker"]: r for r in rows}
+    assert by_ticker["000002"]["rejected_reason"] == "DAILY_FAILED"
+    assert by_ticker["000002"]["raw"]["daily_error"] == "EXCEPTION:RuntimeError"
+    assert by_ticker["000001"]["rank"] == 1
+    assert summary["degraded"] is True
+
+
 def test_write_candidates_puts_summary_last(tmp_path):
     path = tmp_path / "20260921.jsonl"
     write_candidates(path, [{"ticker": "000001", "rank": 1}], {"summary": True, "candidates": 1})

@@ -222,7 +222,11 @@ async def screen(
         if pre["rejected_reason"] is not None:
             rows.append(pre)
             continue
-        output2, error = await fetch_daily(ticker)
+        try:
+            # 예산 초과(RequestBudgetExceeded)·전송 오류도 KIS 오류 응답과 동일하게 취급한다.
+            output2, error = await fetch_daily(ticker)
+        except Exception as exc:
+            output2, error = [], f"EXCEPTION:{type(exc).__name__}"
         daily = parse_daily(output2, date) if error is None else None
         if error is None and daily is None:
             error = "NO_TODAY_BAR"
@@ -288,7 +292,10 @@ def _kis_fetchers(
                 "FID_INPUT_DATE_1": "20250101", "FID_INPUT_DATE_2": today,
                 "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "0",
             },
-            stop_on_rate_limit=True, request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
+            # 일봉은 랭킹과 달리 레이트리밋에서 바로 포기하지 않는다 — kis_rest가 같은 예산
+            # 안에서 백오프 재시도(최대 3회)하게 두어, 리밋 한 번에 종목 하나가 DAILY_FAILED로
+            # 빠져 degraded=True가 되는 것을 막는다.
+            stop_on_rate_limit=False, request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
             budget=budget,
         )
         if str(resp.get("rt_cd") or "") != "0":
