@@ -1,5 +1,7 @@
 """C1 오버나이트 체 — 순수 함수만 검사한다. 파일·DB는 읽지 않는다."""
 
+import json
+
 from scripts.overnight_sieve import (
     BASE_ROUND_TRIP_COST_PCT,
     EARLY_STOP_N,
@@ -7,6 +9,8 @@ from scripts.overnight_sieve import (
     MIN_N,
     TRAILING_SLIPPAGE_PCT,
     apply_costs,
+    load_candidates,
+    run,
     simulate_overnight,
     summarize,
 )
@@ -121,3 +125,50 @@ def test_pass_requires_all_three_conditions_at_min_n():
     assert s["pass_conditions"]["evaluable"] is True
     assert s["pass_conditions"]["mean_positive"] and s["pass_conditions"]["ci_low_positive"]
     assert s["pass_conditions"]["robust_top2"] and s["pass_conditions"]["all"]
+
+
+def _write_candidates(root, date, rows, summary=True):
+    d = root / "data" / "overnight" / "candidates"
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(r) for r in rows]
+    if summary:
+        lines.append(json.dumps({"summary": True, "date": date, "candidates": len(rows)}))
+    (d / f"{date}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_bars(root, date, ticker, bars):
+    d = root / "data" / "backtest_bars"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{date}_{ticker}.json").write_text(json.dumps(bars), encoding="utf-8")
+
+
+def test_load_candidates_keeps_ranked_rows_and_flags_dead_files(tmp_path):
+    _write_candidates(tmp_path, "20260921", [
+        {"date": "20260921", "ticker": "000001", "rank": 1, "close": 100.0},
+        {"date": "20260921", "ticker": "000009", "rank": None, "rejected_reason": "X"},
+    ])
+    _write_candidates(tmp_path, "20260922", [{"date": "20260922", "ticker": "000002",
+                                              "rank": 1, "close": 50.0}], summary=False)
+    loaded, missing = load_candidates(tmp_path / "data" / "overnight" / "candidates")
+    assert [r["ticker"] for r in loaded["20260921"]] == ["000001"]
+    assert "20260922" not in loaded and missing["screen_died"] == 1
+
+
+def test_run_replays_next_day_bars_and_accounts_for_missing(tmp_path):
+    _write_candidates(tmp_path, "20260921", [
+        {"date": "20260921", "ticker": "000001", "rank": 1, "close": 100.0},
+        {"date": "20260921", "ticker": "000002", "rank": 2, "close": 100.0},   # 분봉 없음
+    ])
+    _write_candidates(tmp_path, "20260922", [])                                 # 후보 0
+    _write_bars(tmp_path, "20260922", "000001",
+                _session(_bar("090000", 97.0, 99.0, 96.0, 98.0)))
+    results, missing = run(tmp_path)
+    assert len(results) == 1
+    r = results[0]
+    assert (r["date"], r["next_date"], r["ticker"], r["rank"]) == ("20260921", "20260922",
+                                                                   "000001", 1)
+    assert r["exit_reason"] == "GAP_HARD_STOP" and round(r["net_slip_pct"], 2) == -3.48
+    assert missing["bars_missing"] == 1 and missing["no_candidate"] == 1
+    saved = json.loads((tmp_path / "data" / "overnight" / "results" / "20260921.json")
+                       .read_text(encoding="utf-8"))
+    assert saved[0]["ticker"] == "000001"
