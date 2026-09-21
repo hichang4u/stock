@@ -419,6 +419,35 @@ requirements-dev.txt (개발/테스트 전용)
      남기면 1,440줄이 쌓이므로 **재기동 창(08:00~10:00) 안에서만** 남긴다.
      로그 쓰기 실패는 무시한다 — 로그를 못 써서 봇을 못 살리면 본말이 전도된다.
 
+──────────────────────────────────────────────────
+11-3. C1 종가 스크리닝 등록 (StockBot_OvernightScreen, 15:32)
+──────────────────────────────────────────────────
+
+  스펙: docs/superpowers/specs/2026-09-21-c1-overnight-close-hypothesis.md §3.3
+  운영 트리(D:\Private\stock-prod)에서 등록한다. 마감 후라 A·F5와 유량이 겹치지 않는다.
+
+  $Action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"D:\Private\stock-prod\scripts\run_overnight_screen.ps1`""
+
+  $Trigger = New-ScheduledTaskTrigger -Daily -At 15:32
+
+  $Settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
+    -RestartCount 0
+
+  Register-ScheduledTask `
+    -TaskName "StockBot_OvernightScreen" `
+    -Action $Action `
+    -Trigger $Trigger `
+    -Settings $Settings `
+    -RunLevel Highest
+
+  확인: 등록 다음 거래일 15:33에 data\overnight\candidates\<날짜>.jsonl 이 있고 마지막
+  줄이 {"summary": true, ...} 인지. 없으면 data\logs\overnight_screen_*.log 를 본다.
+  주말·휴장일에도 돌지만 랭킹이 전일 값이라 후보 파일에 그날 날짜가 남는다 —
+  overnight_sieve 가 D+1 분봉이 없는 날은 표본에서 뺀다(스펙 §4.3).
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 12. 실행 방법
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
