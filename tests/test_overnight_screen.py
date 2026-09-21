@@ -3,6 +3,9 @@
 규칙 임계값은 스펙 §2.2에 고정돼 있다. 여기서 값을 바꾸면 스펙부터 바꿔야 한다.
 """
 
+import asyncio
+import json
+
 from scripts.overnight_screen import (
     AMOUNT_MULTIPLE_MIN,
     CHANGE_MAX,
@@ -14,6 +17,9 @@ from scripts.overnight_screen import (
     is_excluded_name,
     parse_daily,
     rank_candidates,
+    ranking_params,
+    screen,
+    write_candidates,
 )
 
 
@@ -127,3 +133,75 @@ def test_build_row_carries_raw_fields_and_daily_failure():
     assert failed["rejected_reason"] == "DAILY_FAILED"
     assert failed["raw"]["daily_error"] == "KIS_ERROR:EGW00123"
     assert failed["close"] == 108.0  # 랭킹의 현재가로라도 채운다
+
+
+def test_ranking_params_only_overrides_the_change_range():
+    from src.modules.paper_fast_probe import _ranking_params
+    base = _ranking_params("0001")
+    ours = ranking_params("0001")
+    assert ours["fid_rsfl_rate1"] == f"{CHANGE_MIN:.1f}"
+    assert ours["fid_rsfl_rate2"] == f"{CHANGE_MAX:.1f}"
+    assert {k: v for k, v in ours.items() if not k.startswith("fid_rsfl")} == {
+        k: v for k, v in base.items() if not k.startswith("fid_rsfl")
+    }
+
+
+def _ranking_output(*tickers: str) -> list[dict]:
+    return [
+        {"mksc_shrn_iscd": t, "hts_kor_isnm": f"종목{t}", "prdy_ctrt": "5.00",
+         "stck_prpr": "10800", "acml_tr_pbmn": "5000000000"}
+        for t in tickers
+    ]
+
+
+def test_screen_joins_ranking_with_daily_and_records_rejections_and_summary():
+    async def fetch_ranking(market: str) -> list[dict]:
+        if market == "0001":
+            return _ranking_output("000001", "000002")
+        return _ranking_output("000003")
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        if ticker == "000003":
+            return [], "KIS_ERROR:EGW00123"
+        rows = [_daily_row("20260921", 10800.0, 5e9, high=11000.0, low=9900.0, open_=10000.0)]
+        rows += [_daily_row(f"202608{d:02d}", 100.0, 1e9) for d in range(1, 26)]
+        if ticker == "000002":
+            # 종가 위치 0.45
+            rows[0] = _daily_row("20260921", 10400.0, 5e9, high=11000.0, low=9900.0)
+        return rows, None
+
+    rows, summary = asyncio.run(
+        screen("20260921", fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+    )
+    by_ticker = {r["ticker"]: r for r in rows}
+    assert by_ticker["000001"]["rank"] == 1 and by_ticker["000001"]["rejected_reason"] is None
+    assert by_ticker["000002"]["rank"] is None
+    assert by_ticker["000002"]["rejected_reason"] == "CLOSE_POSITION"
+    assert by_ticker["000003"]["rejected_reason"] == "DAILY_FAILED"
+    assert summary == {
+        "summary": True, "date": "20260921", "universe": 3, "candidates": 1, "degraded": True,
+    }
+
+
+def test_screen_dedupes_tickers_across_markets_and_marks_zero_candidate_days():
+    async def fetch_ranking(market: str) -> list[dict]:
+        return _ranking_output("000001")
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        return [_daily_row("20260921", 10800.0, 5e9, high=11000.0, low=9900.0)] + [
+            _daily_row(f"202608{d:02d}", 100.0, 4e9) for d in range(1, 26)   # 배수 1.25
+        ], None
+
+    rows, summary = asyncio.run(
+        screen("20260921", fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+    )
+    assert len(rows) == 1 and rows[0]["rejected_reason"] == "AMOUNT_MULTIPLE"
+    assert summary["universe"] == 1 and summary["candidates"] == 0 and not summary["degraded"]
+
+
+def test_write_candidates_puts_summary_last(tmp_path):
+    path = tmp_path / "20260921.jsonl"
+    write_candidates(path, [{"ticker": "000001", "rank": 1}], {"summary": True, "candidates": 1})
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert lines[0]["ticker"] == "000001"
+    assert lines[-1]["summary"] is True

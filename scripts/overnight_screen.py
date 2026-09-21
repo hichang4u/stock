@@ -13,9 +13,15 @@ data/overnight/candidates/<date>.jsonl 에 남긴다.
 
 from __future__ import annotations
 
+import argparse
+import asyncio
+import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
+from time import monotonic
+from typing import TYPE_CHECKING, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -25,6 +31,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if os.getenv("STOCK_SKIP_DOTENV", "0") != "1":
     load_dotenv(ROOT / ".env")
+
+if TYPE_CHECKING:
+    from scripts.fast_path_counterfactual import Throttle
+    from src.api import kis_rest
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -161,3 +171,175 @@ def build_row(
         "raw": {"ranking": ranking_row, "daily": daily, "daily_error": daily_error},
     }
     return row
+
+
+CANDIDATES_DIR = ROOT / "data" / "overnight" / "candidates"
+MARKETS = ("0001", "1001")  # 코스피, 코스닥 — paper_fast_probe와 같은 코드
+CALL_BUDGET = 60
+REQUEST_INTERVAL_SEC = 1.2
+
+FetchRanking = Callable[[str], Awaitable[list[dict]]]
+FetchDaily = Callable[[str], Awaitable[tuple[list[dict], str | None]]]
+
+
+def ranking_params(ranking_input: str) -> dict:
+    """paper_fast_probe의 랭킹 파라미터에 등락률 범위만 §2.2 값으로 덮는다."""
+    from src.modules.paper_fast_probe import _ranking_params
+
+    params = dict(_ranking_params(ranking_input))
+    params["fid_rsfl_rate1"] = f"{CHANGE_MIN:.1f}"
+    params["fid_rsfl_rate2"] = f"{CHANGE_MAX:.1f}"
+    return params
+
+
+async def screen(
+    date: str, *, fetch_ranking: FetchRanking, fetch_daily: FetchDaily
+) -> tuple[list[dict], dict]:
+    """유니버스 → 일봉 조인 → 규칙 → 순위. (모든 행, 요약 행)을 돌려준다.
+
+    거부 행도 원시 필드와 함께 남긴다(스펙 §2.3). 일봉이 하나라도 실패하면
+    degraded=True — 랭크 1이 그 종목이었을 가능성을 알 수 없어서다(§3.4).
+    """
+    ranking_rows: dict[str, dict] = {}
+    for market in MARKETS:
+        for row in await fetch_ranking(market):
+            ticker = str(row.get("mksc_shrn_iscd") or row.get("stck_shrn_iscd") or "")
+            if len(ticker) == 6 and ticker.isdigit() and ticker not in ranking_rows:
+                ranking_rows[ticker] = row
+
+    rows: list[dict] = []
+    degraded = False
+    for ticker, ranking_row in ranking_rows.items():
+        # 랭킹만으로 떨어지는 조건은 일봉을 부르지 않는다 — 호출 예산(§2.4).
+        pre = build_row(date, ranking_row, None, None)
+        change = pre["change_pct"]
+        if is_excluded_name(pre["name"]):
+            pre["rejected_reason"] = "NAME_EXCLUDED"
+        elif change is None or not (CHANGE_MIN <= change < CHANGE_MAX):
+            pre["rejected_reason"] = "CHANGE_PCT"
+        else:
+            pre["rejected_reason"] = None
+        if pre["rejected_reason"] is not None:
+            rows.append(pre)
+            continue
+        output2, error = await fetch_daily(ticker)
+        daily = parse_daily(output2, date) if error is None else None
+        if error is None and daily is None:
+            error = "NO_TODAY_BAR"
+        row = build_row(date, ranking_row, daily, error)
+        if row["rejected_reason"] == "DAILY_FAILED":
+            degraded = True
+        else:
+            row["rejected_reason"] = evaluate(row)
+        rows.append(row)
+
+    ranked = rank_candidates([r for r in rows if r["rejected_reason"] is None])
+    rank_of = {r["ticker"]: r["rank"] for r in ranked}
+    for row in rows:
+        row["rank"] = rank_of.get(row["ticker"])
+        if row["rejected_reason"] is None and row["rank"] is None:
+            row["rejected_reason"] = "BELOW_TOP"   # 통과했지만 6위 이하
+    rows.sort(key=lambda r: (r["rank"] is None, r["rank"] or 0, r["ticker"]))
+    summary = {
+        "summary": True, "date": date, "universe": len(ranking_rows),
+        "candidates": len(ranked), "degraded": degraded,
+    }
+    return rows, summary
+
+
+def write_candidates(path: Path, rows: list[dict], summary: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
+
+
+def _kis_fetchers(
+    budget: "kis_rest.CallBudget", throttle: "Throttle"
+) -> tuple[FetchRanking, FetchDaily]:
+    from scripts.catalyst_label import DAILY_PATH, DAILY_TR
+    from scripts.fast_path_counterfactual import _assert_success
+    from src.api import kis_rest
+    from src.modules.paper_fast_probe import RANKING_PATH, RANKING_TR_ID
+
+    async def _pace() -> None:
+        # Throttle은 순수 페이서다: wait_seconds(now)로 남은 시간을 받아 자고 mark(now)한다.
+        await asyncio.sleep(throttle.wait_seconds(monotonic()))
+        throttle.mark(monotonic())
+
+    async def fetch_ranking(market: str) -> list[dict]:
+        await _pace()
+        resp = await kis_rest.get(
+            RANKING_PATH, params=ranking_params(market), tr_id=RANKING_TR_ID,
+            stop_on_rate_limit=True, request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
+            budget=budget,
+        )
+        _assert_success(resp)
+        return list(resp.get("output") or [])[:30]
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        await _pace()
+        today = datetime.now(KST).strftime("%Y%m%d")
+        resp = await kis_rest.get(
+            DAILY_PATH, tr_id=DAILY_TR,
+            params={
+                "FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker,
+                "FID_INPUT_DATE_1": "20250101", "FID_INPUT_DATE_2": today,
+                "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "0",
+            },
+            stop_on_rate_limit=True, request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
+            budget=budget,
+        )
+        if str(resp.get("rt_cd") or "") != "0":
+            return [], f"KIS_ERROR:{resp.get('msg_cd') or 'UNKNOWN'}"
+        return list(resp.get("output2") or []), None
+
+    return fetch_ranking, fetch_daily
+
+
+async def main_async(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="C1 종가 스크리닝 (15:32)")
+    parser.add_argument("--dry-run", action="store_true", help="호출은 하되 기록하지 않는다")
+    parser.add_argument("--root", type=Path, default=ROOT, help="data/ 가 있는 트리")
+    parser.add_argument("--date", default=None, help="기록 파일 이름(기본: 오늘 KST). 테스트용")
+    args = parser.parse_args(argv)
+
+    from scripts.fast_path_counterfactual import PocStop, Throttle
+    from scripts.track_b_backfill import assert_paper_mode
+    from src.api import auth, kis_rest
+
+    assert_paper_mode()
+    if not await auth.load_or_refresh():
+        raise PocStop("TOKEN_UNAVAILABLE")
+    date = args.date or datetime.now(KST).strftime("%Y%m%d")
+    budget = kis_rest.CallBudget(CALL_BUDGET)
+    fetch_ranking, fetch_daily = _kis_fetchers(budget, Throttle(REQUEST_INTERVAL_SEC))
+    rows, summary = await screen(date, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+    print(f"유니버스 {summary['universe']} / 후보 {summary['candidates']} / "
+          f"호출 {budget.used} / degraded={summary['degraded']}")
+    for row in rows:
+        if row["rank"]:
+            print(f"  {row['rank']} {row['ticker']} {row['name']} 종가 {row['close']:.0f} "
+                  f"등락 {row['change_pct']:+.2f}% 배수 {row['amount_multiple']:.2f}")
+    if args.dry_run:
+        print("(dry-run: 기록하지 않음)")
+        return 0
+    path = args.root / "data" / "overnight" / "candidates" / f"{date}.jsonl"
+    write_candidates(path, rows, summary)
+    print(f"기록: {path}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    from scripts.fast_path_counterfactual import PocStop
+
+    try:
+        return asyncio.run(main_async(argv))
+    except PocStop as exc:
+        print(f"중단: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
