@@ -72,7 +72,11 @@ KIS `ranking/fluctuation` (`paper_fast_probe._ranking_params`와 같은 파라�
 
 - 순위: **거래대금 배수(당일 / 20일 평균) 내림차순.** 동률이면 등락률 높은 쪽.
 - **상위 5개 기록, 랭크 1이 주 표본.** A와 같은 "하루 1종목" 프레임.
-- 진입가 = **D-0 종가** (스크리닝 시점의 `stck_prpr`, 마감 후이므로 종가와 같다).
+- 진입가 = **D-0 종가** — 일봉 `stck_clpr`(있으면), 없으면(일봉 실패 → `DAILY_FAILED`)
+  랭킹 응답의 `stck_prpr`로 대체한다(`build_row`, §2.4의 예산 소진·오류 처리와 같다).
+  정정(2026-09-21, 전수 리뷰 후): 원문은 스크리닝 시점의 `stck_prpr`가 곧 종가라고
+  적었지만, 구현은 처음부터 일봉을 우선하고 `stck_prpr`는 일봉이 없을 때만 쓴다 —
+  구현을 바꾼 게 아니라 서술을 코드에 맞춘 것이다.
 - 기록 형식: `data/overnight/candidates/<D-0>.jsonl`, 한 줄 = 후보 1개. 필터·순위에 쓴
   원시 필드(등락률, OHLC, 거래대금, 20일 평균, 배수, 플래그)를 그대로 남긴다 — H3처럼
   나중에 다른 규칙으로 재라벨할 수 있게. 필터를 통과하지 못한 유니버스 종목도
@@ -110,7 +114,7 @@ D+1 15:45  track_b_backfill.py  ──▶ data/backtest_bars/<D+1>_<ticker>.json
 |---|---|---|
 | `scripts/overnight_screen.py` (신규) | §2 규칙으로 후보 기록. `--dry-run`(호출만, 기록 없음), `--root` | `src.api.kis_rest`, `src.api.auth.load_or_refresh`, `paper_fast_probe._ranking_params` 재사용, `scripts/catalyst_label.py`의 일봉 호출 |
 | `scripts/run_overnight_screen.ps1` (신규) | Task Scheduler 런처. `run_backfill.ps1`을 본뜨고 stderr 처리(2026-09-18 수정)를 포함 | — |
-| `scripts/track_b_backfill.py` (수정, `needed_pairs`만) | `data/overnight/candidates/*.jsonl`의 (D+1, ticker) 쌍을 대상에 합류. 이미 채워진 쌍은 기존대로 건너뜀 | 기존 백필·백업 흐름 그대로 |
+| `scripts/track_b_backfill.py` (수정: `overnight_pairs` 신규, `needed_pairs(overnight_dir=, calendar_path=)`, `main_async` 호출부) | `data/overnight/candidates/*.jsonl`의 (D+1, ticker) 쌍을 대상에 합류. 이미 채워진 쌍은 기존대로 건너뜀 | 기존 백필·백업 흐름 그대로 |
 | `scripts/overnight_sieve.py` (신규) | 분봉 F4 재생 + §4 집계. `--root`, `--json` | `scripts/track_b_rules.simulate_exit(bars, entry_idx, entry_price, order="low_first")` — 단, 진입 봉 이전 가격(전날 종가)에서 시작하므로 첫 봉 시가 갭 처리(§3.2)는 호출부가 먼저 한다. 비용 상수는 개선 계획 §2 |
 
 ### 3.2 분봉 재생 규칙
@@ -125,6 +129,14 @@ D+1 15:45  track_b_backfill.py  ──▶ data/backtest_bars/<D+1>_<ticker>.json
   타임아웃 0.20%p). 종가 매수의 진입 슬리피지는 0으로 둔다 — 마감 동시호가 단일가
   체결을 가정. 이 가정은 §6 (a)에서 재검증한다.
 - 총손익·비용 차감·슬리피지 차감 세 값을 모두 저장하고 **판정은 슬리피지 차감값**으로.
+
+**정정 (2026-09-21, 첫 리뷰 후 — 표본 무결성 가드 추가).** 규칙: 시가 갭의 절대값이
+30%를 넘으면(`|갭| > 30%`) 의심 행(`SUSPECT_CORPORATE_ACTION`)으로 표시해 랭크 1 주
+표본 n에서 제외하고, `missing.suspect_corporate_action`으로 따로 센다. 정확히 −30%는
+KRX 하한가(상하한 ±30%)라 넘는 것이 아니므로 의심하지 않고 표본에 남긴다(보통
+`GAP_HARD_STOP` 등 일반 규칙대로 처리). 사유: 사전등록 후 첫 리뷰에서 액면분할·감자
+같은 기준가 변경이 정상 갭하락 손익 분포에 섞이는 것을 막기 위해 추가한 표본
+무결성 장치이며, §4.1의 임계값·판정식은 바꾸지 않는다.
 
 ### 3.3 스케줄링
 
@@ -197,6 +209,9 @@ Telegram 알림, UI, DB 테이블, 실주문 — 전부 없다. 파일 두 디�
 - 스크리닝 실패일, `degraded=true`일, 백필 미완료일을 각각 센다. 실패일이 전체의 20%를
   넘으면 통계보다 수집기를 먼저 고친다.
 - 후보 0개인 날의 비율도 기록한다 — 규칙이 너무 좁으면 n = 50까지 예상보다 오래 걸린다.
+- `suspect_corporate_action`(|시가 갭| > 30%로 의심돼 랭크 1 주 표본 n에서 빠진 건수,
+  §3.2 정정)도 센다 — 기업 행위 빈도가 이상히 높으면 임계값이 아니라 데이터원을
+  의심한다.
 
 ## 5. 재평가 절차
 

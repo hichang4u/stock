@@ -10,6 +10,10 @@ data/overnight/candidates/<date>.jsonl 에 남긴다.
 유니버스는 KIS 거래량순위 TR(FHPST01710000) 상위 30/시장 + 클라이언트 등락률 필터
 (코스피·코스닥 각 30), 필터는 랭킹 응답 + 일봉 1콜(당일 OHLC와 직전 20거래일 거래대금).
 마감 후에 돌므로 A·F5와 유량이 겹치지 않는다.
+
+같은 날 15:40 이후 재실행은 15:32 실행과 동등하지 않다 — 시간외 거래가
+`acml_tr_pbmn`(거래대금)과 거래량 순위를 바꾼다. 15:32 실행이 실패했으면 15:40 전에
+즉시 재실행하고, 그러지 못했으면 그날은 결측으로 둔다(재실행으로 메우지 않는다).
 """
 
 from __future__ import annotations
@@ -135,6 +139,12 @@ def parse_daily(output2: list[dict], date: str) -> dict | None:
     }
 
 
+def latest_bar_date(output2: list[dict]) -> str | None:
+    """달력 종목 일봉 output2에서 가장 최근 거래일. 없으면 None(운영자 메시지용)."""
+    dates = [str(r["stck_bsop_date"]) for r in output2 if r.get("stck_bsop_date")]
+    return max(dates) if dates else None
+
+
 def is_trading_day(output2: list[dict], date: str) -> bool:
     """달력 종목(§3.4)의 일봉에 `date` 행이 있으면 거래일. 휴장일에는 랭킹 API가 전
     거래일 값을 그대로 돌려주므로, 이 일봉 유무로만 거래일 여부를 판단한다."""
@@ -235,7 +245,13 @@ FetchDaily = Callable[[str], Awaitable[tuple[list[dict], str | None]]]
 
 
 def ranking_params(ranking_input: str) -> dict:
-    """paper_fast_probe의 랭킹 파라미터에 등락률 범위만 §2.2 값으로 덮는다."""
+    """paper_fast_probe의 랭킹 파라미터에 등락률 범위만 §2.2 값으로 덮는다.
+
+    이 TR(FHPST01710000, 거래량순위)은 서버가 fid_rsfl_rate1/2를 무시한다(스펙 §2.1
+    정정 — 09/21 dry-run에서 유니버스 58행 중 21행만 실제로 [3, 25) 범위 안이었다).
+    그래도 계속 보내는 것 자체는 무해하고, 실제 등락률 범위는 evaluate()가
+    클라이언트에서 건다.
+    """
     from src.modules.paper_fast_probe import _ranking_params
 
     params = dict(_ranking_params(ranking_input))
@@ -413,7 +429,8 @@ async def main_async(argv: list[str] | None = None) -> int:
         trading_days_from_daily_chart(calendar_output2),
     )
     if calendar_status == "HOLIDAY":
-        print(f"휴장일 또는 장 마감 전: {date} 봉 없음 — 기록하지 않음")
+        latest = latest_bar_date(calendar_output2)
+        print(f"휴장일 또는 장 마감 전: {date} 봉 없음 (최신 봉 {latest}) — 기록하지 않음")
         return 0
 
     rows, summary = await screen(date, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)

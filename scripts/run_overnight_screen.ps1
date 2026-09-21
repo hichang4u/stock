@@ -21,11 +21,23 @@ $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $script = Join-Path $repoRoot "scripts\overnight_screen.py"
 $logDir = Join-Path $repoRoot "data\logs"
 
+# run_backfill.ps1의 $EARLIEST 가드와 같은 패턴이다. C1은 종가 기준 후보를 기록하므로
+# 장중에 돌면 그 시점의 장중 값을 종가로 잘못 남긴다 — 15:31 전에는 막는다.
+$EARLIEST = [TimeSpan]::new(15, 31, 0)
+
 function Write-Ok([string]$Text)   { Write-Host "  [OK] $Text" -ForegroundColor Green }
 function Write-Fail([string]$Text) { Write-Host "  [실패] $Text" -ForegroundColor Red }
 
 if (-not (Test-Path $venvPython)) { Write-Fail "가상환경이 없습니다: $venvPython"; exit 1 }
 if (-not (Test-Path $script)) { Write-Fail "스크립트가 없습니다: $script"; exit 1 }
+
+$now = (Get-Date).TimeOfDay
+if (-not $DryRun -and $now -lt $EARLIEST) {
+    Write-Fail "장 마감 전입니다. 15:31 이후에만 돕니다 — 장중 값을 종가로 기록하지 않기 위한 가드."
+    Write-Host "    계획만 보려면: run_overnight_screen.ps1 -DryRun"
+    exit 1
+}
+
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss"

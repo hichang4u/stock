@@ -51,20 +51,24 @@ _SLIPPAGE_BY_REASON = {
 }
 
 
-SUSPECT_GAP_PCT = -30.0  # 이 아래는 급락이 아니라 액면분할·감자 등 기업 행위로 의심한다.
+# ±30%를 넘는 갭은 기준가 변경(액면분할·감자 등) 없이는 불가능하다 — 정정(2026-09-21,
+# 첫 리뷰 후): 정확히 −30%는 KRX 하한가(상하한 ±30%)라 표본에 남긴다. 그래서 경계는
+# 등호 없는 초과(>)이고, 판정은 절대값이다(상한가 쪽 기준가 변경도 같은 이유로 막는다).
+SUSPECT_GAP_ABS_PCT = 30.0
 
 
 def simulate_overnight(bars: list[dict], entry_price: float) -> dict:
     """전날 종가 진입. 첫 봉 시가가 하드스탑 아래면 시가에서 끝, 아니면 트랙 B F4 재생.
 
-    시가 갭이 SUSPECT_GAP_PCT(-30%) 이하면 하드스탑보다 먼저 SUSPECT_CORPORATE_ACTION으로
-    끝낸다 — 액면분할·감자 같은 기업 행위가 일반 갭하락 손익 분포에 섞이는 것을 막는다.
+    시가 갭의 절대값이 SUSPECT_GAP_ABS_PCT(30%)를 넘으면 하드스탑보다 먼저
+    SUSPECT_CORPORATE_ACTION으로 끝낸다 — 액면분할·감자 같은 기업 행위가 일반 갭하락
+    손익 분포에 섞이는 것을 막는다. 정확히 −30%(하한가)는 넘지 않으므로 의심하지 않는다.
     """
     first = bars[0]
     open_price = float(first["open"])
     gap_pct = round((open_price / entry_price - 1) * 100, 10)
     complete = warmup.covers_session(bars)
-    if gap_pct <= SUSPECT_GAP_PCT:
+    if abs(gap_pct) > SUSPECT_GAP_ABS_PCT:
         return {
             "open": open_price, "gap_pct": gap_pct, "exit_reason": "SUSPECT_CORPORATE_ACTION",
             "exit_time": first["time"], "exit_price": open_price, "gross_pct": gap_pct,
@@ -115,7 +119,7 @@ def summarize(results: list[dict], *, missing: dict) -> dict:
         1 for r in results
         if r.get("rank") == 1 and r.get("exit_reason") == "SUSPECT_CORPORATE_ACTION"
     )
-    # SUSPECT_CORPORATE_ACTION(시가 갭 ≤ -30%)은 급락이 아니라 액면분할·감자 등 기업
+    # SUSPECT_CORPORATE_ACTION(|시가 갭| > 30%)은 급락이 아니라 액면분할·감자 등 기업
     # 행위로 의심되는 값이라 주 표본에서 뺀다 — 정상 갭하락 분포에 섞이면 안 된다.
     rank1 = sorted(
         (r for r in results if r.get("rank") == 1 and r.get("bars_complete")
@@ -285,9 +289,14 @@ def run(root: Path) -> tuple[list[dict], dict]:
         for row in rows:
             # load_candidates가 이미 ticker/rank/close를 보장한다 — 여기서 다시 지키지 않는다.
             bars = read_cached_bars(next_date, str(row["ticker"]), cache_dir=bars_dir)
-            if not bars:
+            if not isinstance(bars, list) or not bars or not all(
+                isinstance(b, dict) for b in bars
+            ):
                 missing["bars_missing"] += 1
                 continue
+            # 캐시 파일의 봉 순서를 신뢰하지 않는다 — merge_bars가 시각순 정렬을
+            # 보장하지만, 다른 경로로 쓰인 파일까지 대비해 여기서도 다시 정렬한다.
+            bars = sorted(bars, key=lambda b: str(b.get("time", "")))
             sim = simulate_overnight(bars, float(row["close"]))
             if not sim["bars_complete"]:
                 missing["bars_incomplete"] += 1

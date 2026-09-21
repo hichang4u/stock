@@ -251,10 +251,10 @@ def needed_pairs(
             found = overnight_pairs(overnight_dir, heuristic_dates)
         else:
             found = overnight_pairs(overnight_dir, all_dates, calendar=calendar)
+        # C1은 지표를 쓰지 않으므로 all_dates(F1 워밍업 달력)에 D+1을 넣지 않는다 —
+        # 넣으면 그 날짜가 워밍업 대상이 돼 불필요한 (D-0, ticker) 쌍이 함께 채워진다.
         for date, ticker_set in found.items():
             needed.setdefault(date, set()).update(ticker_set)
-            if date not in all_dates:
-                all_dates = sorted(set(all_dates) | {date})
 
     if warmup_days > 0:
         for date in list(needed):

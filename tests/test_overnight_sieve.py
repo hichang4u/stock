@@ -81,6 +81,29 @@ def test_gap_beyond_suspect_threshold_is_flagged_corporate_action_not_hard_stop(
     assert r["bars_complete"] is True
 
 
+def test_gap_exactly_negative_30_percent_is_the_limit_down_not_suspect():
+    # KRX 하한가는 정확히 -30%다 — 경계는 초과(>)이므로 이 값은 의심 행이 아니라
+    # 보통 갭하락(하드스탑 아래)으로 남는다.
+    bars = _session(_bar("090000", 70.0, 71.0, 69.0, 70.0))
+    r = simulate_overnight(bars, entry_price=100.0)
+    assert r["gap_pct"] == -30.0
+    assert r["exit_reason"] == "GAP_HARD_STOP"
+
+
+def test_gap_just_past_negative_30_percent_is_suspect():
+    bars = _session(_bar("090000", 69.5, 70.5, 69.0, 69.5))
+    r = simulate_overnight(bars, entry_price=100.0)
+    assert r["gap_pct"] == -30.5
+    assert r["exit_reason"] == "SUSPECT_CORPORATE_ACTION"
+
+
+def test_gap_up_past_30_percent_is_also_suspect():
+    bars = _session(_bar("090000", 131.0, 132.0, 130.0, 131.0))
+    r = simulate_overnight(bars, entry_price=100.0)
+    assert r["gap_pct"] == 31.0
+    assert r["exit_reason"] == "SUSPECT_CORPORATE_ACTION"
+
+
 def test_costs_follow_the_improvement_plan_constants():
     assert (BASE_ROUND_TRIP_COST_PCT, HARD_STOP_SLIPPAGE_PCT, TRAILING_SLIPPAGE_PCT) == (
         0.18, 0.30, 0.15
@@ -261,3 +284,33 @@ def test_run_replays_next_day_bars_and_accounts_for_missing(tmp_path):
     saved = json.loads((tmp_path / "data" / "overnight" / "results" / "20260921.json")
                        .read_text(encoding="utf-8"))
     assert saved[0]["ticker"] == "000001"
+
+
+def test_run_sorts_an_unsorted_two_bar_cache_file_before_simulating(tmp_path):
+    # 캐시 파일의 봉 순서를 신뢰하지 않는다 — 파일이 시각 역순이어도 정렬된 것과
+    # 같은 결과가 나와야 한다.
+    _write_candidates(tmp_path, "20260921", [
+        {"date": "20260921", "ticker": "000001", "rank": 1, "close": 100.0},
+    ])
+    bar_a = _bar("090000", 101.0, 101.5, 100.8, 101.2)
+    bar_b = _bar("090100", 101.2, 101.6, 101.0, 101.3)
+    _write_bars(tmp_path, "20260922", "000001", [bar_b, bar_a])  # 파일에는 역순으로 저장
+    results, missing = run(tmp_path)
+    expected = simulate_overnight([bar_a, bar_b], entry_price=100.0)
+    assert results[0]["exit_reason"] == expected["exit_reason"]
+    assert results[0]["exit_time"] == expected["exit_time"]
+    assert results[0]["gross_pct"] == expected["gross_pct"]
+
+
+def test_run_treats_malformed_cached_bars_as_missing_instead_of_crashing(tmp_path):
+    _write_candidates(tmp_path, "20260921", [
+        {"date": "20260921", "ticker": "000001", "rank": 1, "close": 100.0},
+    ])
+    bars_dir = tmp_path / "data" / "backtest_bars"
+    bars_dir.mkdir(parents=True, exist_ok=True)
+    (bars_dir / "20260922_000001.json").write_text(
+        json.dumps({"not": "a list"}), encoding="utf-8"
+    )
+    results, missing = run(tmp_path)
+    assert results == []
+    assert missing["bars_missing"] == 1

@@ -443,10 +443,18 @@ requirements-dev.txt (개발/테스트 전용)
     -Settings $Settings `
     -RunLevel Highest
 
-  확인: 등록 다음 거래일 15:33에 data\overnight\candidates\<날짜>.jsonl 이 있고 마지막
-  줄이 {"summary": true, ...} 인지. 없으면 data\logs\overnight_screen_*.log 를 본다.
-  주말은 트리거(평일만)로 배제하고, 휴장일은 005930 달력 종목 프로브(스펙 §3.4)가
-  걸러낸다 — 오늘 봉이 없으면 파일을 남기지 않고 정상 종료(0)한다.
+  확인: 등록 다음 거래일 15:36에 data\overnight\candidates\<날짜>.jsonl 이 있고 마지막
+  줄이 {"summary": true, ...} 인지(60종목이면 일봉 호출까지 약 2분 걸린다). 없으면
+  data\logs\overnight_screen_*.log 를 본다. 주말은 트리거(평일만)로 배제하고, 휴장일은
+  005930 달력 종목 프로브(스펙 §3.4)가 걸러낸다 — 오늘 봉이 없으면 파일을 남기지 않고
+  정상 종료(0)한다.
+
+  운영 예외일: 2026-11-19(수능일)은 KRX가 10:00~16:30로 운영한다(정규 09:00~15:30이
+  아니다). 이 날은 StockBot_OvernightScreen 작업을 비활성화하거나, 대신 16:32에
+  run_overnight_screen.ps1을 수동으로 돌리고 그 뒤 run_backfill.ps1을 실행한다.
+  작업이 이미 15:32에 돌아 파일을 남겼다면(정규 마감 전 장중 값을 종가로 기록한 것) 그
+  파일을 지운다 — 그래야 그날이 결측(overnight_sieve의 screen_failed)으로 정확히
+  집계된다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 12. 실행 방법
