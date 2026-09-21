@@ -50,7 +50,8 @@ HISTORY_DAYS = 20
 
 # ETF/ETN/스팩은 이름으로 거른다. 랭킹 응답에 상품 구분 플래그가 없다.
 _EXCLUDED_NAME_TOKENS = ("ETF", "ETN", "스팩", "KODEX", "TIGER", "KBSTAR", "ARIRANG",
-                         "HANARO", "SOL ", "ACE ", "KOSEF", "TIMEFOLIO", "PLUS ")
+                         "HANARO", "SOL ", "ACE ", "KOSEF", "TIMEFOLIO", "PLUS ",
+                         "RISE ", "KIWOOM ")
 
 
 def close_position(high: float, low: float, close: float) -> float | None:
@@ -133,6 +134,12 @@ def parse_daily(output2: list[dict], date: str) -> dict | None:
     }
 
 
+def is_trading_day(output2: list[dict], date: str) -> bool:
+    """달력 종목(§3.4)의 일봉에 `date` 행이 있으면 거래일. 휴장일에는 랭킹 API가 전
+    거래일 값을 그대로 돌려주므로, 이 일봉 유무로만 거래일 여부를 판단한다."""
+    return parse_daily(output2, date) is not None
+
+
 def build_row(
     date: str, ranking_row: dict, daily: dict | None, daily_error: str | None
 ) -> dict:
@@ -175,7 +182,7 @@ def build_row(
 
 CANDIDATES_DIR = ROOT / "data" / "overnight" / "candidates"
 MARKETS = ("0001", "1001")  # 코스피, 코스닥 — paper_fast_probe와 같은 코드
-CALL_BUDGET = 60
+CALL_BUDGET = 100  # 랭킹 2 + 거래일 확인 1 + 일봉 ≤60 + 재시도 여유(스펙 §2.4)
 REQUEST_INTERVAL_SEC = 1.2
 
 FetchRanking = Callable[[str], Awaitable[list[dict]]]
@@ -199,7 +206,12 @@ async def screen(
 
     거부 행도 원시 필드와 함께 남긴다(스펙 §2.3). 일봉이 하나라도 실패하면
     degraded=True — 랭크 1이 그 종목이었을 가능성을 알 수 없어서다(§3.4).
+
+    예산이 소진(RequestBudgetExceeded)되면 그 뒤 종목은 fetch_daily를 아예 부르지
+    않는다 — 어차피 실패할 호출에 1.2초씩 페이싱만 낭비하지 않기 위해서다(§2.4).
     """
+    from src.api.kis_rest import RequestBudgetExceeded
+
     ranking_rows: dict[str, dict] = {}
     for market in MARKETS:
         for row in await fetch_ranking(market):
@@ -209,6 +221,7 @@ async def screen(
 
     rows: list[dict] = []
     degraded = False
+    budget_exceeded = False
     for ticker, ranking_row in ranking_rows.items():
         # 랭킹만으로 떨어지는 조건은 일봉을 부르지 않는다 — 호출 예산(§2.4).
         pre = build_row(date, ranking_row, None, None)
@@ -222,11 +235,19 @@ async def screen(
         if pre["rejected_reason"] is not None:
             rows.append(pre)
             continue
-        try:
-            # 예산 초과(RequestBudgetExceeded)·전송 오류도 KIS 오류 응답과 동일하게 취급한다.
-            output2, error = await fetch_daily(ticker)
-        except Exception as exc:
-            output2, error = [], f"EXCEPTION:{type(exc).__name__}"
+        output2: list[dict]
+        error: str | None
+        if budget_exceeded:
+            output2, error = [], "EXCEPTION:RequestBudgetExceeded"
+        else:
+            try:
+                # 예산 초과(RequestBudgetExceeded)·전송 오류도 KIS 오류 응답과 동일하게 취급한다.
+                output2, error = await fetch_daily(ticker)
+            except RequestBudgetExceeded:
+                budget_exceeded = True
+                output2, error = [], "EXCEPTION:RequestBudgetExceeded"
+            except Exception as exc:
+                output2, error = [], f"EXCEPTION:{type(exc).__name__}"
         daily = parse_daily(output2, date) if error is None else None
         if error is None and daily is None:
             error = "NO_TODAY_BAR"
@@ -260,10 +281,10 @@ def write_candidates(path: Path, rows: list[dict], summary: dict) -> None:
 
 
 def _kis_fetchers(
-    budget: "kis_rest.CallBudget", throttle: "Throttle"
+    budget: "kis_rest.CallBudget", throttle: "Throttle", date: str
 ) -> tuple[FetchRanking, FetchDaily]:
     from scripts.catalyst_label import DAILY_PATH, DAILY_TR
-    from scripts.fast_path_counterfactual import _assert_success
+    from scripts.fast_path_counterfactual import PocStop
     from src.api import kis_rest
     from src.modules.paper_fast_probe import RANKING_PATH, RANKING_TR_ID
 
@@ -279,17 +300,21 @@ def _kis_fetchers(
             stop_on_rate_limit=True, request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
             budget=budget,
         )
-        _assert_success(resp)
+        # _assert_success는 분봉(MINUTE_PRICE_FAILED) 문구라 여기서 쓰면 사유가 틀린다(M6).
+        msg_cd = str(resp.get("msg_cd") or "")
+        if msg_cd in kis_rest.RATE_LIMIT_CODES:
+            raise PocStop("RATE_LIMIT", msg_cd)
+        if str(resp.get("rt_cd") or "") != "0":
+            raise PocStop("RANKING_FAILED", msg_cd or None)
         return list(resp.get("output") or [])[:30]
 
     async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
         await _pace()
-        today = datetime.now(KST).strftime("%Y%m%d")
         resp = await kis_rest.get(
             DAILY_PATH, tr_id=DAILY_TR,
             params={
                 "FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker,
-                "FID_INPUT_DATE_1": "20250101", "FID_INPUT_DATE_2": today,
+                "FID_INPUT_DATE_1": "20250101", "FID_INPUT_DATE_2": date,
                 "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "0",
             },
             # 일봉은 랭킹과 달리 레이트리밋에서 바로 포기하지 않는다 — kis_rest가 같은 예산
@@ -312,6 +337,7 @@ async def main_async(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", default=None, help="기록 파일 이름(기본: 오늘 KST). 테스트용")
     args = parser.parse_args(argv)
 
+    from scripts.catalyst_label import CALENDAR_TICKER
     from scripts.fast_path_counterfactual import PocStop, Throttle
     from scripts.track_b_backfill import assert_paper_mode
     from src.api import auth, kis_rest
@@ -321,8 +347,18 @@ async def main_async(argv: list[str] | None = None) -> int:
         raise PocStop("TOKEN_UNAVAILABLE")
     date = args.date or datetime.now(KST).strftime("%Y%m%d")
     budget = kis_rest.CallBudget(CALL_BUDGET)
-    fetch_ranking, fetch_daily = _kis_fetchers(budget, Throttle(REQUEST_INTERVAL_SEC))
+    fetch_ranking, fetch_daily = _kis_fetchers(budget, Throttle(REQUEST_INTERVAL_SEC), date)
+
+    # 휴장일 가드(§3.4): 랭킹은 휴장일에도 전 거래일 값을 그대로 돌려주므로, 루프 전에
+    # 달력 종목(005930)의 일봉으로 오늘 봉이 있는지 1콜로 먼저 확인한다.
+    calendar_output2, _calendar_error = await fetch_daily(CALENDAR_TICKER)
+    if not is_trading_day(calendar_output2, date):
+        print(f"휴장일 또는 장 마감 전: {date} 봉 없음 — 기록하지 않음")
+        return 0
+
     rows, summary = await screen(date, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+    if summary["universe"] == 0:
+        raise PocStop("EMPTY_UNIVERSE")
     print(f"유니버스 {summary['universe']} / 후보 {summary['candidates']} / "
           f"호출 {budget.used} / degraded={summary['degraded']}")
     for row in rows:

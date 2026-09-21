@@ -8,13 +8,16 @@ import json
 
 from scripts.overnight_screen import (
     AMOUNT_MULTIPLE_MIN,
+    CALL_BUDGET,
     CHANGE_MAX,
     CHANGE_MIN,
     CLOSE_POSITION_MIN,
+    _kis_fetchers,
     build_row,
     close_position,
     evaluate,
     is_excluded_name,
+    is_trading_day,
     parse_daily,
     rank_candidates,
     ranking_params,
@@ -68,6 +71,8 @@ def test_excluded_names_cover_etf_etn_spac():
     assert is_excluded_name("TIGER 반도체")
     assert is_excluded_name("삼성 KRX 2X ETN")
     assert is_excluded_name("하나32호스팩")
+    assert is_excluded_name("RISE 200")
+    assert is_excluded_name("KIWOOM 200")
     assert not is_excluded_name("성호전자")
 
 
@@ -115,6 +120,15 @@ def test_parse_daily_marks_short_history_and_missing_today():
     parsed = parse_daily(rows, "20260921")
     assert parsed["avg_amount_20d"] is None and parsed["history_days"] == 5
     assert parse_daily(rows, "20260922") is None
+
+
+def test_is_trading_day_true_iff_calendar_ticker_has_a_bar_for_date():
+    # 휴장일 가드(F1): 랭킹은 휴장일에도 전 거래일 값을 돌려주므로, 달력 종목
+    # (005930)의 일봉에 그날 행이 있는지만 본다.
+    rows = [_daily_row("20260921", 108.0, 5e9)]
+    assert is_trading_day(rows, "20260921") is True
+    assert is_trading_day(rows, "20260922") is False   # 휴장일 — 전 거래일 봉만 있음
+    assert is_trading_day([], "20260921") is False
 
 
 def test_build_row_carries_raw_fields_and_daily_failure():
@@ -218,6 +232,69 @@ def test_screen_isolates_a_daily_fetch_exception_to_one_ticker():
     assert by_ticker["000002"]["raw"]["daily_error"] == "EXCEPTION:RuntimeError"
     assert by_ticker["000001"]["rank"] == 1
     assert summary["degraded"] is True
+
+
+def test_screen_stops_calling_fetch_daily_once_the_call_budget_is_exceeded():
+    # F2: 두 번째 종목에서 RequestBudgetExceeded가 나면 세 번째는 fetch_daily를
+    # 아예 부르지 않고 바로 DAILY_FAILED로 남긴다 — 호출 2회로 끝나야 한다.
+    from src.api.kis_rest import RequestBudgetExceeded
+
+    calls: list[str] = []
+
+    async def fetch_ranking(market: str) -> list[dict]:
+        if market == "0001":
+            return _ranking_output("000001", "000002")
+        return _ranking_output("000003")
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        calls.append(ticker)
+        if ticker == "000002":
+            raise RequestBudgetExceeded("call budget exceeded: used=100 max=100")
+        rows = [_daily_row("20260921", 10800.0, 5e9, high=11000.0, low=9900.0, open_=10000.0)]
+        rows += [_daily_row(f"202608{d:02d}", 100.0, 1e9) for d in range(1, 26)]
+        return rows, None
+
+    rows, summary = asyncio.run(
+        screen("20260921", fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+    )
+    assert calls == ["000001", "000002"]   # 000003은 부르지 않았다
+    by_ticker = {r["ticker"]: r for r in rows}
+    assert by_ticker["000002"]["rejected_reason"] == "DAILY_FAILED"
+    assert by_ticker["000002"]["raw"]["daily_error"] == "EXCEPTION:RequestBudgetExceeded"
+    assert by_ticker["000003"]["rejected_reason"] == "DAILY_FAILED"
+    assert by_ticker["000003"]["raw"]["daily_error"] == "EXCEPTION:RequestBudgetExceeded"
+    assert summary["degraded"] is True
+
+
+def test_kis_fetchers_binds_ranking_and_daily_tr_ids_and_date(monkeypatch):
+    # M10: 네트워크 없이 kis_rest.get 자체를 가짜로 바꿔 두 콜의 kwargs만 검사한다.
+    # _kis_fetchers는 kis_rest를 함수 안에서 늦게 import하므로 모듈 객체에 패치한다.
+    import src.api.kis_rest as kis_rest
+    from scripts.catalyst_label import DAILY_TR
+    from scripts.fast_path_counterfactual import Throttle
+    from src.modules.paper_fast_probe import RANKING_TR_ID
+
+    calls: list[dict] = []
+
+    async def fake_get(path, **kwargs):
+        calls.append(kwargs)
+        return {"rt_cd": "0", "output": [], "output2": []}
+
+    monkeypatch.setattr(kis_rest, "get", fake_get)
+
+    fetch_ranking, fetch_daily = _kis_fetchers(
+        kis_rest.CallBudget(CALL_BUDGET), Throttle(0.0), "20260921"
+    )
+    asyncio.run(fetch_ranking("0001"))
+    asyncio.run(fetch_daily("005930"))
+
+    assert len(calls) == 2
+    ranking_call, daily_call = calls
+    assert ranking_call["stop_on_rate_limit"] is True
+    assert ranking_call["tr_id"] == RANKING_TR_ID
+    assert daily_call["stop_on_rate_limit"] is False
+    assert daily_call["tr_id"] == DAILY_TR
+    assert daily_call["params"]["FID_INPUT_DATE_2"] == "20260921"
 
 
 def test_write_candidates_puts_summary_last(tmp_path):
