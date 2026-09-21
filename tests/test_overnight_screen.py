@@ -6,6 +6,8 @@
 import asyncio
 import json
 
+import pytest
+
 from scripts.overnight_screen import (
     AMOUNT_MULTIPLE_MIN,
     CALL_BUDGET,
@@ -19,6 +21,7 @@ from scripts.overnight_screen import (
     evaluate,
     is_excluded_name,
     is_trading_day,
+    main,
     merge_calendar,
     parse_daily,
     rank_candidates,
@@ -304,7 +307,9 @@ def test_kis_fetchers_binds_ranking_and_daily_tr_ids_and_date(monkeypatch):
 
     assert len(calls) == 2
     ranking_call, daily_call = calls
-    assert ranking_call["stop_on_rate_limit"] is True
+    # 랭킹도 일봉처럼 kis_rest의 백오프 재시도에 맡긴다 — 마감 후 랭킹은 유량이
+    # 한가하므로 RATE_LIMIT에서 바로 포기하지 않는다(E4).
+    assert ranking_call["stop_on_rate_limit"] is False
     assert ranking_call["tr_id"] == RANKING_TR_ID
     assert daily_call["stop_on_rate_limit"] is False
     assert daily_call["tr_id"] == DAILY_TR
@@ -317,6 +322,13 @@ def test_write_candidates_puts_summary_last(tmp_path):
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert lines[0]["ticker"] == "000001"
     assert lines[-1]["summary"] is True
+
+
+def test_write_candidates_leaves_no_tmp_file_behind(tmp_path):
+    path = tmp_path / "20260921.jsonl"
+    write_candidates(path, [{"ticker": "000001", "rank": 1}], {"summary": True, "candidates": 1})
+    assert path.exists()
+    assert not path.with_suffix(".jsonl.tmp").exists()
 
 
 # --- A: 거래일 달력(calendar.json) ------------------------------------------------
@@ -350,3 +362,131 @@ def test_write_calendar_ignores_a_corrupt_existing_file(tmp_path):
     path.write_text("{not json", encoding="utf-8")
     write_calendar(path, {"20260921"})
     assert json.loads(path.read_text(encoding="utf-8")) == ["20260921"]
+
+
+def test_screen_propagates_a_fetch_ranking_exception():
+    # 랭킹 호출 자체가 죽으면(네트워크·PocStop이 아닌 일반 예외) screen()이 삼키지
+    # 않고 그대로 올려야 한다 — 일봉 실패(DAILY_FAILED)와 달리 유니버스가 없으면
+    # 그 시장 전체가 결측이라 조용히 넘어갈 수 없다.
+    async def fetch_ranking(market: str) -> list[dict]:
+        raise RuntimeError("boom")
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        return [], "KIS_ERROR:UNUSED"
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(screen("20260921", fetch_ranking=fetch_ranking, fetch_daily=fetch_daily))
+
+
+# --- D: main_async 종료 코드 -------------------------------------------------------
+
+
+def _install_main_async_fakes(monkeypatch, *, fetch_ranking, fetch_daily):
+    """main_async가 함수 안에서 늦게 import하는 세 이름을 그 원본 모듈에 패치한다."""
+    import scripts.overnight_screen as overnight_screen_module
+    import scripts.track_b_backfill as track_b_backfill_module
+    import src.api.auth as auth_module
+
+    def fake_kis_fetchers(budget, throttle, date):
+        return fetch_ranking, fetch_daily
+
+    async def fake_load_or_refresh():
+        return "token"
+
+    monkeypatch.setattr(overnight_screen_module, "_kis_fetchers", fake_kis_fetchers)
+    monkeypatch.setattr(auth_module, "load_or_refresh", fake_load_or_refresh)
+    monkeypatch.setattr(track_b_backfill_module, "assert_paper_mode", lambda: None)
+
+
+def _candidates_path(root, date):
+    return root / "data" / "overnight" / "candidates" / f"{date}.jsonl"
+
+
+def _calendar_path(root):
+    return root / "data" / "overnight" / "calendar.json"
+
+
+def test_main_async_holiday_returns_zero_writes_no_candidates_but_writes_calendar(
+    tmp_path, monkeypatch
+):
+    calendar_rows = [_daily_row("20260918", 100.0, 1e9)]   # 20260921 봉 없음 — 휴장일
+
+    async def fetch_ranking(market: str) -> list[dict]:
+        return []   # HOLIDAY면 screen()까지 가지 않으므로 호출되지 않는다
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        return calendar_rows, None
+
+    _install_main_async_fakes(monkeypatch, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+
+    rc = main(["--root", str(tmp_path), "--date", "20260921"])
+
+    assert rc == 0
+    assert not _candidates_path(tmp_path, "20260921").exists()
+    assert _calendar_path(tmp_path).exists()
+    assert json.loads(_calendar_path(tmp_path).read_text(encoding="utf-8")) == ["20260918"]
+
+
+def test_main_async_calendar_probe_failed_returns_two_and_writes_nothing(tmp_path, monkeypatch):
+    async def fetch_ranking(market: str) -> list[dict]:
+        return []
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        return [], "KIS_ERROR:X"
+
+    _install_main_async_fakes(monkeypatch, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+
+    rc = main(["--root", str(tmp_path), "--date", "20260921"])
+
+    assert rc == 2
+    assert not _candidates_path(tmp_path, "20260921").exists()
+    assert not _calendar_path(tmp_path).exists()
+
+
+def test_main_async_empty_universe_returns_two_and_writes_no_candidates_file(
+    tmp_path, monkeypatch
+):
+    calendar_rows = [_daily_row("20260921", 100.0, 1e9)]   # 프로브 통과 — 거래일
+
+    async def fetch_ranking(market: str) -> list[dict]:
+        return []   # 두 시장 모두 빈 랭킹
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        return calendar_rows, None
+
+    _install_main_async_fakes(monkeypatch, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+
+    rc = main(["--root", str(tmp_path), "--date", "20260921"])
+
+    assert rc == 2
+    assert not _candidates_path(tmp_path, "20260921").exists()
+
+
+def test_main_async_normal_run_writes_candidates_with_summary_last_and_calendar(
+    tmp_path, monkeypatch
+):
+    calendar_rows = [_daily_row("20260921", 100.0, 1e9)]   # 프로브 통과 — 거래일
+
+    async def fetch_ranking(market: str) -> list[dict]:
+        if market == "0001":
+            return _ranking_output("000001")
+        return []
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        if ticker == "005930":
+            return calendar_rows, None
+        rows = [_daily_row("20260921", 10800.0, 5e9, high=11000.0, low=9900.0, open_=10000.0)]
+        rows += [_daily_row(f"202608{d:02d}", 100.0, 1e9) for d in range(1, 26)]
+        return rows, None
+
+    _install_main_async_fakes(monkeypatch, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+
+    rc = main(["--root", str(tmp_path), "--date", "20260921"])
+
+    assert rc == 0
+    path = _candidates_path(tmp_path, "20260921")
+    assert path.exists()
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert lines[-1]["summary"] is True
+    assert any(r.get("ticker") == "000001" and r.get("rank") == 1 for r in lines[:-1])
+    assert _calendar_path(tmp_path).exists()

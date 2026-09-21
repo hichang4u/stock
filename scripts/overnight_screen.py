@@ -7,8 +7,9 @@ data/overnight/candidates/<date>.jsonl 에 남긴다.
     .\\.venv\\Scripts\\python.exe scripts\\overnight_screen.py            # 기록
     .\\.venv\\Scripts\\python.exe scripts\\overnight_screen.py --dry-run  # 호출만, 기록 없음
 
-유니버스는 KIS 등락률 랭킹(코스피·코스닥 각 30), 필터는 랭킹 응답 + 일봉 1콜(당일 OHLC와
-직전 20거래일 거래대금). 마감 후에 돌므로 A·F5와 유량이 겹치지 않는다.
+유니버스는 KIS 거래량순위 TR(FHPST01710000) 상위 30/시장 + 클라이언트 등락률 필터
+(코스피·코스닥 각 30), 필터는 랭킹 응답 + 일봉 1콜(당일 OHLC와 직전 20거래일 거래대금).
+마감 후에 돌므로 A·F5와 유량이 겹치지 않는다.
 """
 
 from __future__ import annotations
@@ -225,7 +226,6 @@ def build_row(
     return row
 
 
-CANDIDATES_DIR = ROOT / "data" / "overnight" / "candidates"
 MARKETS = ("0001", "1001")  # 코스피, 코스닥 — paper_fast_probe와 같은 코드
 CALL_BUDGET = 100  # 랭킹 2 + 거래일 확인 1 + 일봉 ≤60 + 재시도 여유(스펙 §2.4)
 REQUEST_INTERVAL_SEC = 1.2
@@ -269,15 +269,12 @@ async def screen(
     budget_exceeded = False
     for ticker, ranking_row in ranking_rows.items():
         # 랭킹만으로 떨어지는 조건은 일봉을 부르지 않는다 — 호출 예산(§2.4).
+        # evaluate()를 그대로 쓴다: daily=None이면 종가 위치가 없어 이름·등락률을
+        # 통과한 행은 전부 CLOSE_POSITION으로 떨어지므로, 이 두 사유만 여기서 가른다.
         pre = build_row(date, ranking_row, None, None)
-        change = pre["change_pct"]
-        if is_excluded_name(pre["name"]):
-            pre["rejected_reason"] = "NAME_EXCLUDED"
-        elif change is None or not (CHANGE_MIN <= change < CHANGE_MAX):
-            pre["rejected_reason"] = "CHANGE_PCT"
-        else:
-            pre["rejected_reason"] = None
-        if pre["rejected_reason"] is not None:
+        reason = evaluate(pre)
+        if reason in ("NAME_EXCLUDED", "CHANGE_PCT"):
+            pre["rejected_reason"] = reason
             rows.append(pre)
             continue
         output2: list[dict]
@@ -318,11 +315,15 @@ async def screen(
 
 
 def write_candidates(path: Path, rows: list[dict], summary: dict) -> None:
+    """후보 파일을 원자적으로 쓴다 — tmp에 다 쓰고 os.replace로 교체해, 쓰는 도중
+    중단돼도 요약 행 없는 반쪽 파일이 남지 않는다."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
+    os.replace(tmp_path, path)
 
 
 def _kis_fetchers(
@@ -342,7 +343,10 @@ def _kis_fetchers(
         await _pace()
         resp = await kis_rest.get(
             RANKING_PATH, params=ranking_params(market), tr_id=RANKING_TR_ID,
-            stop_on_rate_limit=True, request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
+            # 랭킹도 일봉처럼 레이트리밋에서 바로 포기하지 않는다 — 마감 후 랭킹은
+            # (A의 장중 F1과 달리) 유량이 이미 한가하므로 kis_rest의 백오프 재시도
+            # (최대 3회)에 맡기고, 최종 응답의 rt_cd/msg_cd로만 PocStop을 판단한다.
+            stop_on_rate_limit=False, request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
             budget=budget,
         )
         # _assert_success는 분봉(MINUTE_PRICE_FAILED) 문구라 여기서 쓰면 사유가 틀린다(M6).
@@ -362,7 +366,7 @@ def _kis_fetchers(
                 "FID_INPUT_DATE_1": "20250101", "FID_INPUT_DATE_2": date,
                 "FID_PERIOD_DIV_CODE": "D", "FID_ORG_ADJ_PRC": "0",
             },
-            # 일봉은 랭킹과 달리 레이트리밋에서 바로 포기하지 않는다 — kis_rest가 같은 예산
+            # 일봉도 레이트리밋에서 바로 포기하지 않는다 — kis_rest가 같은 예산
             # 안에서 백오프 재시도(최대 3회)하게 두어, 리밋 한 번에 종목 하나가 DAILY_FAILED로
             # 빠져 degraded=True가 되는 것을 막는다.
             stop_on_rate_limit=False, request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
