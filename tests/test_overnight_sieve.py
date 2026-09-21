@@ -154,6 +154,22 @@ def test_load_candidates_keeps_ranked_rows_and_flags_dead_files(tmp_path):
     assert "20260922" not in loaded and missing["screen_died"] == 1
 
 
+def test_load_candidates_skips_malformed_lines_but_keeps_the_file(tmp_path):
+    d = tmp_path / "data" / "overnight" / "candidates"
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"date": "20260921", "ticker": "000001", "rank": 1, "close": 100.0}),
+        "{not json",
+        json.dumps({"date": "20260921", "ticker": "bad", "rank": 2, "close": 50.0}),
+        json.dumps({"date": "20260921", "ticker": "000003", "rank": 3}),
+        json.dumps({"summary": True, "date": "20260921", "candidates": 1}),
+    ]
+    (d / "20260921.jsonl").write_text("\n".join(lines), encoding="utf-8")
+    loaded, missing = load_candidates(d)
+    assert [r["ticker"] for r in loaded["20260921"]] == ["000001"]
+    assert missing["screen_died"] == 0
+
+
 def test_run_replays_next_day_bars_and_accounts_for_missing(tmp_path):
     _write_candidates(tmp_path, "20260921", [
         {"date": "20260921", "ticker": "000001", "rank": 1, "close": 100.0},

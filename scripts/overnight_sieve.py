@@ -155,19 +155,41 @@ def load_candidates(candidates_dir: Path) -> tuple[dict[str, list[dict]], dict]:
     if not candidates_dir.exists():
         return loaded, missing
     for path in sorted(candidates_dir.glob("*.jsonl")):
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
-                if line.strip()]
+        rows: list[dict] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            # 잘린 줄 하나가 그날 보고 전체를 멈추면 안 된다 — overnight_pairs와 같은 규칙.
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            rows.append(row)
         if not rows or not rows[-1].get("summary"):
             missing["screen_died"] += 1
             continue
         summary = rows[-1]
         if summary.get("degraded"):
             missing["degraded"] += 1
-        ranked = [r for r in rows[:-1] if isinstance(r.get("rank"), int)]
+        ranked = [r for r in rows[:-1] if _is_valid_candidate_row(r)]
         if not ranked:
             missing["no_candidate"] += 1
         loaded[path.stem] = ranked
     return loaded, missing
+
+
+def _is_valid_candidate_row(row: dict) -> bool:
+    if not isinstance(row.get("rank"), int):
+        return False
+    ticker = str(row.get("ticker") or "")
+    if len(ticker) != 6 or not ticker.isdigit():
+        return False
+    try:
+        return float(row.get("close")) > 0  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
 
 
 def _next_dates(candidate_dates: list[str], bars_dir: Path) -> dict[str, str | None]:
@@ -195,6 +217,7 @@ def run(root: Path) -> tuple[list[dict], dict]:
             continue
         day_results: list[dict] = []
         for row in rows:
+            # load_candidates가 이미 ticker/rank/close를 보장한다 — 여기서 다시 지키지 않는다.
             bars = read_cached_bars(next_date, str(row["ticker"]), cache_dir=bars_dir)
             if not bars:
                 missing["bars_missing"] += 1
