@@ -430,7 +430,7 @@ requirements-dev.txt (개발/테스트 전용)
     -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"D:\Private\stock-prod\scripts\run_overnight_screen.ps1`""
 
-  $Trigger = New-ScheduledTaskTrigger -Daily -At 15:32
+  $Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 15:32
 
   $Settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
@@ -445,8 +445,8 @@ requirements-dev.txt (개발/테스트 전용)
 
   확인: 등록 다음 거래일 15:33에 data\overnight\candidates\<날짜>.jsonl 이 있고 마지막
   줄이 {"summary": true, ...} 인지. 없으면 data\logs\overnight_screen_*.log 를 본다.
-  주말·휴장일에도 돌지만 랭킹이 전일 값이라 후보 파일에 그날 날짜가 남는다 —
-  overnight_sieve 가 D+1 분봉이 없는 날은 표본에서 뺀다(스펙 §4.3).
+  주말은 트리거(평일만)로 배제하고, 휴장일은 005930 달력 종목 프로브(스펙 §3.4)가
+  걸러낸다 — 오늘 봉이 없으면 파일을 남기지 않고 정상 종료(0)한다.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 12. 실행 방법

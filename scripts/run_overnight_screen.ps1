@@ -52,6 +52,7 @@ try {
         $writer.WriteLine($line)
     }
     $code = $LASTEXITCODE
+    if ($null -eq $code) { $code = 1 }
 } finally {
     $ErrorActionPreference = $previousErrorAction
     Pop-Location
