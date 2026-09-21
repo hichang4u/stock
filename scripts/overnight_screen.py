@@ -140,6 +140,21 @@ def is_trading_day(output2: list[dict], date: str) -> bool:
     return parse_daily(output2, date) is not None
 
 
+def classify_calendar_probe(
+    output2: list[dict], error: str | None, date: str
+) -> str:
+    """달력 종목(§3.4) 프로브 결과를 셋 중 하나로 나눈다: TRADING_DAY / HOLIDAY / FAILED.
+
+    프로브 실패를 휴장일로 오인하면 결측이 "거래일 아님"으로 둔갑한다 — fetch_daily는
+    rt_cd != 0인 모든 경우(KIS 오류·토큰 만료·네트워크 전송 실패까지 kis_rest가 rt_cd="1"
+    응답으로 바꿔 돌려준다)에 `([], "KIS_ERROR:...")`를 돌려주므로, 오류가 있으면 휴장일
+    판정보다 먼저 실패로 갈라낸다.
+    """
+    if error is not None:
+        return "FAILED"
+    return "TRADING_DAY" if is_trading_day(output2, date) else "HOLIDAY"
+
+
 def build_row(
     date: str, ranking_row: dict, daily: dict | None, daily_error: str | None
 ) -> dict:
@@ -351,8 +366,12 @@ async def main_async(argv: list[str] | None = None) -> int:
 
     # 휴장일 가드(§3.4): 랭킹은 휴장일에도 전 거래일 값을 그대로 돌려주므로, 루프 전에
     # 달력 종목(005930)의 일봉으로 오늘 봉이 있는지 1콜로 먼저 확인한다.
-    calendar_output2, _calendar_error = await fetch_daily(CALENDAR_TICKER)
-    if not is_trading_day(calendar_output2, date):
+    # 프로브 실패를 휴장일로 오인하면 결측이 "거래일 아님"으로 둔갑한다 — 오류부터 가른다.
+    calendar_output2, calendar_error = await fetch_daily(CALENDAR_TICKER)
+    calendar_status = classify_calendar_probe(calendar_output2, calendar_error, date)
+    if calendar_status == "FAILED":
+        raise PocStop("CALENDAR_PROBE_FAILED", calendar_error)
+    if calendar_status == "HOLIDAY":
         print(f"휴장일 또는 장 마감 전: {date} 봉 없음 — 기록하지 않음")
         return 0
 

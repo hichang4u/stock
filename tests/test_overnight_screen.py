@@ -14,6 +14,7 @@ from scripts.overnight_screen import (
     CLOSE_POSITION_MIN,
     _kis_fetchers,
     build_row,
+    classify_calendar_probe,
     close_position,
     evaluate,
     is_excluded_name,
@@ -129,6 +130,17 @@ def test_is_trading_day_true_iff_calendar_ticker_has_a_bar_for_date():
     assert is_trading_day(rows, "20260921") is True
     assert is_trading_day(rows, "20260922") is False   # 휴장일 — 전 거래일 봉만 있음
     assert is_trading_day([], "20260921") is False
+
+
+def test_classify_calendar_probe_distinguishes_failure_from_holiday():
+    # 프로브 실패(KIS 오류·토큰 만료·네트워크 전송 실패 — fetch_daily가 전부
+    # ([], "KIS_ERROR:...")로 돌려준다)를 휴장일로 오인하면 안 된다(F1 라운드 2).
+    rows = [_daily_row("20260921", 108.0, 5e9)]
+    assert classify_calendar_probe(rows, None, "20260921") == "TRADING_DAY"
+    assert classify_calendar_probe(rows, None, "20260922") == "HOLIDAY"
+    assert classify_calendar_probe([], "KIS_ERROR:EGW00123", "20260921") == "FAILED"
+    # 오류가 있으면 output2가 우연히 비어 있지 않아도(예: 부분 응답) 여전히 FAILED다.
+    assert classify_calendar_probe(rows, "EXCEPTION:RuntimeError", "20260921") == "FAILED"
 
 
 def test_build_row_carries_raw_fields_and_daily_failure():
