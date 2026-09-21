@@ -70,6 +70,17 @@ def test_incomplete_session_is_flagged_and_ends_with_data_end():
     assert r["bars_complete"] is False and r["exit_reason"] == "DATA_END"
 
 
+def test_gap_beyond_suspect_threshold_is_flagged_corporate_action_not_hard_stop():
+    # E6: 진입가 100에서 첫 봉 시가 40(-60%)은 급락이 아니라 액면분할·감자 같은
+    # 기업 행위로 의심한다 — 일반 GAP_HARD_STOP과 같은 통계에 섞이면 안 된다.
+    bars = _session(_bar("090000", 40.0, 41.0, 39.0, 40.0))
+    r = simulate_overnight(bars, entry_price=100.0)
+    assert r["exit_reason"] == "SUSPECT_CORPORATE_ACTION"
+    assert r["gap_pct"] == -60.0
+    assert r["exit_price"] == 40.0 and r["exit_time"] == "090000"
+    assert r["bars_complete"] is True
+
+
 def test_costs_follow_the_improvement_plan_constants():
     assert (BASE_ROUND_TRIP_COST_PCT, HARD_STOP_SLIPPAGE_PCT, TRAILING_SLIPPAGE_PCT) == (
         0.18, 0.30, 0.15
@@ -102,6 +113,19 @@ def test_summarize_uses_rank1_only_for_the_primary_metric_and_counts_reasons():
     assert s["pass_conditions"]["evaluable"] is False  # n < 50
 
 
+def test_summarize_excludes_suspect_corporate_action_from_rank1_and_counts_it():
+    results = [
+        _result("20260901", 1.0),
+        _result("20260902", 0.0, reason="SUSPECT_CORPORATE_ACTION", gap=-60.0),
+        _result("20260903", 3.0),
+    ]
+    s = summarize(results, missing={})
+    assert s["n"] == 2   # 기업 행위 의심 행은 주 표본에서 빠진다
+    assert round(s["mean"], 4) == 2.0
+    assert "SUSPECT_CORPORATE_ACTION" not in s["reasons"]
+    assert s["missing"]["suspect_corporate_action"] == 1
+
+
 def test_summarize_top2_removed_and_drawdown():
     pcts = [5.0, 4.0] + [-0.5] * 10
     results = [_result(f"202609{i + 1:02d}", p) for i, p in enumerate(pcts)]
@@ -117,6 +141,22 @@ def test_early_stop_evaluates_only_at_thirty_and_triggers_on_mean():
     assert s["early_stop"] == {"evaluable": True, "triggered": True, "reason": "MEAN"}
     fewer = summarize(results[:-1], missing={})
     assert fewer["early_stop"]["evaluable"] is False
+
+
+def _sequential_dates(n: int) -> list[str]:
+    from datetime import date, timedelta
+    start = date(2026, 9, 1)
+    return [(start + timedelta(days=i)).strftime("%Y%m%d") for i in range(n)]
+
+
+def test_early_stop_is_computed_on_the_first_thirty_only_regardless_of_later_samples():
+    # 스펙 §4.1·§5: n=30 도달 시 한 번만 본다. 그 뒤 값이 아무리 좋아져도 조기 중단
+    # 판정은 등록 당시 첫 30개 표본으로 고정돼야 재실행마다 같은 답을 준다.
+    dates = _sequential_dates(50)
+    results = [_result(d, -1.5) for d in dates[:30]] + [_result(d, 5.0) for d in dates[30:50]]
+    s = summarize(results, missing={})
+    assert s["n"] == 50
+    assert s["early_stop"] == {"evaluable": True, "triggered": True, "reason": "MEAN"}
 
 
 def test_pass_requires_all_three_conditions_at_min_n():

@@ -51,12 +51,25 @@ _SLIPPAGE_BY_REASON = {
 }
 
 
+SUSPECT_GAP_PCT = -30.0  # 이 아래는 급락이 아니라 액면분할·감자 등 기업 행위로 의심한다.
+
+
 def simulate_overnight(bars: list[dict], entry_price: float) -> dict:
-    """전날 종가 진입. 첫 봉 시가가 하드스탑 아래면 시가에서 끝, 아니면 트랙 B F4 재생."""
+    """전날 종가 진입. 첫 봉 시가가 하드스탑 아래면 시가에서 끝, 아니면 트랙 B F4 재생.
+
+    시가 갭이 SUSPECT_GAP_PCT(-30%) 이하면 하드스탑보다 먼저 SUSPECT_CORPORATE_ACTION으로
+    끝낸다 — 액면분할·감자 같은 기업 행위가 일반 갭하락 손익 분포에 섞이는 것을 막는다.
+    """
     first = bars[0]
     open_price = float(first["open"])
     gap_pct = round((open_price / entry_price - 1) * 100, 10)
     complete = warmup.covers_session(bars)
+    if gap_pct <= SUSPECT_GAP_PCT:
+        return {
+            "open": open_price, "gap_pct": gap_pct, "exit_reason": "SUSPECT_CORPORATE_ACTION",
+            "exit_time": first["time"], "exit_price": open_price, "gross_pct": gap_pct,
+            "bars_complete": complete,
+        }
     if open_price <= entry_price * (1 - HARD_STOP):
         return {
             "open": open_price, "gap_pct": gap_pct, "exit_reason": "GAP_HARD_STOP",
@@ -98,8 +111,17 @@ def _max_drawdown(values: list[float]) -> float:
 
 def summarize(results: list[dict], *, missing: dict) -> dict:
     """§4.1 주 지표·판정 조건과 §4.2 부 지표. 판정은 하지 않고 조건 충족 여부만 낸다."""
-    rank1 = sorted((r for r in results if r.get("rank") == 1 and r.get("bars_complete")),
-                   key=lambda r: r["date"])
+    suspect_rank1 = sum(
+        1 for r in results
+        if r.get("rank") == 1 and r.get("exit_reason") == "SUSPECT_CORPORATE_ACTION"
+    )
+    # SUSPECT_CORPORATE_ACTION(시가 갭 ≤ -30%)은 급락이 아니라 액면분할·감자 등 기업
+    # 행위로 의심되는 값이라 주 표본에서 뺀다 — 정상 갭하락 분포에 섞이면 안 된다.
+    rank1 = sorted(
+        (r for r in results if r.get("rank") == 1 and r.get("bars_complete")
+         and r.get("exit_reason") != "SUSPECT_CORPORATE_ACTION"),
+        key=lambda r: r["date"]
+    )
     values = [float(r["net_slip_pct"]) for r in rank1]
     n = len(values)
     avg = mean(values) if values else None
@@ -119,13 +141,18 @@ def summarize(results: list[dict], *, missing: dict) -> dict:
         conditions[k] for k in ("mean_positive", "ci_low_positive", "robust_top2")
     )
 
-    # 스펙 §5는 "n=30 도달 시 한 번만 본다". 여기서는 n≥30이면 계산만 하고, 한 번만 판정하는
-    # 것은 운영자의 몫이다(재실행마다 새 판정이 아니다).
+    # 스펙 §5는 "n=30 도달 시 한 번만 본다". 조기 중단 판정은 사전 등록된 그대로 항상
+    # "첫 30개 표본"(values[:EARLY_STOP_N], 날짜순 정렬돼 있다)으로만 계산한다 — n이
+    # 30을 넘어 표본이 계속 쌓여도 이 값은 바뀌지 않아 재실행마다 같은 답을 준다.
+    # 그 값을 판정에 한 번만 쓰는 것은 여전히 운영자의 몫이다.
+    early_values = values[:EARLY_STOP_N]
+    early_mean = mean(early_values) if early_values else None
+    early_drawdown = _max_drawdown(early_values)
     early: dict = {"evaluable": n >= EARLY_STOP_N, "triggered": False, "reason": None}
-    if early["evaluable"] and avg is not None:
-        if avg < EARLY_STOP_MEAN:
+    if early["evaluable"] and early_mean is not None:
+        if early_mean < EARLY_STOP_MEAN:
             early.update(triggered=True, reason="MEAN")
-        elif drawdown < EARLY_STOP_DRAWDOWN:
+        elif early_drawdown < EARLY_STOP_DRAWDOWN:
             early.update(triggered=True, reason="DRAWDOWN")
 
     gaps = [float(r["gap_pct"]) for r in rank1]
@@ -133,6 +160,8 @@ def summarize(results: list[dict], *, missing: dict) -> dict:
     for r in results:
         if isinstance(r.get("rank"), int) and r.get("bars_complete"):
             by_rank.setdefault(r["rank"], []).append(float(r["net_slip_pct"]))
+    missing_out = dict(missing)
+    missing_out["suspect_corporate_action"] = suspect_rank1
     return {
         "n": n,
         "mean": avg,
@@ -149,7 +178,7 @@ def summarize(results: list[dict], *, missing: dict) -> dict:
             "share_positive": (sum(1 for g in gaps if g > 0) / n) if n else None,
         },
         "rank_means": {k: mean(v) for k, v in sorted(by_rank.items())},
-        "missing": dict(missing),
+        "missing": missing_out,
     }
 
 
