@@ -2,10 +2,13 @@
 
 from scripts.overnight_sieve import (
     BASE_ROUND_TRIP_COST_PCT,
+    EARLY_STOP_N,
     HARD_STOP_SLIPPAGE_PCT,
+    MIN_N,
     TRAILING_SLIPPAGE_PCT,
     apply_costs,
     simulate_overnight,
+    summarize,
 )
 
 
@@ -72,3 +75,49 @@ def test_costs_follow_the_improvement_plan_constants():
     assert round(g["net_slip_pct"], 2) == -3.48   # 시가 하드스탑도 하드스탑 슬리피지
     t = apply_costs(0.0, "TIMEOUT")
     assert round(t["net_slip_pct"], 2) == -0.38
+
+
+def _result(date: str, pct: float, rank: int = 1, reason: str = "TRAILING", gap: float = 0.5):
+    return {"date": date, "rank": rank, "net_slip_pct": pct, "exit_reason": reason,
+            "gap_pct": gap, "bars_complete": True}
+
+
+def test_summarize_uses_rank1_only_for_the_primary_metric_and_counts_reasons():
+    results = [_result("20260901", 1.0), _result("20260901", 9.0, rank=2),
+               _result("20260902", -2.0, reason="HARD_STOP", gap=-1.0),
+               _result("20260903", 3.0)]
+    s = summarize(results, missing={"screen_failed": 1, "degraded": 0, "bars_incomplete": 0,
+                                    "no_candidate": 2})
+    assert s["n"] == 3
+    assert round(s["mean"], 4) == round((1.0 - 2.0 + 3.0) / 3, 4)
+    assert s["reasons"] == {"TRAILING": 2, "HARD_STOP": 1}
+    assert s["rank_means"][2] == 9.0
+    assert s["gap"]["share_positive"] == 2 / 3
+    assert s["missing"]["screen_failed"] == 1 and s["missing"]["no_candidate"] == 2
+    assert s["pass_conditions"]["evaluable"] is False  # n < 50
+
+
+def test_summarize_top2_removed_and_drawdown():
+    pcts = [5.0, 4.0] + [-0.5] * 10
+    results = [_result(f"202609{i + 1:02d}", p) for i, p in enumerate(pcts)]
+    s = summarize(results, missing={})
+    assert round(s["mean_top2_removed"], 2) == -0.5
+    assert s["max_drawdown_pct"] == -5.0          # 9.0 정점 뒤 -0.5×10
+    assert s["pass_conditions"]["robust_top2"] is False
+
+
+def test_early_stop_evaluates_only_at_thirty_and_triggers_on_mean():
+    results = [_result(f"202609{i + 1:02d}", -1.5) for i in range(EARLY_STOP_N)]
+    s = summarize(results, missing={})
+    assert s["early_stop"] == {"evaluable": True, "triggered": True, "reason": "MEAN"}
+    fewer = summarize(results[:-1], missing={})
+    assert fewer["early_stop"]["evaluable"] is False
+
+
+def test_pass_requires_all_three_conditions_at_min_n():
+    results = [_result(f"2026{9 + i // 28:02d}{1 + i % 28:02d}", 1.0 + (i % 3) * 0.1)
+               for i in range(MIN_N)]
+    s = summarize(results, missing={})
+    assert s["pass_conditions"]["evaluable"] is True
+    assert s["pass_conditions"]["mean_positive"] and s["pass_conditions"]["ci_low_positive"]
+    assert s["pass_conditions"]["robust_top2"] and s["pass_conditions"]["all"]
