@@ -36,6 +36,7 @@ from scripts.fast_path_counterfactual import (  # noqa: E402
     _assert_success,
     fetch_daily_minute_bars,
 )
+from scripts.overnight_calendar import load_calendar, next_trading_date  # noqa: E402
 from scripts.strategy_backtest import (  # noqa: E402
     BAR_CACHE_DIR,
     load_universes,
@@ -154,10 +155,17 @@ def load_restored_universes(path: Path) -> dict[str, list[str]]:
 OVERNIGHT_CANDIDATES_DIR = ROOT / "data" / "overnight" / "candidates"
 
 
-def overnight_pairs(candidates_dir: Path, all_dates: list[str]) -> dict[str, set[str]]:
-    """C1 후보(rank가 정수인 행)의 (D+1, ticker). D+1은 all_dates에서 D-0 다음 거래일.
+def overnight_pairs(
+    candidates_dir: Path, all_dates: list[str], calendar: list[str] | None = None
+) -> dict[str, set[str]]:
+    """C1 후보(rank가 정수인 행)의 (D+1, ticker).
 
-    다음 거래일이 아직 없으면(오늘이 D-0) 빠진다 — 내일 백필이 잡는다. 스펙 §3.
+    ``calendar``가 있으면 D+1은 ``overnight_calendar.next_trading_date``로 정한다 —
+    실제 거래일 달력에서 D-0 다음 거래일이다. 다음 거래일이 달력에 아직 없으면
+    그 파일은 통째로 건너뛴다(대기 중, 파일 유무로 D+2를 D+1로 오추정하지 않는다).
+    ``calendar``가 없으면(초기, 달력 파일이 아직 없을 때) ``all_dates``에서 D-0 다음
+    날짜를 쓰는 기존 휴리스틱으로 되돌아간다 — 다음 거래일이 아직 없으면(오늘이
+    D-0) 빠진다(내일 백필이 잡는다). 스펙 §3, §3.4 정정(2026-09-21).
     """
     ordered = sorted(set(all_dates))
     pairs: dict[str, set[str]] = {}
@@ -165,10 +173,13 @@ def overnight_pairs(candidates_dir: Path, all_dates: list[str]) -> dict[str, set
         return pairs
     for path in sorted(candidates_dir.glob("*.jsonl")):
         date = path.stem
-        later = [d for d in ordered if d > date]
-        if not later:
+        if calendar is not None:
+            next_date = next_trading_date(calendar, date)
+        else:
+            later = [d for d in ordered if d > date]
+            next_date = later[0] if later else None
+        if next_date is None:
             continue
-        next_date = later[0]
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -194,6 +205,7 @@ def needed_pairs(
     warmup_days: int = 0,
     universes_path: Path | None = None,
     overnight_dir: Path | None = None,
+    calendar_path: Path | None = None,
 ) -> dict[str, set[str]]:
     """날짜별 F1 랭크 1~depth 종목.
 
@@ -205,7 +217,10 @@ def needed_pairs(
     지표 워밍업이 그 봉을 필요로 하는데, 그 종목이 그날 F1 상위에 없었으면
     캐시에 없기 때문이다(스펙 §5.1).
 
-    ``overnight_dir``가 있으면 C1 후보의 D+1 쌍도 넣는다(스펙 §3).
+    ``overnight_dir``가 있으면 C1 후보의 D+1 쌍도 넣는다(스펙 §3). ``calendar_path``가
+    있고 그 경로에 달력 파일이 있으면 D+1을 그 달력(실제 거래일)으로 정하고, 없으면
+    (초기, 달력이 아직 없을 때) 후보·유니버스 파일 존재로 D+1을 추정하는 기존
+    휴리스틱을 쓴다(§3.4 정정, 2026-09-21).
     """
     needed: dict[str, set[str]] = {}
     if universes_path is not None:
@@ -227,11 +242,16 @@ def needed_pairs(
                 needed[date] = tickers_set
 
     if overnight_dir is not None:
-        today = datetime.now(KST).strftime("%Y%m%d")
-        calendar = sorted(
-            set(all_dates) | {p.stem for p in overnight_dir.glob("*.jsonl")} | {today}
-        )
-        for date, ticker_set in overnight_pairs(overnight_dir, calendar).items():
+        calendar = load_calendar(calendar_path.parent.parent.parent) if calendar_path else None
+        if calendar is None:
+            today = datetime.now(KST).strftime("%Y%m%d")
+            heuristic_dates = sorted(
+                set(all_dates) | {p.stem for p in overnight_dir.glob("*.jsonl")} | {today}
+            )
+            found = overnight_pairs(overnight_dir, heuristic_dates)
+        else:
+            found = overnight_pairs(overnight_dir, all_dates, calendar=calendar)
+        for date, ticker_set in found.items():
             needed.setdefault(date, set()).update(ticker_set)
             if date not in all_dates:
                 all_dates = sorted(set(all_dates) | {date})
@@ -328,6 +348,7 @@ async def main_async(argv: list[str] | None = None) -> int:
     needed = needed_pairs(
         args.depth, warmup_days=args.warmup_days, universes_path=args.universes,
         overnight_dir=OVERNIGHT_CANDIDATES_DIR,
+        calendar_path=OVERNIGHT_CANDIDATES_DIR.parent / "calendar.json",
     )
     source = str(args.universes) if args.universes else "data/f1_snapshots"
     pairs = sum(len(v) for v in needed.values())

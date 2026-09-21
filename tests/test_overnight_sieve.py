@@ -9,6 +9,7 @@ from scripts.overnight_sieve import (
     MIN_N,
     TRAILING_SLIPPAGE_PCT,
     apply_costs,
+    count_screen_failed,
     load_candidates,
     run,
     simulate_overnight,
@@ -168,6 +169,38 @@ def test_load_candidates_skips_malformed_lines_but_keeps_the_file(tmp_path):
     loaded, missing = load_candidates(d)
     assert [r["ticker"] for r in loaded["20260921"]] == ["000001"]
     assert missing["screen_died"] == 0
+
+
+def _write_calendar(root, dates):
+    d = root / "data" / "overnight"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "calendar.json").write_text(json.dumps(sorted(dates)), encoding="utf-8")
+
+
+def test_count_screen_failed_counts_calendar_dates_with_no_file_at_all():
+    # B: 요약 없는 파일(screen_died)과 다르다 — 여기는 파일이 아예 없는 날만 센다.
+    calendar = ["20260921", "20260922", "20260923"]
+    file_dates = {"20260921", "20260923"}
+    assert count_screen_failed(calendar, file_dates, today="20260924") == 1
+
+
+def test_count_screen_failed_is_zero_before_the_first_candidate_file():
+    assert count_screen_failed(["20260921", "20260922"], set(), today="20260923") == 0
+
+
+def test_run_uses_the_trading_calendar_for_next_date_not_the_file_heuristic(tmp_path):
+    # A: calendar.json이 있으면 D+1은 실제 거래일이다. 0922에 후보 파일도 분봉도
+    # 전혀 없어도(기계가 오후 내내 죽은 날) D+1은 여전히 0922여야 한다 — 파일이
+    # 있는 0923으로 조용히 건너뛰면 이틀 보유가 표본에 섞인다(스펙 §3.4 정정).
+    _write_calendar(tmp_path, ["20260921", "20260922", "20260923"])
+    _write_candidates(tmp_path, "20260921", [
+        {"date": "20260921", "ticker": "000001", "rank": 1, "close": 100.0},
+    ])
+    _write_bars(tmp_path, "20260923", "000001",
+                _session(_bar("090000", 100.0, 101.0, 99.0, 100.0)))
+    results, missing = run(tmp_path)
+    assert results == []   # 0922 분봉이 없다 — 0923 분봉으로 새서 재생하지 않는다
+    assert missing["bars_missing"] == 1
 
 
 def test_run_replays_next_day_bars_and_accounts_for_missing(tmp_path):

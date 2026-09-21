@@ -6,6 +6,7 @@
 
 import json
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -366,3 +367,64 @@ def test_overnight_pairs_skips_malformed_lines(tmp_path):
     pairs = overnight_pairs(d, ["20260918", "20260921"])
 
     assert pairs == {"20260921": {"000001"}}
+
+
+# --- A: 거래일 달력이 있을 때의 overnight_pairs / needed_pairs --------------------
+
+
+def test_overnight_pairs_uses_calendar_for_next_trading_date_when_given(tmp_path):
+    # 0922 후보 파일도 분봉도 전혀 없어도(기계가 오후 내내 죽은 날) 달력이 있으면
+    # D+1은 여전히 0922다 — 파일이 있는 0923으로 조용히 새면 이틀 보유가 된다.
+    _candidates(tmp_path, "20260921", ["000001"])
+    pairs = overnight_pairs(
+        tmp_path / "overnight", ["20260921"],
+        calendar=["20260921", "20260922", "20260923"],
+    )
+    assert pairs == {"20260922": {"000001"}}
+
+
+def test_overnight_pairs_skips_the_file_when_calendar_has_no_later_date(tmp_path):
+    _candidates(tmp_path, "20260921", ["000001"])
+    pairs = overnight_pairs(tmp_path / "overnight", ["20260921"], calendar=["20260921"])
+    assert pairs == {}
+
+
+def _write_candidates_at(dir_path: Path, date: str, ranked: list[str]) -> None:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"date": date, "ticker": t, "rank": i + 1}) for i, t in enumerate(ranked)]
+    lines.append(json.dumps({"summary": True, "date": date, "candidates": len(ranked)}))
+    (dir_path / f"{date}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_needed_pairs_uses_the_calendar_file_for_overnight_d1_when_it_exists(tmp_path):
+    for date in ("20260918", "20260921"):
+        _snapshot(tmp_path, date, ["005930", "000660"])
+    overnight_dir = tmp_path / "data" / "overnight" / "candidates"
+    calendar_path = tmp_path / "data" / "overnight" / "calendar.json"
+    _write_candidates_at(overnight_dir, "20260921", ["000001"])
+    calendar_path.parent.mkdir(parents=True, exist_ok=True)
+    calendar_path.write_text(
+        json.dumps(["20260918", "20260921", "20260922"]), encoding="utf-8"
+    )
+
+    needed = track_b_backfill.needed_pairs(
+        depth=5, snapshot_dir=tmp_path, warmup_days=0,
+        overnight_dir=overnight_dir, calendar_path=calendar_path,
+    )
+
+    assert needed["20260922"] >= {"000001"}
+
+
+def test_needed_pairs_falls_back_to_heuristic_when_calendar_file_is_absent(tmp_path):
+    for date in ("20260918", "20260921"):
+        _snapshot(tmp_path, date, ["005930", "000660"])
+    overnight_dir = tmp_path / "data" / "overnight" / "candidates"
+    calendar_path = tmp_path / "data" / "overnight" / "calendar.json"   # 존재하지 않음
+    _write_candidates_at(overnight_dir, "20260918", ["000001"])
+
+    needed = track_b_backfill.needed_pairs(
+        depth=5, snapshot_dir=tmp_path, warmup_days=0,
+        overnight_dir=overnight_dir, calendar_path=calendar_path,
+    )
+
+    assert needed["20260921"] >= {"000001"}   # 기존 휴리스틱 — 유니버스 날짜가 D+1

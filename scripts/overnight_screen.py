@@ -155,6 +155,36 @@ def classify_calendar_probe(
     return "TRADING_DAY" if is_trading_day(output2, date) else "HOLIDAY"
 
 
+def merge_calendar(existing: list[str], fetched: set[str]) -> list[str]:
+    """거래일 달력(§3.4 정정) — 기존 목록과 새로 얻은 거래일의 합집합, 정렬해서 돌려준다.
+
+    파일 I/O 없는 순수 함수. 달력은 지울 일이 없으므로 항상 합집합이다 — 과거에 한 번
+    확인한 거래일이 다음 실행에서 사라질 이유가 없다.
+    """
+    return sorted(set(existing) | set(fetched))
+
+
+def write_calendar(path: Path, fetched: set[str]) -> None:
+    """``data/overnight/calendar.json``을 원자적으로 갱신한다.
+
+    기존 파일이 있으면 ``merge_calendar``로 합쳐 쓴다. tmp에 다 쓰고 os.replace로
+    교체해, 쓰는 도중 중단돼도 손상된 달력이 남지 않는다.
+    """
+    existing: list[str] = []
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                existing = [str(d) for d in loaded]
+        except (OSError, json.JSONDecodeError):
+            existing = []
+    merged = merge_calendar(existing, fetched)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, path)
+
+
 def build_row(
     date: str, ranking_row: dict, daily: dict | None, daily_error: str | None
 ) -> dict:
@@ -352,7 +382,7 @@ async def main_async(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", default=None, help="기록 파일 이름(기본: 오늘 KST). 테스트용")
     args = parser.parse_args(argv)
 
-    from scripts.catalyst_label import CALENDAR_TICKER
+    from scripts.catalyst_label import CALENDAR_TICKER, trading_days_from_daily_chart
     from scripts.fast_path_counterfactual import PocStop, Throttle
     from scripts.track_b_backfill import assert_paper_mode
     from src.api import auth, kis_rest
@@ -371,6 +401,13 @@ async def main_async(argv: list[str] | None = None) -> int:
     calendar_status = classify_calendar_probe(calendar_output2, calendar_error, date)
     if calendar_status == "FAILED":
         raise PocStop("CALENDAR_PROBE_FAILED", calendar_error)
+    # 프로브가 통과했으면(TRADING_DAY·HOLIDAY 둘 다) 005930 일봉에서 나온 거래일로
+    # 거래일 달력을 갱신한다 — D+1 추정을 파일 존재가 아니라 이 달력에 기대게 한다
+    # (스펙 §3.4 정정, 2026-09-21).
+    write_calendar(
+        args.root / "data" / "overnight" / "calendar.json",
+        trading_days_from_daily_chart(calendar_output2),
+    )
     if calendar_status == "HOLIDAY":
         print(f"휴장일 또는 장 마감 전: {date} 봉 없음 — 기록하지 않음")
         return 0

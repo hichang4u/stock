@@ -97,7 +97,7 @@ KIS `ranking/fluctuation` (`paper_fast_probe._ranking_params`와 같은 파라�
 D-0 15:32  overnight_screen.py  ──▶ data/overnight/candidates/<D-0>.jsonl
                                      ⎿ KIS ranking ×2, daily-itemchartprice ×N
 
-D+1 15:45  track_b_backfill.py  ──▶ data/backtest_bars/<D+1>/<ticker>.json  (09:00~15:30 분봉)
+D+1 15:45  track_b_backfill.py  ──▶ data/backtest_bars/<D+1>_<ticker>.json  (09:00~15:30 분봉)
            (needed_pairs에 overnight 후보 (D+1, ticker)를 합류 — 기존 랭크 1~5 쌍과 같은 경로)
 
 언제든    overnight_sieve.py     ──▶ data/overnight/results/<D-0>.json + 집계 표
@@ -146,6 +146,20 @@ D+1 15:45  track_b_backfill.py  ──▶ data/backtest_bars/<D+1>/<ticker>.json
 - 랭킹은 왔는데 일봉이 일부 실패: 실패한 종목은 `rejected_reason=DAILY_FAILED`로
   기록하고 나머지로 순위를 낸다. 랭크 1이 그 종목이었을 가능성은 알 수 없으므로 그날
   `degraded=true`를 남기고 §4.3에서 따로 센다.
+
+**정정 (2026-09-21, 전수 리뷰 후 — D+1 오추정 수정).** D-0의 D+1을 "그 다음으로 존재하는
+후보/분봉 파일 날짜"로 추정하면, D+1에 후보 파일도 분봉도 전혀 없는 날(기계·API가 오후
+내내 죽은 날) D+2가 조용히 D+1로 둔갑해 이틀 보유가 사전 등록 표본에 섞인다. 이를 막기
+위해 `data/overnight/calendar.json`(거래일 문자열의 정렬된 목록)을 둔다 — 출처는
+`overnight_screen.py`의 휴장일 가드가 이미 부르는 005930 일봉이고, 프로브가 통과한
+실행마다(TRADING_DAY·HOLIDAY 둘 다, FAILED는 제외) 기존 파일과 합집합으로 갱신한다.
+`track_b_backfill.needed_pairs`와 `overnight_sieve`는 이 달력에서 D+1(달력상 D-0 다음
+거래일)을 구한다 — 다음 거래일이 달력에 없으면 그 날은 대기 중으로 건너뛴다. 달력
+파일이 아직 없는 초기에는 기존 "파일 존재" 휴리스틱으로 되돌아간다. `overnight_sieve`의
+`missing["screen_failed"]`도 이제 이 달력으로 센다: [최초 후보 파일 날짜, 오늘) 구간의
+거래일 중 후보 파일이 아예 없는 날. 달력이 없으면 `screen_failed=0`이고
+`screen_failed_unknown=true`를 남긴다. 규칙·임계값·판정식은 바꾸지 않는다 — D+1을
+추정하는 구현 디테일의 버그 수정이다.
 
 ### 3.5 정리한 것 (YAGNI)
 

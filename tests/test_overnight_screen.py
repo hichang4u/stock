@@ -19,10 +19,12 @@ from scripts.overnight_screen import (
     evaluate,
     is_excluded_name,
     is_trading_day,
+    merge_calendar,
     parse_daily,
     rank_candidates,
     ranking_params,
     screen,
+    write_calendar,
     write_candidates,
 )
 
@@ -315,3 +317,36 @@ def test_write_candidates_puts_summary_last(tmp_path):
     lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert lines[0]["ticker"] == "000001"
     assert lines[-1]["summary"] is True
+
+
+# --- A: 거래일 달력(calendar.json) ------------------------------------------------
+
+
+def test_merge_calendar_unions_and_sorts():
+    assert merge_calendar(["20260918", "20260921"], {"20260919", "20260921"}) == [
+        "20260918", "20260919", "20260921",
+    ]
+
+
+def test_merge_calendar_with_no_existing_file_is_just_the_fetched_set():
+    assert merge_calendar([], {"20260921", "20260918"}) == ["20260918", "20260921"]
+
+
+def test_write_calendar_creates_file_and_merges_with_existing(tmp_path):
+    path = tmp_path / "data" / "overnight" / "calendar.json"
+    write_calendar(path, {"20260918", "20260919"})
+    assert json.loads(path.read_text(encoding="utf-8")) == ["20260918", "20260919"]
+
+    write_calendar(path, {"20260921"})   # 다음 실행 — 합집합으로 합친다
+    assert json.loads(path.read_text(encoding="utf-8")) == [
+        "20260918", "20260919", "20260921",
+    ]
+    assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_write_calendar_ignores_a_corrupt_existing_file(tmp_path):
+    path = tmp_path / "data" / "overnight" / "calendar.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
+    write_calendar(path, {"20260921"})
+    assert json.loads(path.read_text(encoding="utf-8")) == ["20260921"]

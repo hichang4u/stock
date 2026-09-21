@@ -18,17 +18,22 @@ import argparse
 import json
 import sys
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from statistics import mean, median
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.overnight_calendar import load_calendar, next_trading_date  # noqa: E402
 from scripts.strategy_backtest import read_cached_bars  # noqa: E402
 from scripts.track_b_backtest import bootstrap_ci  # noqa: E402
 from scripts.track_b_rules import HARD_STOP, simulate_exit  # noqa: E402
 from src import warmup  # noqa: E402
+
+KST = ZoneInfo("Asia/Seoul")
 
 # 개선 계획 §2 초기 PAPER 비용·체결 가정. 연구 상수이며 요율의 단정이 아니다.
 BASE_ROUND_TRIP_COST_PCT = 0.18
@@ -192,14 +197,34 @@ def _is_valid_candidate_row(row: dict) -> bool:
         return False
 
 
-def _next_dates(candidate_dates: list[str], bars_dir: Path) -> dict[str, str | None]:
+def _next_dates(
+    candidate_dates: list[str], bars_dir: Path, calendar: list[str] | None = None
+) -> dict[str, str | None]:
+    """D-0 → D+1. ``calendar``가 있으면 실제 거래일 달력에서 D+1을 정한다(§3.4 정정) —
+    D+1에 후보 파일도 분봉도 없는 날(기계/API가 오후 내내 죽은 날)에 D+2를 D+1로 오추정해
+    이틀 보유가 표본에 섞이는 것을 막는다. 없으면 후보·분봉 파일 존재로 추정하는 기존
+    휴리스틱을 쓴다."""
+    if calendar is not None:
+        return {date: next_trading_date(calendar, date) for date in candidate_dates}
     bar_dates = {p.name[:8] for p in bars_dir.glob("*_*.json")} if bars_dir.exists() else set()
-    calendar = sorted(set(candidate_dates) | bar_dates)
+    heuristic_calendar = sorted(set(candidate_dates) | bar_dates)
     out: dict[str, str | None] = {}
     for date in candidate_dates:
-        later = [d for d in calendar if d > date]
+        later = [d for d in heuristic_calendar if d > date]
         out[date] = later[0] if later else None
     return out
+
+
+def count_screen_failed(calendar: list[str], file_dates: set[str], today: str) -> int:
+    """후보 파일이 아예 없는 거래일 수 — 요약 없는 파일(screen_died)과는 다르다.
+
+    달력의 거래일 중 [가장 이른 후보 파일 날짜, today) 구간에서 후보 파일이 하나도
+    없는 날을 센다. 그 구간 밖(수집기를 아직 돌리기 전 과거·오늘)은 세지 않는다.
+    """
+    if not calendar or not file_dates:
+        return 0
+    earliest = min(file_dates)
+    return sum(1 for d in calendar if earliest <= d < today and d not in file_dates)
 
 
 def run(root: Path) -> tuple[list[dict], dict]:
@@ -208,7 +233,19 @@ def run(root: Path) -> tuple[list[dict], dict]:
     bars_dir = root / "data" / "backtest_bars"
     loaded, missing = load_candidates(candidates_dir)
     missing.update({"bars_missing": 0, "bars_incomplete": 0, "awaiting_next_day": 0})
-    next_of = _next_dates(sorted(loaded), bars_dir)
+
+    calendar = load_calendar(root)
+    file_dates = (
+        {p.stem for p in candidates_dir.glob("*.jsonl")} if candidates_dir.exists() else set()
+    )
+    today = datetime.now(KST).strftime("%Y%m%d")
+    if calendar is not None:
+        missing["screen_failed"] = count_screen_failed(calendar, file_dates, today)
+    else:
+        missing["screen_failed"] = 0
+        missing["screen_failed_unknown"] = True
+
+    next_of = _next_dates(sorted(loaded), bars_dir, calendar=calendar)
     results: list[dict] = []
     for date, rows in sorted(loaded.items()):
         next_date = next_of[date]
