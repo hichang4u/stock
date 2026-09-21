@@ -46,7 +46,7 @@
  "rejected_reason": null, "raw": {"ranking": {...}, "daily": {...}}}
 ```
 
-거부 행은 `rank: null`, `rejected_reason: "CHANGE_PCT" | "CLOSE_POSITION" | "AMOUNT_MULTIPLE" | "AMOUNT_FLOOR" | "PRICE_FLOOR" | "NAME_EXCLUDED" | "NO_HISTORY" | "DAILY_FAILED"`. 마지막 줄은 요약 행 `{"summary": true, "date": "...", "universe": N, "candidates": K, "degraded": false}`.
+거부 행은 `rank: null`, `rejected_reason: "CHANGE_PCT" | "CLOSE_POSITION" | "AMOUNT_MULTIPLE" | "AMOUNT_FLOOR" | "PRICE_FLOOR" | "NAME_EXCLUDED" | "NO_HISTORY" | "DAILY_FAILED" | "BELOW_TOP"` (`BELOW_TOP` = 통과했지만 6위 이하). 마지막 줄은 요약 행 `{"summary": true, "date": "...", "universe": N, "candidates": K, "degraded": false}`.
 
 결과 파일 `data/overnight/results/<date>.json` 한 건의 형식:
 
