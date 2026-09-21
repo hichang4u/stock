@@ -8,9 +8,11 @@ from scripts.overnight_screen import (
     CHANGE_MAX,
     CHANGE_MIN,
     CLOSE_POSITION_MIN,
+    build_row,
     close_position,
     evaluate,
     is_excluded_name,
+    parse_daily,
     rank_candidates,
 )
 
@@ -76,3 +78,52 @@ def test_rank_orders_by_amount_multiple_then_change_and_caps_at_five():
     ranked = rank_candidates(rows)
     assert [r["ticker"] for r in ranked] == ["C", "B", "A", "E", "F"]
     assert [r["rank"] for r in ranked] == [1, 2, 3, 4, 5]
+
+
+def _daily_row(date: str, close: float, amount: float, high=None, low=None, open_=None) -> dict:
+    return {
+        "stck_bsop_date": date, "stck_clpr": str(close),
+        "stck_oprc": str(open_ if open_ is not None else close),
+        "stck_hgpr": str(high if high is not None else close),
+        "stck_lwpr": str(low if low is not None else close),
+        "acml_vol": "1000", "acml_tr_pbmn": str(amount),
+    }
+
+
+def test_parse_daily_reads_today_and_prior_20_day_mean():
+    # 최신순으로 오지만 순서에 기대지 않는다. 20260921이 오늘, 앞 20일 평균은 1e9.
+    rows = [_daily_row("20260921", 108.0, 5e9, high=110.0, low=99.0, open_=100.0)]
+    rows += [_daily_row(f"2026{8 + i // 30:02d}{1 + i % 30:02d}", 100.0, 1e9) for i in range(25)]
+    rows.reverse()
+    parsed = parse_daily(rows, "20260921")
+    assert parsed["close"] == 108.0 and parsed["high"] == 110.0 and parsed["low"] == 99.0
+    assert parsed["amount"] == 5e9
+    assert parsed["avg_amount_20d"] == 1e9
+    assert parsed["history_days"] == 20
+
+
+def test_parse_daily_marks_short_history_and_missing_today():
+    rows = [_daily_row("20260921", 108.0, 5e9)] + [
+        _daily_row(f"202609{d:02d}", 100.0, 1e9) for d in range(1, 6)
+    ]
+    parsed = parse_daily(rows, "20260921")
+    assert parsed["avg_amount_20d"] is None and parsed["history_days"] == 5
+    assert parse_daily(rows, "20260922") is None
+
+
+def test_build_row_carries_raw_fields_and_daily_failure():
+    ranking = {"mksc_shrn_iscd": "000001", "hts_kor_isnm": "정상전자", "prdy_ctrt": "5.00",
+               "stck_prpr": "108", "acml_tr_pbmn": "5000000000"}
+    daily = {"open": 100.0, "high": 110.0, "low": 99.0, "close": 108.0, "amount": 5e9,
+             "avg_amount_20d": 1e9, "history_days": 20}
+    row = build_row("20260921", ranking, daily, None)
+    assert row["ticker"] == "000001" and row["date"] == "20260921"
+    assert row["change_pct"] == 5.0 and row["close_position"] == close_position(110.0, 99.0, 108.0)
+    assert row["amount_multiple"] == 5.0
+    assert row["raw"]["ranking"] is ranking and row["raw"]["daily"] is daily
+    assert row["rejected_reason"] is None
+
+    failed = build_row("20260921", ranking, None, "KIS_ERROR:EGW00123")
+    assert failed["rejected_reason"] == "DAILY_FAILED"
+    assert failed["raw"]["daily_error"] == "KIS_ERROR:EGW00123"
+    assert failed["close"] == 108.0  # 랭킹의 현재가로라도 채운다

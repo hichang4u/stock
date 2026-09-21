@@ -90,3 +90,74 @@ def rank_candidates(rows: list[dict]) -> list[dict]:
     for rank, row in enumerate(passed[:RECORD_TOP], start=1):
         ranked.append({**row, "rank": rank, "rejected_reason": None})
     return ranked
+
+
+def _f(value: object) -> float | None:
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_daily(output2: list[dict], date: str) -> dict | None:
+    """일봉 output2에서 `date` 행과 그 앞 HISTORY_DAYS일 평균 거래대금.
+
+    응답은 보통 최신순이지만 순서에 기대지 않고 날짜로 정렬한다.
+    """
+    rows = [r for r in output2 if r.get("stck_bsop_date")]
+    rows.sort(key=lambda r: str(r["stck_bsop_date"]), reverse=True)
+    today = next((r for r in rows if str(r["stck_bsop_date"]) == date), None)
+    if today is None:
+        return None
+    prior = [r for r in rows if str(r["stck_bsop_date"]) < date][:HISTORY_DAYS]
+    amounts = [a for a in (_f(r.get("acml_tr_pbmn")) for r in prior) if a is not None]
+    avg = sum(amounts) / len(amounts) if len(amounts) >= HISTORY_DAYS else None
+    return {
+        "open": _f(today.get("stck_oprc")),
+        "high": _f(today.get("stck_hgpr")),
+        "low": _f(today.get("stck_lwpr")),
+        "close": _f(today.get("stck_clpr")),
+        "amount": _f(today.get("acml_tr_pbmn")),
+        "avg_amount_20d": avg,
+        "history_days": len(amounts),
+    }
+
+
+def build_row(
+    date: str, ranking_row: dict, daily: dict | None, daily_error: str | None
+) -> dict:
+    """후보 파일 한 줄. 순위·거부 사유는 rank_candidates/evaluate가 뒤에 붙인다."""
+    ticker = str(ranking_row.get("mksc_shrn_iscd") or ranking_row.get("stck_shrn_iscd") or "")
+    close = (daily or {}).get("close") if daily else None
+    if close is None:
+        close = _f(ranking_row.get("stck_prpr"))
+    high = (daily or {}).get("high")
+    low = (daily or {}).get("low")
+    amount = (daily or {}).get("amount")
+    if amount is None:
+        amount = _f(ranking_row.get("acml_tr_pbmn"))
+    avg = (daily or {}).get("avg_amount_20d")
+    multiple = (amount / avg) if (amount is not None and avg) else None
+    position = (
+        close_position(high, low, close)
+        if high is not None and low is not None and close is not None
+        else None
+    )
+    row = {
+        "date": date,
+        "ticker": ticker,
+        "name": str(ranking_row.get("hts_kor_isnm") or ""),
+        "rank": None,
+        "close": close,
+        "open": (daily or {}).get("open"),
+        "high": high,
+        "low": low,
+        "change_pct": _f(ranking_row.get("prdy_ctrt")),
+        "close_position": position,
+        "amount": amount,
+        "avg_amount_20d": avg,
+        "amount_multiple": multiple,
+        "rejected_reason": None if daily is not None else "DAILY_FAILED",
+        "raw": {"ranking": ranking_row, "daily": daily, "daily_error": daily_error},
+    }
+    return row
