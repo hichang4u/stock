@@ -172,10 +172,19 @@ def overnight_pairs(candidates_dir: Path, all_dates: list[str]) -> dict[str, set
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            row = json.loads(line)
+            # 잘린 마지막 줄 하나가 F1 백필 전체를 멈추면 안 된다.
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
             if row.get("summary") or not isinstance(row.get("rank"), int):
                 continue
-            pairs.setdefault(next_date, set()).add(str(row["ticker"]))
+            ticker = str(row.get("ticker") or "")
+            if len(ticker) != 6 or not ticker.isdigit():
+                continue
+            pairs.setdefault(next_date, set()).add(ticker)
     return pairs
 
 

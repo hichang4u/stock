@@ -350,3 +350,19 @@ def test_needed_pairs_merges_overnight_candidates_into_f1_pairs(tmp_path):
                                            overnight_dir=tmp_path / "overnight")
     assert with_c["20260921"] == without["20260921"] | {"000001"}
     assert with_c["20260918"] == without["20260918"]
+
+
+def test_overnight_pairs_skips_malformed_lines(tmp_path):
+    d = tmp_path / "overnight"
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"date": "20260918", "ticker": "000001", "rank": 1}),
+        "{not json",
+        json.dumps({"date": "20260918", "ticker": "bad", "rank": 2}),
+        json.dumps({"summary": True, "date": "20260918", "candidates": 1}),
+    ]
+    (d / "20260918.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+    pairs = overnight_pairs(d, ["20260918", "20260921"])
+
+    assert pairs == {"20260921": {"000001"}}
