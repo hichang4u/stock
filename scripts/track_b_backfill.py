@@ -151,11 +151,40 @@ def load_restored_universes(path: Path) -> dict[str, list[str]]:
     return days
 
 
+OVERNIGHT_CANDIDATES_DIR = ROOT / "data" / "overnight" / "candidates"
+
+
+def overnight_pairs(candidates_dir: Path, all_dates: list[str]) -> dict[str, set[str]]:
+    """C1 후보(rank가 정수인 행)의 (D+1, ticker). D+1은 all_dates에서 D-0 다음 거래일.
+
+    다음 거래일이 아직 없으면(오늘이 D-0) 빠진다 — 내일 백필이 잡는다. 스펙 §3.
+    """
+    ordered = sorted(set(all_dates))
+    pairs: dict[str, set[str]] = {}
+    if not candidates_dir.exists():
+        return pairs
+    for path in sorted(candidates_dir.glob("*.jsonl")):
+        date = path.stem
+        later = [d for d in ordered if d > date]
+        if not later:
+            continue
+        next_date = later[0]
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if row.get("summary") or not isinstance(row.get("rank"), int):
+                continue
+            pairs.setdefault(next_date, set()).add(str(row["ticker"]))
+    return pairs
+
+
 def needed_pairs(
     depth: int = 5,
     snapshot_dir: Path | None = None,
     warmup_days: int = 0,
     universes_path: Path | None = None,
+    overnight_dir: Path | None = None,
 ) -> dict[str, set[str]]:
     """날짜별 F1 랭크 1~depth 종목.
 
@@ -166,6 +195,8 @@ def needed_pairs(
     ``warmup_days``가 0보다 크면 각 종목의 전 거래일 쌍을 함께 대상에 넣는다.
     지표 워밍업이 그 봉을 필요로 하는데, 그 종목이 그날 F1 상위에 없었으면
     캐시에 없기 때문이다(스펙 §5.1).
+
+    ``overnight_dir``가 있으면 C1 후보의 D+1 쌍도 넣는다(스펙 §3).
     """
     needed: dict[str, set[str]] = {}
     if universes_path is not None:
@@ -185,6 +216,16 @@ def needed_pairs(
             tickers_set = {str(r["ticker"]) for r in ranked if r.get("ticker")}
             if tickers_set:
                 needed[date] = tickers_set
+
+    if overnight_dir is not None:
+        today = datetime.now(KST).strftime("%Y%m%d")
+        calendar = sorted(
+            set(all_dates) | {p.stem for p in overnight_dir.glob("*.jsonl")} | {today}
+        )
+        for date, ticker_set in overnight_pairs(overnight_dir, calendar).items():
+            needed.setdefault(date, set()).update(ticker_set)
+            if date not in all_dates:
+                all_dates = sorted(set(all_dates) | {date})
 
     if warmup_days > 0:
         for date in list(needed):
@@ -276,7 +317,8 @@ async def main_async(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     needed = needed_pairs(
-        args.depth, warmup_days=args.warmup_days, universes_path=args.universes
+        args.depth, warmup_days=args.warmup_days, universes_path=args.universes,
+        overnight_dir=OVERNIGHT_CANDIDATES_DIR,
     )
     source = str(args.universes) if args.universes else "data/f1_snapshots"
     pairs = sum(len(v) for v in needed.values())

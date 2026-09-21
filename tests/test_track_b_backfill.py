@@ -21,6 +21,7 @@ from scripts.track_b_backfill import (
     merge_bars,
     needed_pairs,
     next_cursor,
+    overnight_pairs,
 )
 from src.api import kis_rest
 
@@ -321,3 +322,31 @@ def test_needed_pairs_restored_universe_still_adds_warmup_days(tmp_path):
 
     assert needed["20260910"] == {"111111"}
     assert needed["20260909"] == {"999999", "111111"}
+
+
+def _candidates(tmp_path, date: str, ranked: list[str], rejected: list[str] = ()) -> None:
+    d = tmp_path / "overnight"
+    d.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"date": date, "ticker": t, "rank": i + 1}) for i, t in enumerate(ranked)]
+    lines += [json.dumps({"date": date, "ticker": t, "rank": None, "rejected_reason": "X"})
+              for t in rejected]
+    lines.append(json.dumps({"summary": True, "date": date, "candidates": len(ranked)}))
+    (d / f"{date}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_overnight_pairs_maps_candidates_to_the_next_trading_date(tmp_path):
+    _candidates(tmp_path, "20260918", ["000001", "000002"], rejected=["000009"])
+    _candidates(tmp_path, "20260921", ["000003"])          # 다음 거래일 없음 → 제외
+    pairs = overnight_pairs(tmp_path / "overnight", ["20260917", "20260918", "20260921"])
+    assert pairs == {"20260921": {"000001", "000002"}}
+
+
+def test_needed_pairs_merges_overnight_candidates_into_f1_pairs(tmp_path):
+    for date in ("20260918", "20260921"):
+        _snapshot(tmp_path, date, ["005930", "000660"])
+    _candidates(tmp_path, "20260918", ["000001"])
+    without = track_b_backfill.needed_pairs(depth=5, snapshot_dir=tmp_path, warmup_days=0)
+    with_c = track_b_backfill.needed_pairs(depth=5, snapshot_dir=tmp_path, warmup_days=0,
+                                           overnight_dir=tmp_path / "overnight")
+    assert with_c["20260921"] == without["20260921"] | {"000001"}
+    assert with_c["20260918"] == without["20260918"]
