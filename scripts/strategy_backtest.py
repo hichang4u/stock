@@ -221,8 +221,20 @@ def recheck_gate(gap: float, amount: float | None, p: Policy) -> tuple[bool, str
 # ── 스냅샷 로딩 ─────────────────────────────────────────────────────────
 
 
-def load_universes(snapshot_dir: Path = SNAPSHOT_DIR) -> dict[str, list[dict]]:
-    """날짜별 후보 유니버스. 같은 날 스냅샷이 여러 개면 가장 늦은 것을 쓴다."""
+# 프로브 개장 멀티시세는 두 시장 합쳐 최대 30행이다(paper_fast_probe._multi_params).
+# 레거시 스냅샷의 30행 하한을 그대로 걸면 29행 날이 빠지므로 따로 둔다.
+MIN_PROBE_UNIVERSE_ROWS = 20
+
+
+def load_universes(
+    snapshot_dir: Path = SNAPSHOT_DIR,
+    probe_dir: Path | None = None,
+) -> dict[str, list[dict]]:
+    """날짜별 후보 유니버스. 같은 날 스냅샷이 여러 개면 가장 늦은 것을 쓴다.
+
+    ``probe_dir`` 가 있으면 30행 미만인 날(2026-09-11 이후 빠른 경로 날은 통과 후보만
+    저장한다)을 프로브 덤프의 개장 30행으로 대신한다(scripts/probe_universe.py).
+    """
     universes: dict[str, list[dict]] = {}
     for path in sorted(snapshot_dir.glob("*.jsonl")):
         date = path.name[:8]
@@ -235,9 +247,16 @@ def load_universes(snapshot_dir: Path = SNAPSHOT_DIR) -> dict[str, list[dict]]:
                 rows.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-        if len(rows) < MIN_UNIVERSE_ROWS:
+        if len(rows) >= MIN_UNIVERSE_ROWS:
+            universes[date] = rows
             continue
-        universes[date] = rows
+        if probe_dir is None:
+            continue
+        from scripts.probe_universe import load_probe_universe, probe_path_for
+
+        restored = load_probe_universe(probe_path_for(date, probe_dir))
+        if len(restored) >= MIN_PROBE_UNIVERSE_ROWS:
+            universes[date] = restored
     return universes
 
 

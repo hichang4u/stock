@@ -37,8 +37,10 @@ from scripts.fast_path_counterfactual import (  # noqa: E402
     fetch_daily_minute_bars,
 )
 from scripts.overnight_calendar import load_calendar, next_trading_date  # noqa: E402
+from scripts.probe_universe import PROBE_DIR  # noqa: E402
 from scripts.strategy_backtest import (  # noqa: E402
     BAR_CACHE_DIR,
+    SNAPSHOT_DIR,
     load_universes,
     read_cached_bars,
     write_cached_bars,
@@ -206,8 +208,13 @@ def needed_pairs(
     universes_path: Path | None = None,
     overnight_dir: Path | None = None,
     calendar_path: Path | None = None,
+    probe_dir: Path | None = None,
 ) -> dict[str, set[str]]:
     """날짜별 F1 랭크 1~depth 종목.
+
+    ``probe_dir`` 가 있으면 빠른 경로 날(스냅샷이 통과 후보만 담아 30행 미만)을
+    프로브 덤프의 개장 30행으로 복원해 순위를 매긴다. 2026-09-11~09-21 이 그렇게
+    비어 있었다(scripts/probe_universe.py).
 
     ``universes_path`` 가 있으면 복원된 유니버스를 쓴다. 그 파일에는 순위를
     다시 매길 속성이 없으므로(재생 스펙 §2.3) 기록된 순서를 그대로 자른다.
@@ -231,8 +238,8 @@ def needed_pairs(
             if picked:
                 needed[date] = picked
     else:
-        universes = (
-            load_universes(snapshot_dir) if snapshot_dir is not None else load_universes()
+        universes = load_universes(
+            snapshot_dir if snapshot_dir is not None else SNAPSHOT_DIR, probe_dir=probe_dir
         )
         all_dates = sorted(universes)
         for date, rows in universes.items():
@@ -349,8 +356,11 @@ async def main_async(argv: list[str] | None = None) -> int:
         args.depth, warmup_days=args.warmup_days, universes_path=args.universes,
         overnight_dir=OVERNIGHT_CANDIDATES_DIR,
         calendar_path=OVERNIGHT_CANDIDATES_DIR.parent / "calendar.json",
+        probe_dir=PROBE_DIR,
     )
-    source = str(args.universes) if args.universes else "data/f1_snapshots"
+    source = (
+        str(args.universes) if args.universes else "data/f1_snapshots (+paper_fast_probe)"
+    )
     pairs = sum(len(v) for v in needed.values())
     print(f"대상 {len(needed)}거래일 / {pairs}쌍 (랭크 1~{args.depth}, 출처 {source})")
     if args.dry_run:
