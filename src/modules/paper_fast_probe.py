@@ -32,6 +32,9 @@ PREOPEN_MARKETS = (
 )
 
 _prepared_tickers: list[str] = []
+# prepare() 가 도는 동안 True. OPEN 프로브가 "PREOPEN 이 아직 안 끝났다"와 "PREOPEN 이
+# 안 돌았다"를 구분하는 데 쓴다 — 전자는 기다리고 후자는 바로 포기한다.
+_prepare_in_progress: bool = False
 _prepared_candidates: list[dict] = []
 _open_candidates: list[dict] = []
 _last_open_quality: dict[str, Any] = {"ok": False, "reason": "NOT_RUN"}
@@ -402,6 +405,16 @@ async def prepare() -> list[str]:
         )
         return []
 
+    global _prepare_in_progress
+    _prepare_in_progress = True
+    try:
+        return await _prepare_locked()
+    finally:
+        _prepare_in_progress = False
+
+
+async def _prepare_locked() -> list[str]:
+    global _prepared_tickers, _prepared_candidates, _last_closed_verdict
     started = time.monotonic()
     _append_record("PAPER_FAST_PROBE_PREOPEN_START", phase="PREOPEN")
     log("PAPER_FAST_PROBE_PREOPEN_START", level="INFO")
@@ -896,6 +909,27 @@ def log_shadow_validation_progress() -> None:
         )
 
 
+async def _wait_for_prepare(target: datetime) -> None:
+    """진행 중인 prepare() 가 끝나기를 예산 안에서 기다리고, 기다린 결과를 기록한다."""
+    budget_ms = max(0, int(os.getenv("PAPER_FAST_PROBE_PREOPEN_WAIT_MS", "8000")))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    while _prepare_in_progress and (loop.time() - started) * 1000 < budget_ms:
+        await asyncio.sleep(0.05)
+    waited_ms = max(0, round((loop.time() - started) * 1000))
+    completed = not _prepare_in_progress
+    fields: dict[str, Any] = {
+        "phase": "OPEN",
+        "target_ts": target.isoformat(),
+        "waited_ms": waited_ms,
+        "budget_ms": budget_ms,
+        "completed": completed,
+        "prepared_count": len(_prepared_tickers),
+    }
+    _append_record("PAPER_FAST_PROBE_OPEN_WAITED_PREOPEN", **fields)
+    log("PAPER_FAST_PROBE_OPEN_WAITED_PREOPEN", level="INFO" if completed else "WARN", **fields)
+
+
 async def observe_open_boundary() -> list[dict]:
     """Observe and rank the prepared shortlist near 09:00."""
     global _prepared_tickers, _open_candidates, _last_open_quality
@@ -913,11 +947,18 @@ async def observe_open_boundary() -> list[dict]:
         await asyncio.sleep((target - now).total_seconds())
         now = datetime.now(KST)
 
+    # 지각은 스케줄러가 여기 도착한 시각으로 잰다. 아래에서 PREOPEN 을 기다린 시간은
+    # 지각이 아니라 별도 예산(PAPER_FAST_PROBE_PREOPEN_WAIT_MS)이다.
     lateness_ms = max(0, round((now - target).total_seconds() * 1000))
     max_lateness_ms = max(
         0,
         int(os.getenv("PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS", "2500")),
     )
+    if lateness_ms <= max_lateness_ms and _prepare_in_progress and not _prepared_tickers:
+        # 2026-09-22: 08:59:45 랭킹 호출 1건이 16.5초 걸려 PREOPEN 이 09:00:05 에 끝났는데
+        # OPEN 은 09:00:00 에 NO_PREOPEN_TICKERS 로 포기했다 → 레거시 경로, 진입 09:02.
+        # 5초만 기다렸으면 빠른 경로였다. 여기서 기다린다.
+        await _wait_for_prepare(target)
     if lateness_ms > max_lateness_ms:
         _last_open_quality = {
             "ok": False,

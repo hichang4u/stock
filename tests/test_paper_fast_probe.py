@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime as real_datetime
 from pathlib import Path
@@ -1122,3 +1123,116 @@ def test_shadow_summary_counts_normal_days_unchanged(monkeypatch, tmp_path):
 
     assert summary["observed_days"] == 2
     assert summary["skipped_closed_days"] == []
+
+
+# ── OPEN 프로브가 늦게 끝나는 PREOPEN 을 기다린다 (2026-09-22 폴백 사례) ────────
+
+
+def _fixed_open_clock(second: int, microsecond: int = 300000):
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 28, 9, 0, second, microsecond, tzinfo=probe.KST)
+
+    return FixedDateTime
+
+
+def _open_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPER_FAST_PROBE_OPEN_OFFSET_MS", "300")
+    monkeypatch.setenv("PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS", "2500")
+
+
+@pytest.mark.asyncio
+async def test_open_boundary_waits_for_a_late_preopen_then_observes(monkeypatch, tmp_path):
+    """PREOPEN 이 아직 도는 중이면 기다렸다가 그 결과로 OPEN 을 관측한다.
+
+    2026-09-22 는 08:59:45 랭킹 호출이 16.5초 걸려 PREOPEN 이 09:00:05 에 끝났고,
+    OPEN 이 09:00:00 에 NO_PREOPEN_TICKERS 로 포기해 레거시 경로(진입 09:02)로 떨어졌다.
+    """
+    _open_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("PAPER_FAST_PROBE_PREOPEN_WAIT_MS", "3000")
+    monkeypatch.setattr(probe, "datetime", _fixed_open_clock(0))
+    probe._prepared_tickers = []
+    probe._prepare_in_progress = True
+
+    async def finish_prepare_soon():
+        await asyncio.sleep(0.2)
+        probe._prepared_tickers = ["006340"]
+        probe._prepare_in_progress = False
+
+    get = AsyncMock(return_value={
+        "rt_cd": "0", "msg_cd": "OK",
+        "output": [_multi_row("006340", "대원전선", 14500, 13730, ask=14510)],
+    })
+    monkeypatch.setattr(probe.kis_rest, "get", get)
+
+    task = asyncio.create_task(finish_prepare_soon())
+    candidates = await probe.observe_open_boundary()
+    await task
+
+    get.assert_awaited_once()
+    assert [c["ticker"] for c in candidates] == ["006340"]
+    records = [
+        json.loads(line)
+        for line in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
+    ]
+    waited = [r for r in records if r["event"] == "PAPER_FAST_PROBE_OPEN_WAITED_PREOPEN"]
+    assert len(waited) == 1 and waited[0]["completed"] is True and waited[0]["waited_ms"] >= 150
+    assert records[-1]["event"] == "PAPER_FAST_PROBE_OPEN_DONE"
+
+
+@pytest.mark.asyncio
+async def test_open_boundary_gives_up_when_preopen_outlasts_the_wait_budget(
+    monkeypatch, tmp_path
+):
+    _open_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("PAPER_FAST_PROBE_PREOPEN_WAIT_MS", "150")
+    monkeypatch.setattr(probe, "datetime", _fixed_open_clock(0))
+    probe._prepared_tickers = []
+    probe._prepare_in_progress = True
+    get = AsyncMock()
+    monkeypatch.setattr(probe.kis_rest, "get", get)
+
+    try:
+        await probe.observe_open_boundary()
+    finally:
+        probe._prepare_in_progress = False
+
+    get.assert_not_awaited()
+    records = [
+        json.loads(line)
+        for line in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
+    ]
+    waited = [r for r in records if r["event"] == "PAPER_FAST_PROBE_OPEN_WAITED_PREOPEN"]
+    assert len(waited) == 1 and waited[0]["completed"] is False
+    assert records[-1]["event"] == "PAPER_FAST_PROBE_OPEN_SKIPPED"
+    assert records[-1]["reason"] == "NO_PREOPEN_TICKERS"
+
+
+@pytest.mark.asyncio
+async def test_prepare_sets_in_progress_flag_only_while_running(monkeypatch, tmp_path):
+    _open_env(monkeypatch, tmp_path)
+    # 08:59 여야 prepare 가 MARKET_OPEN 스킵을 하지 않는다.
+
+    class PreOpenClock(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 7, 28, 8, 59, 45, tzinfo=probe.KST)
+
+    monkeypatch.setattr(probe, "datetime", PreOpenClock)
+    seen_during_call: list[bool] = []
+
+    async def failing_get(*args, **kwargs):
+        seen_during_call.append(probe._prepare_in_progress)
+        raise RuntimeError("boom")   # _get_and_record 가 삼키고 PAPER_FAST_PROBE_ERROR 로 남긴다
+
+    monkeypatch.setattr(probe.kis_rest, "get", failing_get)
+
+    await probe.prepare()
+
+    assert seen_during_call and all(seen_during_call)
+    assert probe._prepare_in_progress is False
