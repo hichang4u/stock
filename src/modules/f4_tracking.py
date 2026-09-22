@@ -1149,8 +1149,8 @@ async def finalize_trailing_shadow(
         )
         return None
 
-async def _trigger_close(price: float, reason: str) -> None:
-    """Run a close once; state becomes CLOSED only after sell/DB/persist succeeds."""
+def _start_close(price: float, reason: str) -> "asyncio.Task | None":
+    """청산 태스크를 한 번만 띄운다. 이미 진행 중이면 None (첫 번만 WARN)."""
     global _close_in_progress, _close_in_progress_warned, _closing_task
     if _close_in_progress:
         if not _close_in_progress_warned:
@@ -1159,7 +1159,7 @@ async def _trigger_close(price: float, reason: str) -> None:
                 ticker=state.get().target_ticker, reason=reason,
             )
             _close_in_progress_warned = True
-        return
+        return None
 
     _close_in_progress = True
     _close_in_progress_warned = False
@@ -1168,37 +1168,67 @@ async def _trigger_close(price: float, reason: str) -> None:
         name=f"f4_execute_close_{reason.lower()}",
     )
     _closing_task = close_task
-    try:
-        await asyncio.shield(close_task)
-    except asyncio.CancelledError:
-        log(
-            "F4_CLOSE_CANCEL_REQUESTED", level="CRIT",
-            ticker=state.get().target_ticker, reason=reason,
-        )
-        try:
-            await notifier.send(
-                "F4_CLOSE_CANCEL_REQUESTED",
-                level="CRIT",
-                message=(
-                    f"F4 청산 태스크 취소 요청 감지: {state.get().target_ticker} "
-                    f"{reason}. 청산 완료까지 대기합니다."
-                ),
-                ticker=state.get().target_ticker,
+
+    def _on_done(task: "asyncio.Task") -> None:
+        global _close_in_progress, _close_in_progress_warned, _closing_task
+        _close_in_progress = False
+        _close_in_progress_warned = False
+        if _closing_task is task:
+            _closing_task = None
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            # _execute_close_impl 이 자기 오류를 삼키므로 여기 오는 건 진짜 예외다.
+            # 분리 태스크라 아무도 await 하지 않으니 여기서 반드시 남긴다.
+            log(
+                "F4_CLOSE_TASK_ERROR", level="CRIT",
+                ticker=state.get().target_ticker, reason=reason, error=repr(exc),
             )
-        finally:
-            await asyncio.shield(close_task)
-            raise
-    finally:
-        if close_task.done():
-            _close_in_progress = False
-            _close_in_progress_warned = False
-            if _closing_task is close_task:
-                _closing_task = None
+
+    close_task.add_done_callback(_on_done)
+    return close_task
+
+
+async def _trigger_close(price: float, reason: str) -> None:
+    """스탑이 맞았을 때 틱 경로에서 부른다 — 청산 태스크를 띄우고 **바로 돌아온다**.
+
+    예전엔 여기서 shield 로 완료를 기다렸다. 그러면 WS 리더 코루틴(이 함수의 호출자)이
+    매도~체결 확인(7~27초) 동안 recv() 로 돌아가지 못해 틱을 한 건도 못 읽었고, 27초
+    날엔 websockets 큐(32)가 차 keepalive 단절과 38초 유실로 번졌다
+    (docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md). 청산 후 틱은 EXITING 이라
+    스탑 판정에 쓰이지 않으므로 리더는 계속 읽기만 하면 된다. 취소 보호는 run() 의
+    finally 가 _closing_task 를 shield 로 기다리는 것으로 유지된다.
+    """
+    _start_close(price, reason)
 
 
 async def close_now(price: float, reason: str) -> bool:
-    """F3 비상가드 등 외부 모듈이 동일한 확인 청산 경로를 사용한다."""
-    await _trigger_close(price, reason)
+    """F3 비상가드 등 외부 모듈이 동일한 확인 청산 경로를 쓴다 — 결과를 기다린다."""
+    close_task = _start_close(price, reason)
+    if close_task is None:
+        close_task = _closing_task
+    if close_task is not None:
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            log(
+                "F4_CLOSE_CANCEL_REQUESTED", level="CRIT",
+                ticker=state.get().target_ticker, reason=reason,
+            )
+            try:
+                await notifier.send(
+                    "F4_CLOSE_CANCEL_REQUESTED",
+                    level="CRIT",
+                    message=(
+                        f"F4 청산 태스크 취소 요청 감지: {state.get().target_ticker} "
+                        f"{reason}. 청산 완료까지 대기합니다."
+                    ),
+                    ticker=state.get().target_ticker,
+                )
+            finally:
+                await asyncio.shield(close_task)
+                raise
     return state.get().position_status in {"EXITING", "CLOSED"}
 
 

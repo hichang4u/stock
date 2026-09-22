@@ -54,6 +54,13 @@ async def _run_tick(
     ):
         mock_dt.now.return_value = _kst(hour, minute)
         await _process_tick(price, _spike_always_pass())
+        # 청산은 분리 태스크다(틱 경로를 막지 않는다). 테스트는 완료된 상태를 보므로
+        # 패치가 살아 있는 동안 끝까지 기다린다.
+        import src.modules.f4_tracking as f4
+
+        if f4._closing_task is not None:
+            await f4._closing_task
+        await asyncio.sleep(0)
     return mock_close
 
 
@@ -75,6 +82,11 @@ def holding_state(monkeypatch):
     s.pending_exit = None
     s.entry_at = None
     s.post_close_tracking_stopped = False
+    # 청산은 분리 태스크라 앞 테스트의 done-callback 이 뒤늦게 전역을 만질 수 있다.
+    # 매 테스트를 깨끗한 "청산 없음" 상태에서 시작한다.
+    monkeypatch.setattr(f4, "_close_in_progress", False)
+    monkeypatch.setattr(f4, "_close_in_progress_warned", False)
+    monkeypatch.setattr(f4, "_closing_task", None)
     monkeypatch.setattr(f4.db, "update_order_submission", AsyncMock())
     monkeypatch.setattr(
         f4.db,
@@ -291,6 +303,8 @@ async def test_close_trigger_does_not_mark_closed_before_sell_finishes(monkeypat
 
     stop = ENTRY * (1 + STEP_SIZE - STEP_TRAIL)
     await _process_tick(stop, _spike_always_pass())
+    assert f4._closing_task is not None  # 분리 태스크로 띄워졌다
+    await f4._closing_task
 
     assert observed_statuses == ["HOLDING"]
     assert _state_mod.get().position_status == "HOLDING"
@@ -2020,3 +2034,93 @@ async def test_run_forever_rearms_when_cycle_exits_while_holding(monkeypatch):
         task.cancel()
         with contextlib.suppress(real_asyncio.CancelledError):
             await task
+
+
+# ── 청산 태스크는 틱 경로를 막지 않는다 (2026-09-17/18 WS 틱 정지 티켓) ──────────
+
+
+@pytest.mark.asyncio
+async def test_trigger_close_returns_before_the_close_finishes(monkeypatch):
+    """스탑이 맞으면 청산 태스크를 띄우고 바로 돌아온다 — WS 리더가 계속 틱을 읽어야 한다.
+
+    docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md: 인라인 대기 때문에 매도~체결 확인
+    (7~27초) 동안 틱을 한 건도 못 읽었고, 27초 날에는 큐 포화 → keepalive 단절 → 38초
+    유실까지 번졌다.
+    """
+    import asyncio as real_asyncio
+
+    from src.modules import f4_tracking as f4
+
+    release = real_asyncio.Event()
+    started = real_asyncio.Event()
+
+    async def slow_close(_price, _reason):
+        started.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(f4, "_close_in_progress", False)
+    monkeypatch.setattr(f4, "_close_in_progress_warned", False)
+    monkeypatch.setattr(f4, "_closing_task", None)
+    monkeypatch.setattr(f4, "_execute_close", slow_close)
+    monkeypatch.setattr(f4, "log", lambda *a, **k: None)
+
+    await real_asyncio.wait_for(f4._trigger_close(9_800.0, "TRAILING"), 0.2)
+
+    await real_asyncio.wait_for(started.wait(), 1)
+    assert f4._close_in_progress is True
+    assert f4._closing_task is not None and not f4._closing_task.done()
+
+    release.set()
+    await real_asyncio.wait_for(f4._closing_task, 1)
+    await real_asyncio.sleep(0)  # done-callback 실행
+    assert f4._close_in_progress is False
+    assert f4._closing_task is None
+
+
+@pytest.mark.asyncio
+async def test_close_now_waits_for_the_close_result(monkeypatch):
+    """외부 호출(F3 비상가드 등)은 결과가 필요하므로 여전히 기다린다."""
+    import asyncio as real_asyncio
+
+    from src.modules import f4_tracking as f4
+
+    async def close_then_mark(_price, reason):
+        await real_asyncio.sleep(0.05)
+        _state_mod.get().position_status = "CLOSED"
+        return True
+
+    _state_mod.get().position_status = "HOLDING"
+    monkeypatch.setattr(f4, "_close_in_progress", False)
+    monkeypatch.setattr(f4, "_close_in_progress_warned", False)
+    monkeypatch.setattr(f4, "_closing_task", None)
+    monkeypatch.setattr(f4, "_execute_close", close_then_mark)
+    monkeypatch.setattr(f4, "log", lambda *a, **k: None)
+
+    assert await f4.close_now(9_800.0, "MANUAL") is True
+    assert f4._close_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_detached_close_task_error_is_logged_as_crit(monkeypatch):
+    import asyncio as real_asyncio
+
+    from src.modules import f4_tracking as f4
+
+    events = []
+
+    async def broken_close(_price, _reason):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(f4, "_close_in_progress", False)
+    monkeypatch.setattr(f4, "_close_in_progress_warned", False)
+    monkeypatch.setattr(f4, "_closing_task", None)
+    monkeypatch.setattr(f4, "_execute_close", broken_close)
+    monkeypatch.setattr(f4, "log", lambda event, **k: events.append((event, k)))
+
+    await f4._trigger_close(9_800.0, "HARD_STOP")
+    for _ in range(5):
+        await real_asyncio.sleep(0)
+
+    assert [e for e, _ in events if e == "F4_CLOSE_TASK_ERROR"] == ["F4_CLOSE_TASK_ERROR"]
+    assert f4._close_in_progress is False
