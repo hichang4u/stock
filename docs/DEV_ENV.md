@@ -440,8 +440,9 @@ requirements-dev.txt (개발/테스트 전용)
     -TaskName "StockBot_OvernightScreen" `
     -Action $Action `
     -Trigger $Trigger `
-    -Settings $Settings `
-    -RunLevel Highest
+    -Settings $Settings
+  # RunLevel은 기본(Limited)으로 둔다 — StockBot_Backfill과 같다. 관리자 권한이 필요 없고
+  # 일반 PowerShell에서 바로 등록된다. (2026-09-22 실제 등록: 다음 실행 09/23 15:32)
 
   확인: 등록 다음 거래일 15:36에 data\overnight\candidates\<날짜>.jsonl 이 있고 마지막
   줄이 {"summary": true, ...} 인지(60종목이면 일봉 호출까지 약 2분 걸린다). 없으면

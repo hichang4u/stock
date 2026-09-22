@@ -235,6 +235,9 @@ Telegram 알림, UI, DB 테이블, 실주문 — 전부 없다. 파일 두 디�
 
 ## 7. 재평가 기록
 
+- 2026-09-22: 그림자 수집 시작. release/20260922-1 승격(지문 96eda028876a 무변경), 운영
+  트리 `run_overnight_screen.ps1 -DryRun` 확인(유니버스 57 / 후보 1 / 호출 18 /
+  degraded=False), `StockBot_OvernightScreen` 등록(평일 15:32, 첫 실행 2026-09-23).
 - 2026-09-21 TODO (첫 재평가 전): §4.2의 틱-분봉 비교(A 겹친 날), A 상관, 비용 민감도는
   미구현 — 표본이 생기면 overnight_sieve에 추가.
 
