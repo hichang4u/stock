@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 
@@ -32,8 +33,8 @@ from scripts.overnight_screen import (
 )
 
 
-def _row(**over) -> dict:
-    base = {
+def _row(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
         "ticker": "000001", "name": "정상전자", "change_pct": 5.0,
         "open": 10000.0, "high": 11000.0, "low": 9900.0, "close": 10800.0,
         "amount": 5_000_000_000.0, "avg_amount_20d": 1_000_000_000.0,

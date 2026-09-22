@@ -325,7 +325,9 @@ def test_needed_pairs_restored_universe_still_adds_warmup_days(tmp_path):
     assert needed["20260909"] == {"999999", "111111"}
 
 
-def _candidates(tmp_path, date: str, ranked: list[str], rejected: list[str] = ()) -> None:
+def _candidates(
+    tmp_path, date: str, ranked: list[str], rejected: tuple[str, ...] = ()
+) -> None:
     d = tmp_path / "overnight"
     d.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps({"date": date, "ticker": t, "rank": i + 1}) for i, t in enumerate(ranked)]
@@ -336,7 +338,7 @@ def _candidates(tmp_path, date: str, ranked: list[str], rejected: list[str] = ()
 
 
 def test_overnight_pairs_maps_candidates_to_the_next_trading_date(tmp_path):
-    _candidates(tmp_path, "20260918", ["000001", "000002"], rejected=["000009"])
+    _candidates(tmp_path, "20260918", ["000001", "000002"], rejected=("000009",))
     _candidates(tmp_path, "20260921", ["000003"])          # 다음 거래일 없음 → 제외
     pairs = overnight_pairs(tmp_path / "overnight", ["20260917", "20260918", "20260921"])
     assert pairs == {"20260921": {"000001", "000002"}}
