@@ -154,8 +154,10 @@ try/except가 없고 APScheduler에 `EVENT_JOB_ERROR` 리스너도 없어서, �
   **1건(20260918)**. §4.1의 3건 기준에 이 경로도 합산한다.
 - 12.4초짜리 조회가 빈 응답을 주고 7초 뒤 조회가 체결을 준 것은 모의서버 체결조회의
   반영 지연으로 보인다. 어느 쪽인지 확정하려면 `_fetch_order_fill_snapshot`의 응답
-  (`output_count`, `rt_cd`)을 로그에 남겨야 한다 — 현재는 남지 않는다. 지문 대상
-  파일이므로 동결 해제 시 함께 넣는다.
+  (`output_count`, `rt_cd`)을 로그에 남겨야 한다. **2026-09-22 동결 해제 묶음에서
+  `ENTRY_FILL_SNAPSHOT` 로그로 추가했다**(대조·최종 확인 호출만; 폴링은 기존 요약).
+  다음 `UNCONFIRMED` 사례부터 `matched`·`odnos`로 판별한다. 티켓 1의 창(2.0s)은
+  §4.1 표본 조건이 그대로라 **바꾸지 않았다**.
 - CRIT 알림·`daily_skips` 기록은 없었고 `day_skip`도 복구 후 남지 않았다. 실피해는
   공백 39초뿐이다.
 - 같은 날 `ENTRY_BUDGET_EXCEEDED_SHADOW`(51.6초 > 45초)도 찍혔다. 이 예산은 현재

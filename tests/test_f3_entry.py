@@ -2903,6 +2903,36 @@ async def test_final_entry_quote_uses_critical_priority(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_order_fill_snapshot_logs_the_reply_when_it_does_not_match(monkeypatch):
+    """2026-09-18: 취소 재거부 뒤 12.4초 걸린 최종 대조가 체결을 못 봤는데 응답이 뭐였는지
+    로그에 없어 서버 반영 지연인지 우리 파싱 문제인지 가릴 수 없었다. 대조 호출의 응답
+    형태(rt_cd·행 수·매칭 여부)를 남긴다. 폴링 경로(update_poll_summary)는 요약이 따로
+    있으므로 남기지 않는다."""
+    monkeypatch.setattr(f3, "_fetch_order_fill_snapshot", _REAL_FETCH_ORDER_FILL_SNAPSHOT)
+    events = []
+    monkeypatch.setattr(f3, "log", lambda event, **k: events.append((event, k)))
+    monkeypatch.setattr(
+        f3.kis_rest,
+        "get",
+        AsyncMock(return_value={"rt_cd": "0", "msg_cd": "MCA00000",
+                                "output1": [{"odno": "0000000001", "tot_ccld_qty": "5"}]}),
+    )
+
+    fill = await f3._fetch_order_fill_snapshot("0000000937", ticker="006340", expected_qty=48)
+
+    assert fill is None
+    snap = [k for e, k in events if e == "ENTRY_FILL_SNAPSHOT"]
+    assert len(snap) == 1
+    assert snap[0]["order_id"] == "0000000937" and snap[0]["matched"] is False
+    assert snap[0]["output_count"] == 1 and snap[0]["rt_cd"] == "0"
+
+    events.clear()
+    await f3._fetch_order_fill_snapshot(
+        "0000000937", ticker="006340", expected_qty=48, update_poll_summary=True
+    )
+    assert not [e for e, _ in events if e == "ENTRY_FILL_SNAPSHOT"]
+
+
 async def test_fetch_order_fill_snapshot_distinguishes_partial_fill(monkeypatch):
     monkeypatch.setattr(
         f3,

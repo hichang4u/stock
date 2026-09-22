@@ -142,8 +142,15 @@ PAPER 정상 청산 1회로 인정되려면 다음 조건을 모두 만족해야
 - 리팩터링, 주석 정리, 죽은 코드 삭제, 로그 문구 변경도 모두 fingerprint를 바꾼다. 동작이 같아도 예외가 아니다.
 - 알려진 개선 항목과 미완 정리는 **이 단계에서 모두 소진**한다. "나중에 정리하자"로 남긴 항목은 카운트 도중 손대게 되고, 그 시점에 리셋 비용이 발생한다.
   현재 미뤄둔 전략 파일 수정 후보 (동결 해제 시 함께 처리):
-  - [`docs/ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md`](ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md) — 진입 체결조회 창 2.0s 재측정
-  - [`docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md`](F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md) — 청산 주문~체결 확인 동안 WS 틱 수신 정지 (관측 품질, 매매 판단 무관)
+  - [`docs/ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md`](ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md) — 진입 체결조회 창 2.0s 재측정 (§4.1 표본 조건 충족 시)
+
+  **2026-09-22 동결 해제 기록.** 지문 `96eda028876a`(PAPER 4/20)를 버리고 아래 셋을 한
+  릴리스로 묶었다. 이유: 09-22 폴백(개장 직전 랭킹 16.5초 → 레거시 경로 → 하드스탑)의
+  구조적 원인과, 09-18에 WS 단절·38초 유실로 번진 청산 중 틱 정지를 더 두면 표본 자체가
+  나빠진다고 판단. 새 지문으로 0단계부터 다시 센다.
+  - `paper_fast_probe.py`: OPEN 프로브가 진행 중인 PREOPEN을 최대 8초 기다린다 (`PAPER_FAST_PROBE_PREOPEN_WAIT_MS`)
+  - `f4_tracking.py`: 청산 태스크를 틱 경로에서 분리 (F4_CLOSE_TICK_FREEZE 티켓 처리)
+  - `f3_entry.py`: 대조·최종 확인 응답을 `ENTRY_FILL_SNAPSHOT`으로 기록 (관측만)
 - 동결 대상이 아닌 파일(`docs/`, `tests/`, `api_tests/`, `scripts/`, `src/api/server.py`, `docs/html/`)은 카운트 중에도 자유롭게 수정할 수 있다. 대시보드·문서·테스트 보강은 실적에 영향을 주지 않는다.
 - 동결 시점의 fingerprint를 아래 명령으로 기록하고, 이 문서 상단 "현재 판정"에 반영한다.
 

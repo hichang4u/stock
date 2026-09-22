@@ -4256,6 +4256,21 @@ async def _fetch_order_fill_snapshot(
                 "poll_last_error": None,
             }
         )
+    else:
+        # 취소 거부 뒤 대조·최종 확인 호출. 2026-09-18 에 12.4초 걸린 최종 대조가 체결을
+        # 못 봤는데 응답이 무엇이었는지 남지 않아 서버 반영 지연인지 파싱 문제인지 가릴 수
+        # 없었다(docs/ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md §6). 폴링은 요약이 따로 있다.
+        log(
+            "ENTRY_FILL_SNAPSHOT",
+            level="INFO",
+            ticker=ticker,
+            order_id=order_id,
+            rt_cd=resp.get("rt_cd"),
+            msg_cd=resp.get("msg_cd"),
+            output_count=len(rows),
+            matched=any(str(item.get("odno") or "") == str(order_id) for item in rows),
+            odnos=[str(item.get("odno") or "") for item in rows][:5],
+        )
     for item in rows:
         if str(item.get("odno") or "") != str(order_id):
             continue
