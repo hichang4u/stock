@@ -128,5 +128,7 @@ for row in db.execute("select order_phase, ordered_at, filled_at from orders whe
 
 통과 조건: `CLOSE_SELL`의 `ordered_at`~`filled_at` 구간에 3초 초과 `gap`이
 없고, 같은 구간 로그에 `WS_STALE`이 없으며, 청산 후 1분 안에
-`keepalive ping timeout` 단절이 없다. 확인 폴링이 20초를 넘긴 날(모의서버
+`keepalive ping timeout` 단절이 없다. 트리거와 같은 WS 프레임에 묶인 틱이
+`F4_CLOSE_ALREADY_IN_PROGRESS` WARN 한 줄을 남길 수 있는데, 이는 정상이다
+(분리 태스크가 첫 스텝을 밟기 전의 틱). 확인 폴링이 20초를 넘긴 날(모의서버
 지연일)에 재는 것이 가장 강한 검증이다.

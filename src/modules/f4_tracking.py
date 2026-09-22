@@ -606,10 +606,10 @@ async def run() -> None:
         await _finalize_capture_after_observation()
     finally:
         closing = _closing_task
-        # EXITING 전환으로 WS/health 태스크가 먼저 끝나더라도, 청산을 호출한
-        # 모니터 태스크를 취소하기 전에 보호된 청산 태스크부터 완료한다.
-        # 순서가 반대면 _trigger_close()의 부모가 정상 청산 중 취소되어
-        # F4_CLOSE_CANCEL_REQUESTED가 거짓 CRIT로 기록된다.
+        # EXITING 전환으로 WS/health 태스크가 먼저 끝나더라도, 분리된 청산 태스크가
+        # 끝날 때까지 기다린 뒤에 모니터를 정리한다. 청산은 이제 아무도 await 하지
+        # 않는 분리 태스크라(_start_close), 여기서 shield 로 기다리지 않으면 run() 이
+        # 재무장하며 청산 중인 포지션에 다시 붙는다.
         try:
             if closing is not None and not closing.done():
                 await asyncio.shield(closing)

@@ -9,8 +9,10 @@
 avg_amount_5d, gap_allowed …)를 가지므로 `f1_selector.rank_candidates` 를 그대로 돌릴 수 있다.
 
 `paper_fast_probe.load_persisted_open_candidates` 와 같은 재생 규칙이지만, 그쪽은
-승인된 후보만 돌려주고 여기는 **유니버스 전체**를 돌려준다. 운영 모듈은 import 만
-한다(지문 대상 파일은 건드리지 않는다).
+승인된 후보만 돌려주고 여기는 **유니버스 전체**를 돌려준다. 운영의 실시간 경로
+(`observe_open_boundary`)는 09:00 에 매도호가가 없던 행(정지·VI)을 버리는데 두 재생
+경로는 그 행을 남긴다 — 순위는 호가를 안 보므로 그런 날에만 랭크 1~5 가 다를 수 있다.
+운영 모듈은 import 만 한다(지문 대상 파일은 건드리지 않는다).
 """
 
 from __future__ import annotations

@@ -959,6 +959,7 @@ async def observe_open_boundary() -> list[dict]:
         # OPEN 은 09:00:00 에 NO_PREOPEN_TICKERS 로 포기했다 → 레거시 경로, 진입 09:02.
         # 5초만 기다렸으면 빠른 경로였다. 여기서 기다린다.
         await _wait_for_prepare(target)
+        now = datetime.now(KST)  # 기록용 actual_ts 는 실제 관측 시각이어야 한다
     if lateness_ms > max_lateness_ms:
         _last_open_quality = {
             "ok": False,

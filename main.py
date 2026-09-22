@@ -57,9 +57,12 @@ STATE_DIR = os.getenv("STATE_DIR", "data/state")
 NTP_SERVERS = [s.strip() for s in os.getenv("NTP_SERVER", "pool.ntp.org").split(",")]
 DB_PATH = os.path.join(os.getenv("DB_DIR", "data/db"), "trading.db")
 PID_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.pid")
+# 개장 관측 전체(오프셋 0.3s + 허용 지각 2.5s + PREOPEN 대기 8s + 멀티시세 1콜 ~2s)를
+# 덮어야 한다. 2.5s 였을 때는 paper_fast_probe 의 PREOPEN 대기가 여기서 잘려 죽은 코드였다
+# (2026-09-22 리뷰). 값을 바꾸면 전략 지문이 바뀐다.
 PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC = max(
     0.1,
-    _env_float("PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC", 2.5),
+    _env_float("PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC", 15.0),
 )
 PAPER_FAST_BALANCE_PREFETCH_CUTOFF = (8, 59, 58)
 _BAL_TR = {"REAL": "TTTC8434R", "PAPER": "VTTC8434R"}

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from datetime import datetime as real_datetime
 from pathlib import Path
 from typing import Any
@@ -1156,8 +1157,8 @@ async def test_open_boundary_waits_for_a_late_preopen_then_observes(monkeypatch,
     _open_env(monkeypatch, tmp_path)
     monkeypatch.setenv("PAPER_FAST_PROBE_PREOPEN_WAIT_MS", "3000")
     monkeypatch.setattr(probe, "datetime", _fixed_open_clock(0))
-    probe._prepared_tickers = []
-    probe._prepare_in_progress = True
+    monkeypatch.setattr(probe, "_prepared_tickers", [])
+    monkeypatch.setattr(probe, "_prepare_in_progress", True)
 
     async def finish_prepare_soon():
         await asyncio.sleep(0.2)
@@ -1192,8 +1193,8 @@ async def test_open_boundary_gives_up_when_preopen_outlasts_the_wait_budget(
     _open_env(monkeypatch, tmp_path)
     monkeypatch.setenv("PAPER_FAST_PROBE_PREOPEN_WAIT_MS", "150")
     monkeypatch.setattr(probe, "datetime", _fixed_open_clock(0))
-    probe._prepared_tickers = []
-    probe._prepare_in_progress = True
+    monkeypatch.setattr(probe, "_prepared_tickers", [])
+    monkeypatch.setattr(probe, "_prepare_in_progress", True)
     get = AsyncMock()
     monkeypatch.setattr(probe.kis_rest, "get", get)
 
@@ -1236,3 +1237,15 @@ async def test_prepare_sets_in_progress_flag_only_while_running(monkeypatch, tmp
 
     assert seen_during_call and all(seen_during_call)
     assert probe._prepare_in_progress is False
+
+
+def test_job_f1_open_timeout_covers_the_preopen_wait(monkeypatch):
+    """main.job_f1 의 바깥 타임아웃이 대기 예산보다 짧으면 PREOPEN 대기는 죽은 코드다
+    (2026-09-22 리뷰: 2.5s 가 8s 대기를 잘랐다). 오프셋 + 허용 지각 + 대기 + 멀티 1콜을 덮는다."""
+    import main
+
+    offset_s = int(os.getenv("PAPER_FAST_PROBE_OPEN_OFFSET_MS", "300")) / 1000
+    max_late_s = int(os.getenv("PAPER_FAST_PROBE_OPEN_MAX_LATENESS_MS", "2500")) / 1000
+    wait_s = int(os.getenv("PAPER_FAST_PROBE_PREOPEN_WAIT_MS", "8000")) / 1000
+    multi_call_s = 2.0
+    assert main.PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC >= offset_s + max_late_s + wait_s + multi_call_s

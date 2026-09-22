@@ -34,7 +34,7 @@ def test_blank_new_float_env_values_do_not_crash_module_import():
                 "assert f4_tracking.F4_FILL_POLL_INTERVAL_SEC == 0.5;"
                 "assert f4_tracking.F4_STATE_PERSIST_INTERVAL_SEC == 1.0;"
                 "assert f4_tracking.F4_HEARTBEAT_INTERVAL_SEC == 30.0;"
-                "assert main.PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC == 2.5"
+                "assert main.PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC == 15.0"
             ),
         ],
         cwd=os.getcwd(),
