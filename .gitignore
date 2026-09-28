@@ -2,6 +2,7 @@
 .env
 .env.paper
 .env.real
+.env.bak*
 __pycache__/
 *.pyc
 *.pyo
