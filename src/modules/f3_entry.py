@@ -59,6 +59,37 @@ GAP_MAX_ORDER = f1_selector.GAP_HARD_MAX  # F1 고갭 후보 범위와 동일: +
 GAP_MAX_FILL = f1_selector.GAP_HARD_MAX  # +10% 이상 추격 체결은 즉시 방어 청산
 HIGH_GAP_MIN_EXPECTED_AMOUNT = f1_selector.HIGH_GAP_MIN_EXPECTED_AMOUNT
 ALLOC_RATIO = float(os.getenv("F3_ALLOC_RATIO", "0.95"))  # 주문가능 현금 기본 95% 기준
+# 한 종목 주문금액 상한(원). 0이면 상한 없음 — 비율만 쓰던 기존 동작 그대로다.
+# 2026-09-28 모의투자 상시대회 계좌가 1천만원 → 5억으로 바뀌면서 필요해졌다. 비율만 쓰면
+# 한 종목에 3.5억이 들어가는데, 갭상승 소형주에 그 금액은 실제로는 호가에 체결되지 않고
+# 모의서버만 체결시켜 준다. 그러면 개선 계획 §2의 체결·비용 가정이 무너지고 이전 표본
+# (약 700만원 규모)과 비교가 불가능해진다. 계좌 잔고와 무관하게 규모를 고정한다.
+MAX_ORDER_AMOUNT = max(0.0, float(os.getenv("F3_MAX_ORDER_AMOUNT", "0")))
+
+
+def entry_budget(cash: float) -> tuple[int, bool]:
+    """(주문에 쓸 금액, 상한에 걸렸는지). 음수 현금은 0으로 본다."""
+    amount = int(max(0.0, float(cash or 0.0)) * ALLOC_RATIO)
+    if MAX_ORDER_AMOUNT > 0 and amount > MAX_ORDER_AMOUNT:
+        return int(MAX_ORDER_AMOUNT), True
+    return amount, False
+
+
+def entry_budget_logged(cash: float, *, ticker: str | None = None) -> int:
+    """entry_budget에 로그를 얹는다. 상한에 걸린 경우에만 한 줄 남긴다."""
+    amount, capped = entry_budget(cash)
+    if capped:
+        log(
+            "ENTRY_BUDGET_CAPPED",
+            level="INFO",
+            ticker=ticker,
+            cash=float(cash or 0.0),
+            alloc_ratio=ALLOC_RATIO,
+            uncapped_amount=int(max(0.0, float(cash or 0.0)) * ALLOC_RATIO),
+            cap=int(MAX_ORDER_AMOUNT),
+            applied_amount=amount,
+        )
+    return amount
 F3_QTY_CLAMP_WARN_PCT = max(
     0.0,
     float(os.getenv("F3_QTY_CLAMP_WARN_PCT", "20.0")),
@@ -1458,7 +1489,7 @@ async def _run_single(
             alloc_ratio=ALLOC_RATIO,
             ord_psbl_cash=float((prefetched_buyable or {}).get("ord_psbl_cash") or 0.0),
         )
-        total_amount = int(cash * ALLOC_RATIO)
+        total_amount = entry_budget_logged(cash, ticker=ticker)
         total_qty = int(total_amount / expected_price) if expected_price else 0
     if total_qty == 0:
         candidate_block_level = "INFO" if allow_candidate_retry else "WARN"
@@ -3312,7 +3343,7 @@ async def _rank_final_entry_candidates(
         s.target_name = None
         await _alert_balance_query_failed(tickers[0] if tickers else None, tickers)
         return None
-    total_amount = int(cash * ALLOC_RATIO)
+    total_amount = entry_budget_logged(cash, ticker=tickers[0] if tickers else None)
 
     for row in recheck_rows:
         rank = int(row["rank"])

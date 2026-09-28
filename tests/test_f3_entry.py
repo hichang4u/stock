@@ -322,6 +322,55 @@ def test_qty_clamp_level_uses_configured_reduction_threshold(monkeypatch):
     assert f3._qty_clamp_log_level(9, 5) == "WARN"
 
 
+def test_entry_budget_applies_ratio_when_no_cap(monkeypatch):
+    monkeypatch.setattr(f3, "ALLOC_RATIO", 0.70)
+    monkeypatch.setattr(f3, "MAX_ORDER_AMOUNT", 0.0)   # 0 = 무제한(기존 동작)
+
+    assert f3.entry_budget(10_000_000) == (7_000_000, False)
+
+
+def test_entry_budget_caps_the_order_amount(monkeypatch):
+    """2026-09-28 모의투자 대회 계좌가 1천만원 → 5억으로 바뀌었다. 비율만 쓰면 한 종목에
+    3.5억이 들어가 체결 가정이 무너지고 이전 표본과 비교가 안 된다."""
+    monkeypatch.setattr(f3, "ALLOC_RATIO", 0.70)
+    monkeypatch.setattr(f3, "MAX_ORDER_AMOUNT", 7_000_000.0)
+
+    assert f3.entry_budget(500_000_000) == (7_000_000, True)      # 3.5억 → 상한
+    assert f3.entry_budget(5_000_000) == (3_500_000, False)       # 상한 미만은 그대로
+    assert f3.entry_budget(10_000_000) == (7_000_000, False)      # 정확히 상한이면 캡 아님
+
+
+def test_entry_budget_never_returns_negative_or_fractional(monkeypatch):
+    monkeypatch.setattr(f3, "ALLOC_RATIO", 0.70)
+    monkeypatch.setattr(f3, "MAX_ORDER_AMOUNT", 7_000_000.0)
+
+    assert f3.entry_budget(0) == (0, False)
+    assert f3.entry_budget(-1) == (0, False)
+    amount, _ = f3.entry_budget(1_234_567)
+    assert isinstance(amount, int) and amount == 864_196   # int(1234567*0.7)
+
+
+def test_entry_budget_cap_is_logged_once_with_both_numbers(monkeypatch):
+    events = []
+    monkeypatch.setattr(f3, "ALLOC_RATIO", 0.70)
+    monkeypatch.setattr(f3, "MAX_ORDER_AMOUNT", 7_000_000.0)
+    monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))
+
+    amount = f3.entry_budget_logged(500_000_000, ticker="005930")
+
+    assert amount == 7_000_000
+    capped = [k for e, k in events if e == "ENTRY_BUDGET_CAPPED"]
+    assert len(capped) == 1
+    assert capped[0]["uncapped_amount"] == 350_000_000
+    assert capped[0]["cap"] == 7_000_000
+    assert capped[0]["cash"] == 500_000_000
+    assert capped[0]["ticker"] == "005930"
+
+    events.clear()
+    assert f3.entry_budget_logged(5_000_000, ticker="005930") == 3_500_000
+    assert not [e for e, _ in events if e == "ENTRY_BUDGET_CAPPED"]
+
+
 def test_parse_deadline_logs_invalid_value(monkeypatch):
     events = []
     monkeypatch.setattr(f3, "log", lambda event, **kwargs: events.append((event, kwargs)))

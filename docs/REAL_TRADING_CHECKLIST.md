@@ -243,6 +243,11 @@ python api_tests/balance.py
 REAL 전환 시 아래를 조정한다. 근거는
 `docs/superpowers/specs/2026-09-10-prod-dev-separation-design.md` 6-5절이다.
 
+0. **`F3_MAX_ORDER_AMOUNT`를 REAL 정책값으로 다시 정한다.** PAPER에서는 모의투자 계좌
+   잔고(2026-09-28부터 5억)와 무관하게 표본 규모를 고정하려고 700만원을 걸어 두었다.
+   REAL에서는 이 값이 **실제 1회 최대 손실 노출**을 정하므로, 승인된 금액으로 다시 정하고
+   `F3_ALLOC_RATIO`와 **둘 중 작은 쪽이 적용된다**는 점을 확인한다. 0으로 두면 상한이
+   사라진다 — REAL에서 0은 쓰지 않는다.
 1. 운영 `F3_ALLOC_RATIO`를 REAL 정책값으로 변경한다. 현재 운영은 계좌 공유
    때문에 `0.70`인데, `src/readiness.py`의 REAL 게이트는 `0 < 비율 <= 0.20`을
    요구한다. **이 둘은 그대로 두면 충돌한다** — REAL 전환 시 반드시 낮춘다.
