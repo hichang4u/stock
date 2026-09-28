@@ -9,9 +9,13 @@
     채워진 쌍은 호출 없이 건너뛰므로 여러 번 돌려도 안전하고, 중단해도
     재실행하면 이어서 채운다.
 
-    백필이 성공하면 이어서 data\ 백업을 뜬다(하루 한 번). 20260903에
-    f1_snapshots와 backtest_bars를 통째로 잃은 사고의 대응이며, 표본이
-    새로 생긴 날이 곧 백업할 이유가 가장 큰 날이다. -NoBackup 으로 끈다.
+    백필 뒤에는 백필의 성패와 무관하게 data\ 백업을 뜬다(하루 한 번).
+    20260903에 f1_snapshots와 backtest_bars를 통째로 잃은 사고의 대응이며,
+    표본이 새로 생긴 날이 곧 백업할 이유가 가장 큰 날이다. -NoBackup 으로 끈다.
+
+    종료 코드: 0 정상 / 1 백필이 예기치 않게 실패 / 2 백필이 설계대로 중단
+    (RATE_LIMIT 등, 다음 실행이 이어받는다) / 3 백업 실패. 3만 즉시 사람이
+    봐야 한다.
 
     왜 사람이 돌려야 하는지는
     docs/TRACK_B_UNIVERSE_REANALYSIS_20260831.md 제10절에 있다 — 실시간 봉
@@ -119,9 +123,15 @@ try {
 
 Write-Section "결과"
 
+# 백필이 중간에 멈춰도 백업은 돈다. track_b_backfill 은 호출 제한이나 분봉 조회
+# 실패를 만나면 PocStop 으로 빠져 exit 2 를 돌려준다 — 멱등이라 다음 실행이
+# 이어받는, 설계된 중단이다. 그런데 예전에는 그 코드를 받자마자 여기서 exit 해
+# 아래 백업 구간에 닿지 못했고, 20260923~20260928 4회 연속으로 백업이 조용히
+# 건너뛰어졌다(마지막 백업이 20260922 였다). 백필 진척과 데이터 보존은 별개이고,
+# 덜 채워진 날일수록 오히려 원본을 지켜야 한다.
 if ($code -ne 0) {
     Write-Fail "백필이 종료 코드 $code 로 끝났습니다. 위 출력과 로그를 확인하세요."
-    exit $code
+    Write-Host "    백업은 이어서 진행합니다."
 }
 
 $summary = $output | Where-Object { $_ -match "'filled'" } | Select-Object -Last 1
@@ -134,15 +144,17 @@ if ($summary) {
         Write-Warn "호출 예산이 소진됐습니다. 다시 돌려 나머지를 채우세요."
     }
 }
-Write-Ok "완료"
+if ($code -eq 0) {
+    Write-Ok "완료"
+}
 
 if ($DryRun) {
     Write-Host "  (계획 확인이므로 백업은 뜨지 않습니다)"
-    exit 0
+    exit $code
 }
 if ($NoBackup) {
     Write-Warn "-NoBackup 이 지정돼 백업을 건너뜁니다."
-    exit 0
+    exit $code
 }
 
 Write-Section "백업"
@@ -150,7 +162,7 @@ Write-Section "백업"
 $backupScript = Join-Path $repoRoot "scripts\backup_data.py"
 if (-not (Test-Path $backupScript)) {
     Write-Fail "백업 스크립트가 없습니다: $backupScript"
-    exit 2
+    exit 3
 }
 
 # 백필 구간과 같은 이유로 콘솔 인코딩을 다시 UTF-8로 둔다. 백필의 finally 가
@@ -183,11 +195,14 @@ try {
     [Console]::OutputEncoding = $previousOutputEncoding
 }
 
+# 종료 코드 규약: 0 정상 / 1 백필이 예기치 않게 실패 / 2 백필이 설계대로 중단
+# (RATE_LIMIT 등, 다음 실행이 이어받는다) / 3 백업 실패 — 데이터가 무방비다.
+# 3만 즉시 사람이 봐야 한다. 2 는 거의 매일 나오므로 같은 코드로 묶으면
+# 진짜 사고가 묻힌다.
 if ($backupCode -ne 0) {
     Write-Fail "백업이 종료 코드 $backupCode 로 끝났습니다."
-    Write-Host "    백필 자체는 성공했습니다 - 채워진 봉은 그대로입니다."
     Write-Host "    되돌릴 수 없는 손실을 막는 장치이므로 원인을 확인하세요."
-    exit 2
+    exit 3
 }
 Write-Ok "백업"
-exit 0
+exit $code
