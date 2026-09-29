@@ -1,0 +1,120 @@
+---
+name: daily-log
+description: 그날의 운영 로그를 분석한다 — 진입·청산 과정, 빠른 경로 판정, WS 상태, 알려진 결함 재발 여부
+---
+
+읽기 전용 분석이다. 운영 프로세스를 건드리지 않는다. 날짜를 안 주면 오늘로 본다.
+
+## 1. 파이프라인 전체 흐름
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import json
+rows=[json.loads(l) for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8') if l.strip()]
+print('총', len(rows), '줄')
+KEY=('PREOPEN','OPEN','F1_','F2_','F3_','F4_','F5_','ENTRY','ORDER','TRADE','POSITION','MARKET','SKIP','CAPPED','BUDGET','CLOSE','EXIT','HARD_STOP','TRAIL')
+for r in rows:
+    e=r.get('event','')
+    if any(k in e for k in KEY) or r.get('level') in ('error','crit'):
+        x={k:v for k,v in r.items() if k not in ('ts','level','event','logger','event_label')}
+        x={k:v for k,v in x.items() if v not in (None,'',[],{})}
+        print(r['ts'][11:23], r.get('level','').upper()[:4], e, json.dumps(x,ensure_ascii=False)[:190])
+"
+```
+
+`F4_HEARTBEAT`가 30초마다 찍혀 결과를 덮으므로, 길면 `and 'HEARTBEAT' not in e`를 더한다.
+
+## 2. 거래 결과
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import sqlite3
+db=sqlite3.connect('file:data/db/trading.db?mode=ro',uri=True); db.row_factory=sqlite3.Row
+for r in db.execute(\"select * from trades where date='<YYYYMMDD>'\"):
+    print({k:r[k] for k in r.keys() if r[k] not in (None,'')})
+for r in db.execute(\"select order_phase,ticker,order_price,order_qty,fill_price,fill_qty,status,ordered_at,filled_at from orders where ordered_at like '<YYYY-MM-DD>%'\"):
+    print(dict(r))
+"
+```
+
+`ordered_at`→`filled_at` 간격을 본다. 진입은 보통 1초 내, 길면 `F3_LIMIT_FILL_TIMEOUT_SEC`
+경로를 확인한다.
+
+## 3. 빠른 경로가 이겼는지
+
+`ENTRY_PIPELINE_TIMING.selection_source`가 `FAST_MULTI`면 정상,
+`LEGACY_SINGLE_QUOTE`면 폴백이다(80~120초 지연). 폴백이면 `PAPER_FAST_PROBE_OPEN_DONE`의
+`filter_pass_count`와 거부 사유별 카운트를 본다.
+
+`filter_pass_count=0`이면 프로브 유니버스에 통과 종목이 없었던 것이다. 그때는 실제
+매수 종목이 유니버스에 있었는지 대조한다 — 없었다면
+`docs/FAST_PATH_UNIVERSE_FOLLOWUP_20260929.md`의 구조적 맹점이다.
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
+import sys; sys.path.insert(0,'.')
+from pathlib import Path
+from scripts.probe_universe import load_probe_universe
+u=load_probe_universe(Path('data/paper_fast_probe/<YYYYMMDD>.jsonl'))
+print(len(u),'행 |', '<티커>' in [str(c.get('ticker')) for c in u])
+"
+```
+
+## 4. WS 상태
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import json
+for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
+    d=json.loads(l); e=d.get('event','')
+    if any(k in e for k in ('WS_','STALE','DISCONNECT','RECONNECT','KEEPALIVE')):
+        print(d['ts'][11:23], d.get('level','').upper()[:4], e, d.get('error',''))
+"
+```
+
+`keepalive ping timeout` 단절은 큐 포화 계열이라 무겁게 본다. 다른 사유의 단절은
+서버·네트워크 쪽일 수 있다.
+
+## 5. 청산이 있었으면 — F4 틱 공백 재측정
+
+`docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md` §5의 통과 조건을 다시 잰다.
+체결 확인이 20초를 넘긴 날이 가장 강한 검증이다.
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
+import gzip, json
+from datetime import datetime
+rows=[]
+try:
+    with gzip.open('data/strategy_ticks/<YYYYMMDD>/<티커>.09.jsonl.gz','rt',encoding='utf-8') as fh:
+        for line in fh:
+            line=line.strip()
+            if line:
+                try: rows.append(json.loads(line))
+                except ValueError: pass
+except EOFError: pass   # 장중이면 기록 중이라 잘려 있다
+rows.sort(key=lambda r: r.get('received_at',''))
+ws=[r for r in rows if r.get('source')=='ws']
+o=datetime.fromisoformat('<CLOSE_SELL ordered_at>'); f=datetime.fromisoformat('<filled_at>')
+prev=None
+for r in ws:
+    t=datetime.fromisoformat(r['received_at'])
+    if prev and (t-prev).total_seconds()>3:
+        print('gap', prev.time(), '->', t.time(), round((t-prev).total_seconds(),1),
+              '<<< 창 안' if (prev<=f and t>=o) else '')
+    prev=t
+print('창 안 ws 틱', sum(1 for r in ws if o<=datetime.fromisoformat(r['received_at'])<=f), '건')
+"
+```
+
+통과 조건: 창 안 3초 초과 공백 0건, 같은 구간 `WS_STALE` 없음, 청산 후 1분 내
+keepalive 단절 없음.
+
+## 6. 보고할 때
+
+- 손익은 금액과 %를 함께 쓴다(`trades.pnl_pct`, `pnl_amount`).
+- 주문금액 상한이 걸렸으면 `ENTRY_BUDGET_CAPPED`의 `uncapped_amount`와 함께 보인다.
+- **추정과 실측을 섞지 않는다.** "늦어서 손해였다" 같은 말은 분봉으로 확인한 뒤에만
+  한다(`FHKST03010200`, `FID_INPUT_HOUR_1`로 30봉씩 되짚는다).
+- 결함을 찾으면 `docs/<주제>_FOLLOWUP_<날짜>.md` 형식으로 티켓을 남긴다 —
+  현상 / 증거 / 원인 / 영향 / 선택지 순서이고, **선택지는 고르지 않고 나열만 한다.**
