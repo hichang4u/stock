@@ -196,8 +196,56 @@ fast 0900 / legacy 0901로만 갈린다 — 순수한 진입 시점 차이다.
   44% 비율로 조용히 작동하고 있었다. C는 `pass=0`인 날의 대가만 줄인다.
 - **A(OPEN 랭킹 재조회)만이 8.2절을 직접 막는다.** 다만 8.3·8.4절을 보면 맹점을 막는
   것이 성과 개선으로 이어진다는 근거는 없다.
-- **새 선택지 E: 감시를 되살린다.** 빠른 경로가 이긴 날에도 레거시를 **진입 이후에**
-  비차단으로 돌려 `compare_with_legacy`만 기록한다. 선정 규칙을 바꾸지 않으므로 H1
-  닫힌 축과 무관하고, 8.2절 같은 수치를 매일 얻는다. 대가는 개장 직후 API 호출이
-  늘어난다는 것이며, 진입이 끝난 뒤라 체결 경로와는 경합하지 않는다.
-  **A를 결정하기 전에 E로 표본을 먼저 모으는 순서를 권한다.**
+- **새 선택지 E′: 감시를 되살린다 — 구현함 (9절).** 빠른 경로가 이긴 날에도 레거시가
+  무엇을 골랐을지 **진입 이후에** 기록한다. 레거시를 통째로 돌릴 필요가 없다 —
+  후보에 필요한 값이 전부 랭킹 행에 있어 **랭킹 2회(약 2.4초)**면 같은 정보를 얻는다.
+  선정 규칙을 바꾸지 않으므로 H1 닫힌 축과 무관하다.
+  **A를 결정하기 전에 E′로 표본을 먼저 모으는 순서를 권한다.**
+
+## 9. E′ 구현 (2026-09-29, release/20260929-1)
+
+### 9.1 왜 레거시를 통째로 돌리지 않는가
+
+`f1_filter._parse_candidate`가 쓰는 값은 **전부 랭킹 행에 있다** — `prdy_ctrt`(갭),
+`stck_prpr`(가격), `acml_vol`·`acml_tr_pbmn`(수량·금액), `avrg_vol`(5일 평균).
+종목별 예상체결 조회(`_fetch_expected_quote`, 60회)는 장전 예상가로 값을 다듬을
+뿐이고, **개장 후에는 `antc_cnpr`이 0**이라 결과를 바꾸지 못한다. 20260929의
+`F3_RECHECK_QUOTE_FIELDS` 3건이 모두 `antc_cnpr=0.0`으로 `stck_prpr`에 폴백한 것이
+그 증거다.
+
+| | 레거시 전체 | **랭킹만** |
+|---|---|---|
+| API 호출 | 62회 | **2회** |
+| 소요 | 88,673ms (20260929 실측) | **약 2.4초** (랭킹 J 1.25s + Q 0.59s + 간격 0.5s) |
+| 얻는 정보 | — | 동일 |
+
+### 9.2 바뀐 것
+
+- `f1_filter._ranking_params()` — 랭킹 질의를 헬퍼로 뽑아 본선과 감시가 같은 질의를
+  쓴다. 두 곳이 갈라지지 않게 하는 장치다.
+- `f1_filter._parse_candidate(..., use_expected_quote=False)` — 예상체결 조회를 끈다.
+  파싱 규칙은 하나로 유지된다.
+- `f1_filter.fetch_ranking_only_candidates()` — 랭킹 2회, `REQUEST_PRIORITY_BACKGROUND`.
+  한쪽 시장이 실패해도 다른 쪽 결과는 남긴다.
+- `paper_fast_probe._open_universe_tickers` — 선정 하한을 통과하지 못한 행까지 포함한
+  개장 유니버스. `_open_candidates`는 통과분만 남으므로 "볼 수 없었다"를 판정하려면
+  거르기 전 목록이 필요하다.
+- `paper_fast_probe.record_ranking_shadow()` — 위를 모아
+  `PAPER_FAST_SHADOW_COMPARE`에 `shadow_source="RANKING_ONLY"`,
+  `open_universe_count`, `legacy_outside_universe_count`,
+  `legacy_outside_universe_tickers`, `legacy_rank1_in_universe`를 더해 기록한다.
+- `main.py` — `ENTRY_PIPELINE_TIMING` 직후, `selection_source == "FAST_MULTI"`일 때만
+  호출한다. 폴백·병합일은 `compare_with_legacy`가 이미 돌았으므로 건너뛴다.
+  try/except로 감싸 실패가 파이프라인에 전파되지 않는다.
+
+테스트 10건 추가(1,557 → 1,567). 지문 `7bef3751194e` → `b3886aac9b5d`.
+
+### 9.3 읽을 때 주의할 것
+
+- **측정 시점이 09:00:00.3이 아니다.** 진입 뒤(09:01 전후) 랭킹이라 시간이 갈수록 새
+  종목이 더 들어온다 — 맹점을 **과대평가하는 쪽**으로 치우친다. 절대값보다 추세를 본다.
+- **`shadow_validation_summary`가 두 종류를 섞는다.** 승격 전 기록은 레거시 전체
+  비교이고 앞으로는 랭킹 전용이다. `shadow_source`로 구분되니 분석할 때 나눠 센다.
+  `validation_complete`는 이미 참이라 판정이 바뀌지는 않는다.
+- **이 기록은 "놓쳤다"까지만 답한다.** "그게 더 나았다"는 분봉 사후 평가가 따로
+  필요하다 — 다만 E′가 그 입력을 매일 만든다.

@@ -16,7 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.api import kis_rest
-from src.modules import f1_selector
+from src.modules import f1_filter, f1_selector
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -37,6 +37,9 @@ _prepared_tickers: list[str] = []
 _prepare_in_progress: bool = False
 _prepared_candidates: list[dict] = []
 _open_candidates: list[dict] = []
+# 선정 하한을 통과하지 못한 행까지 포함한 개장 유니버스. 감시가
+# "레거시 1위를 애초에 볼 수 없었는가"를 판정하는 근거다.
+_open_universe_tickers: list[str] = []
 _last_open_quality: dict[str, Any] = {"ok": False, "reason": "NOT_RUN"}
 _last_closed_verdict: dict[str, Any] = {"closed": False, "reason": "NOT_RUN"}
 
@@ -736,7 +739,7 @@ def merge_candidates(fast_candidates: list[dict], legacy_candidates: list[dict])
     return f1_selector.rank_candidates(list(by_ticker.values()))
 
 
-def compare_with_legacy(legacy_candidates: list[dict]) -> dict:
+def compare_with_legacy(legacy_candidates: list[dict], **extra: Any) -> dict:
     """Record fast/legacy selection parity without changing live candidates."""
     fast = get_open_candidates()
     fast_tickers = [str(c.get("ticker") or "") for c in fast if c.get("ticker")]
@@ -765,11 +768,60 @@ def compare_with_legacy(legacy_candidates: list[dict]) -> dict:
         ),
         "common_count": len(common),
         "max_gap_delta_pct_point": round(max(gap_deltas), 4) if gap_deltas else None,
+        **extra,
     }
     if shadow_enabled():
         _append_record("PAPER_FAST_SHADOW_COMPARE", phase="SHADOW", **fields)
         log("PAPER_FAST_SHADOW_COMPARE", level="INFO", **fields)
     return fields
+
+
+async def record_ranking_shadow() -> dict | None:
+    """빠른 경로가 이긴 날에도 레거시가 무엇을 골랐을지 기록한다.
+
+    compare_with_legacy 는 main 의 else 분기에만 있어, 승격(20260911) 이후로는
+    폴백이 난 날에만 돌았다 — 20260922 와 20260929 둘뿐이다. 그 사이 여덟 번의
+    빠른 경로 승리일에는 발산 표본이 한 건도 없다. 이 함수가 랭킹 2회로 그
+    표본을 매일 만든다.
+
+    재는 것은 하나다: 레거시의 1순위가 개장 프로브 유니버스 안에 있었는가.
+    밖이라면 빠른 경로는 그 종목을 구조적으로 볼 수 없었다 — 승격 판정에 쓰인
+    16일 중 7일이 그랬다(FAST_PATH_UNIVERSE_FOLLOWUP_20260929 8.2절).
+
+    선정 규칙은 바꾸지 않는다. 기록만 한다.
+
+    측정 시점 한계: 진입이 끝난 뒤(09:01 전후) 랭킹이라 09:00:00.3 시점 그대로가
+    아니다. 시간이 갈수록 새 종목이 더 들어오므로 맹점을 과대평가하는 쪽으로
+    치우친다. 절대값보다 추세를 본다.
+    """
+    if not shadow_enabled():
+        return None
+    try:
+        ranking_candidates = await f1_filter.fetch_ranking_only_candidates()
+    except Exception as exc:
+        log(
+            "PAPER_FAST_SHADOW_RANKING_ERROR",
+            level="WARN",
+            reason="UNHANDLED",
+            error=repr(exc),
+        )
+        return None
+
+    ranked = f1_selector.rank_candidates(ranking_candidates)
+    universe = set(_open_universe_tickers)
+    legacy_tickers = [str(c.get("ticker") or "") for c in ranked if c.get("ticker")]
+    outside = [ticker for ticker in legacy_tickers if ticker not in universe]
+    return compare_with_legacy(
+        ranked,
+        shadow_source="RANKING_ONLY",
+        open_universe_count=len(universe),
+        ranking_scanned_count=len(ranking_candidates),
+        legacy_outside_universe_count=len(outside),
+        legacy_outside_universe_tickers=outside[:5],
+        legacy_rank1_in_universe=(
+            legacy_tickers[0] in universe if legacy_tickers else None
+        ),
+    )
 
 
 def _day_market_was_closed(lines: list[str]) -> bool:
@@ -933,7 +985,9 @@ async def _wait_for_prepare(target: datetime) -> None:
 async def observe_open_boundary() -> list[dict]:
     """Observe and rank the prepared shortlist near 09:00."""
     global _prepared_tickers, _open_candidates, _last_open_quality
+    global _open_universe_tickers
     _open_candidates = []
+    _open_universe_tickers = []
     _last_open_quality = {"ok": False, "reason": "NOT_RUN"}
     if not enabled():
         _last_open_quality = {"ok": False, "reason": "DISABLED"}
@@ -1079,6 +1133,9 @@ async def observe_open_boundary() -> list[dict]:
         candidate["fast_observed_monotonic"] = observed_monotonic
         candidate["gap_source"] = f"fast.{candidate.get('gap_source', 'multi')}"
         parsed.append(candidate)
+    _open_universe_tickers = [
+        str(candidate.get("ticker") or "") for candidate in parsed
+    ]
     _open_candidates = f1_selector.rank_candidates(parsed)
     filter_stats = f1_selector.selection_stats(parsed)
     _append_record(

@@ -430,6 +430,20 @@ async def job_f1() -> None:
         candidate_count=len(_f1_result or []),
         position_status=state.get().position_status,
     )
+    # 빠른 경로가 이긴 날은 레거시가 돌지 않아 compare_with_legacy 가 호출되지
+    # 않는다 — 승격 이후 발산 표본이 끊긴 이유다. 진입이 끝난 뒤 랭킹 2회짜리
+    # 감시로 그 표본을 만든다(BACKGROUND 우선순위, 선정에는 영향 없음).
+    # 폴백·병합일은 이미 비교가 기록됐으므로 건너뛴다.
+    if selection_source == "FAST_MULTI":
+        try:
+            await paper_fast_probe.record_ranking_shadow()
+        except Exception as exc:
+            logger.log(
+                "PAPER_FAST_SHADOW_COMPARE_ERROR",
+                level="WARN",
+                reason="RANKING_SHADOW",
+                error=repr(exc),
+            )
     await asyncio.to_thread(paper_fast_probe.log_shadow_validation_progress)
 
 

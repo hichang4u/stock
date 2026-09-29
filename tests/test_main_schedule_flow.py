@@ -2334,3 +2334,114 @@ async def test_market_closed_is_marked_once_per_day(monkeypatch):
     await main._mark_market_closed("20260817", source="HOLIDAY_API")
 
     assert notify.await_count == 1
+
+
+async def test_job_f1_records_ranking_shadow_when_fast_path_wins(monkeypatch):
+    """빠른 경로가 이긴 날에도 발산을 기록한다 — 승격 이후 끊긴 표본을 되살린다."""
+    calls = []
+
+    async def lock_target(_candidates):
+        state_mod.get().target_ticker = "005930"
+
+    async def run_f3():
+        calls.append("f3")
+
+    async def ranking_shadow():
+        calls.append("ranking_shadow")
+        return {}
+
+    legacy_run = AsyncMock(return_value=[{"ticker": "000660"}])
+
+    monkeypatch.setattr(
+        main, "_skip_entry_pipeline_if_trade_exists", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "observe_open_boundary",
+        AsyncMock(return_value=[{"ticker": "005930"}]),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(main.paper_fast_probe, "open_quality_ok", lambda: True)
+    monkeypatch.setattr(main.paper_fast_probe, "record_ranking_shadow", ranking_shadow)
+    monkeypatch.setattr(
+        main.paper_fast_probe, "log_shadow_validation_progress", lambda: calls.append("progress")
+    )
+    monkeypatch.setattr(main.f1_filter, "run", legacy_run)
+    monkeypatch.setattr(main.f1_filter, "save_candidate_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(main.f2_lockup, "run", lock_target)
+    monkeypatch.setattr(main.f3_entry, "run", run_f3)
+
+    await main.job_f1()
+
+    # 레거시 전체 경로는 돌지 않는다 — 랭킹 2회짜리 감시만 붙는다.
+    legacy_run.assert_not_awaited()
+    assert calls == ["f3", "ranking_shadow", "progress"]
+
+
+async def test_job_f1_skips_ranking_shadow_on_legacy_fallback(monkeypatch):
+    """폴백일에는 compare_with_legacy 가 이미 돌았으므로 중복 측정하지 않는다."""
+    calls = []
+
+    async def lock_target(_candidates):
+        state_mod.get().target_ticker = "005930"
+
+    async def run_f3():
+        calls.append("f3")
+
+    async def ranking_shadow():
+        calls.append("ranking_shadow")
+        return {}
+
+    monkeypatch.setattr(
+        main, "_skip_entry_pipeline_if_trade_exists", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "observe_open_boundary", AsyncMock(return_value=[]))
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: False)
+    monkeypatch.setattr(main.paper_fast_probe, "compare_with_legacy", MagicMock(return_value={}))
+    monkeypatch.setattr(main.paper_fast_probe, "record_ranking_shadow", ranking_shadow)
+    monkeypatch.setattr(
+        main.paper_fast_probe, "log_shadow_validation_progress", lambda: calls.append("progress")
+    )
+    monkeypatch.setattr(main.f1_filter, "run", AsyncMock(return_value=[{"ticker": "005930"}]))
+    monkeypatch.setattr(main.f2_lockup, "run", lock_target)
+    monkeypatch.setattr(main.f3_entry, "run", run_f3)
+
+    await main.job_f1()
+
+    assert calls == ["f3", "progress"]
+
+
+async def test_job_f1_ranking_shadow_failure_does_not_break_pipeline(monkeypatch):
+    """감시가 터져도 진행률 로깅까지 그대로 간다."""
+    calls = []
+
+    async def lock_target(_candidates):
+        state_mod.get().target_ticker = "005930"
+
+    async def run_f3():
+        calls.append("f3")
+
+    async def boom():
+        raise RuntimeError("ranking down")
+
+    monkeypatch.setattr(
+        main, "_skip_entry_pipeline_if_trade_exists", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        main.paper_fast_probe,
+        "observe_open_boundary",
+        AsyncMock(return_value=[{"ticker": "005930"}]),
+    )
+    monkeypatch.setattr(main.paper_fast_probe, "hybrid_enabled", lambda: True)
+    monkeypatch.setattr(main.paper_fast_probe, "open_quality_ok", lambda: True)
+    monkeypatch.setattr(main.paper_fast_probe, "record_ranking_shadow", boom)
+    monkeypatch.setattr(
+        main.paper_fast_probe, "log_shadow_validation_progress", lambda: calls.append("progress")
+    )
+    monkeypatch.setattr(main.f1_filter, "save_candidate_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(main.f2_lockup, "run", lock_target)
+    monkeypatch.setattr(main.f3_entry, "run", run_f3)
+
+    await main.job_f1()
+
+    assert calls == ["f3", "progress"]

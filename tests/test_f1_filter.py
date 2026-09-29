@@ -596,3 +596,99 @@ async def test_fetch_excludes_etf_etn_leverage_inverse_products():
         "INVALID_TICKER": 1,
     }
     assert result[0]["name"] == "삼성전자"
+
+
+# ── 랭킹 전용 후보 생성 (E′ 감시 경로) ────────────────────────────────
+
+async def test_parse_candidate_skips_expected_quote_when_disabled():
+    """use_expected_quote=False면 종목별 시세를 아예 부르지 않는다.
+
+    개장 후에는 antc_cnpr이 0이라 그 호출이 값을 바꾸지 못한다 — 감시 경로는
+    랭킹 행만으로 후보를 만든다.
+    """
+    item = {
+        "mksc_shrn_iscd": "005930",
+        "hts_kor_isnm": "삼성전자",
+        "prdy_ctrt": "4.00",
+        "stck_prpr": "10400",
+        "avrg_vol": "100000",
+        "acml_tr_pbmn": "5000000000",
+        "acml_vol": "480000",
+    }
+
+    with patch(
+        "src.modules.f1_filter._fetch_expected_quote",
+        new_callable=AsyncMock,
+    ) as quote:
+        result = await f1_mod._parse_candidate(item, use_expected_quote=False)
+
+    quote.assert_not_awaited()
+    assert result["gap_source"] == "ranking.prdy_ctrt"
+    assert result["gap_pct"] == pytest.approx(0.04)
+    assert result["expected_price"] == 10400.0
+    assert result["expected_amount"] == 5_000_000_000.0
+    assert result["expected_qty"] == 480000
+    assert result["expected_api_gap_pct"] is None
+    assert result["prev_close"] == pytest.approx(10000.0)
+
+
+async def test_fetch_ranking_only_candidates_makes_two_ranking_calls_and_no_quotes():
+    """감시용 유니버스는 랭킹 2회로 끝난다 — 종목별 시세 호출이 없어야 한다."""
+    seen: list[tuple[str, int]] = []
+
+    async def fake_get(path, **kwargs):
+        seen.append((path, kwargs.get("request_priority")))
+        return {
+            "rt_cd": "0",
+            "output": [
+                {
+                    "stck_shrn_iscd": "005930",
+                    "hts_kor_isnm": "삼성전자",
+                    "prdy_ctrt": "4.00",
+                    "stck_prpr": "10400",
+                    "avrg_vol": "100000",
+                    "acml_tr_pbmn": "5000000000",
+                    "acml_vol": "480000",
+                },
+            ],
+        }
+
+    with patch("src.modules.f1_filter.kis_rest.get", side_effect=fake_get):
+        candidates = await f1_mod.fetch_ranking_only_candidates()
+
+    assert len(seen) == 2, seen
+    assert all(path.endswith("/ranking/fluctuation") for path, _ in seen)
+    assert all(
+        priority == f1_mod.kis_rest.REQUEST_PRIORITY_BACKGROUND for _, priority in seen
+    ), seen
+    assert [c["ticker"] for c in candidates] == ["005930", "005930"]
+    assert all(c["gap_source"] == "ranking.prdy_ctrt" for c in candidates)
+
+
+async def test_fetch_ranking_only_candidates_survives_one_market_failing():
+    """한쪽 랭킹이 죽어도 다른 쪽 결과는 남는다 — 감시가 전부 아니면 무 가 되지 않는다."""
+    calls = {"n": 0}
+
+    async def fake_get(path, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("ranking down")
+        return {
+            "rt_cd": "0",
+            "output": [
+                {
+                    "stck_shrn_iscd": "000660",
+                    "hts_kor_isnm": "SK하이닉스",
+                    "prdy_ctrt": "3.00",
+                    "stck_prpr": "10300",
+                    "avrg_vol": "100000",
+                    "acml_tr_pbmn": "5000000000",
+                    "acml_vol": "480000",
+                },
+            ],
+        }
+
+    with patch("src.modules.f1_filter.kis_rest.get", side_effect=fake_get):
+        candidates = await f1_mod.fetch_ranking_only_candidates()
+
+    assert [c["ticker"] for c in candidates] == ["000660"]

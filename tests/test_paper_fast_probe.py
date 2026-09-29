@@ -1249,3 +1249,107 @@ def test_job_f1_open_timeout_covers_the_preopen_wait(monkeypatch):
     wait_s = int(os.getenv("PAPER_FAST_PROBE_PREOPEN_WAIT_MS", "8000")) / 1000
     multi_call_s = 2.0
     assert main.PAPER_FAST_PROBE_OPEN_TIMEOUT_SEC >= offset_s + max_late_s + wait_s + multi_call_s
+
+
+# ── E′ 랭킹 전용 감시 (승격 이후 발산 측정) ──────────────────────────
+
+def _shadow_candidate(ticker: str, gap_pct: float, amount: float = 2e9) -> dict:
+    """선정 하한(갭·예상금액)을 넘는 최소 후보. rank_candidates 가 거르지 않는다."""
+    return {
+        "ticker": ticker,
+        "gap_pct": gap_pct,
+        "expected_price": 10_000.0,
+        "prev_close": 10_000.0 / (1 + gap_pct),
+        "expected_amount": amount,
+        "avg_amount_5d": 1e9,
+    }
+
+
+async def test_record_ranking_shadow_records_universe_membership(monkeypatch, tmp_path):
+    """빠른 경로가 이긴 날에도 레거시 유니버스를 기록한다.
+
+    승격 이후 compare_with_legacy 는 폴백일에만 돌아 발산 표본이 끊겼다.
+    이 경로가 랭킹 2회로 그 표본을 매일 만든다.
+    """
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("PAPER_FAST_SHADOW", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    probe._open_candidates = [{"ticker": "005930", "gap_pct": 0.034}]
+    probe._open_universe_tickers = ["005930", "000660"]
+
+    ranking_only = [
+        _shadow_candidate("256840", 0.0526, amount=8e9),
+        _shadow_candidate("005930", 0.034),
+    ]
+    monkeypatch.setattr(
+        probe.f1_filter,
+        "fetch_ranking_only_candidates",
+        AsyncMock(return_value=ranking_only),
+    )
+
+    fields = await probe.record_ranking_shadow()
+
+    assert fields is not None
+    assert fields["shadow_source"] == "RANKING_ONLY"
+    # 256840 은 프로브 유니버스 밖이라 빠른 경로가 구조적으로 볼 수 없었다.
+    assert fields["legacy_outside_universe_count"] == 1
+    assert fields["legacy_rank1_in_universe"] is False
+    assert fields["rank1_match"] is False
+
+    records = [
+        json.loads(line)
+        for line in next(tmp_path.glob("*.jsonl")).read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["event"] == "PAPER_FAST_SHADOW_COMPARE"
+    assert records[-1]["shadow_source"] == "RANKING_ONLY"
+
+
+async def test_record_ranking_shadow_marks_rank1_inside_universe(monkeypatch, tmp_path):
+    """레거시 1위가 유니버스 안이면 맹점이 아니다 — 그 구분이 이 지표의 핵심이다."""
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("PAPER_FAST_SHADOW", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    probe._open_candidates = [{"ticker": "005930", "gap_pct": 0.034}]
+    probe._open_universe_tickers = ["005930", "000660"]
+
+    monkeypatch.setattr(
+        probe.f1_filter,
+        "fetch_ranking_only_candidates",
+        AsyncMock(return_value=[_shadow_candidate("000660", 0.06)]),
+    )
+
+    fields = await probe.record_ranking_shadow()
+
+    assert fields["legacy_outside_universe_count"] == 0
+    assert fields["legacy_rank1_in_universe"] is True
+
+
+async def test_record_ranking_shadow_returns_none_when_ranking_fails(monkeypatch, tmp_path):
+    """감시는 매매에 전파되지 않는다 — 실패하면 조용히 None."""
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPER_FAST_SHADOW", "1")
+    probe._open_candidates = [{"ticker": "005930"}]
+    probe._open_universe_tickers = ["005930"]
+    monkeypatch.setattr(
+        probe.f1_filter,
+        "fetch_ranking_only_candidates",
+        AsyncMock(side_effect=RuntimeError("ranking down")),
+    )
+
+    assert await probe.record_ranking_shadow() is None
+
+
+async def test_record_ranking_shadow_skips_when_shadow_disabled(monkeypatch, tmp_path):
+    """PAPER_FAST_SHADOW=0 이면 호출조차 하지 않는다."""
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("PAPER_FAST_SHADOW", "0")
+    fetch = AsyncMock(return_value=[])
+    monkeypatch.setattr(probe.f1_filter, "fetch_ranking_only_candidates", fetch)
+
+    assert await probe.record_ranking_shadow() is None
+    fetch.assert_not_awaited()

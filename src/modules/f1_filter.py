@@ -210,6 +210,30 @@ def _retry_sleep_seconds() -> int:
     return max(1, min(F1_RETRY_INTERVAL_SEC, remaining))
 
 
+def _ranking_params(market_cfg: dict) -> dict:
+    """FHPST01710000 질의 파라미터. 장중 감시 경로와 F1 본선이 같은 값을 쓴다.
+
+    fid_rsfl_rate1/2 는 KIS 가 무시한다(거래대금 상위를 돌려준다). 등락률
+    거르기는 클라이언트가 한다 — C1 스펙 2.1절의 정정 기록과 같은 이야기다.
+    """
+    return {
+        "fid_cond_mrkt_div_code": market_cfg["ranking_market"],
+        "fid_cond_scr_div_code": "20171",
+        "fid_input_iscd": market_cfg["ranking_input"],
+        "fid_rank_sort_cls_code": "0",
+        "fid_input_cnt_1": "0",
+        "fid_prc_cls_code": "0",
+        "fid_input_price_1": "",
+        "fid_input_price_2": "",
+        "fid_vol_cnt": "",
+        "fid_trgt_cls_code": "0",
+        "fid_trgt_exls_cls_code": "0",
+        "fid_div_cls_code": "0",
+        "fid_rsfl_rate1": f"{GAP_MIN * 100:.1f}",
+        "fid_rsfl_rate2": f"{HIGH_GAP_MAX * 100:.1f}",
+    }
+
+
 async def _fetch_all_premarket() -> list[dict]:
     """
     Fetch KOSPI/KOSDAQ fluctuation rankings and enrich each row with the
@@ -234,22 +258,7 @@ async def _fetch_all_premarket() -> list[dict]:
             resp = await kis_rest.get(
                 "/uapi/domestic-stock/v1/ranking/fluctuation",
                 tr_id="FHPST01710000",
-                params={
-                    "fid_cond_mrkt_div_code": market_cfg["ranking_market"],
-                    "fid_cond_scr_div_code": "20171",
-                    "fid_input_iscd": market_cfg["ranking_input"],
-                    "fid_rank_sort_cls_code": "0",
-                    "fid_input_cnt_1": "0",
-                    "fid_prc_cls_code": "0",
-                    "fid_input_price_1": "",
-                    "fid_input_price_2": "",
-                    "fid_vol_cnt": "",
-                    "fid_trgt_cls_code": "0",
-                    "fid_trgt_exls_cls_code": "0",
-                    "fid_div_cls_code": "0",
-                    "fid_rsfl_rate1": f"{GAP_MIN * 100:.1f}",
-                    "fid_rsfl_rate2": f"{HIGH_GAP_MAX * 100:.1f}",
-                },
+                params=_ranking_params(market_cfg),
             )
         except Exception as e:
             log("F1_API_ERROR", level="WARN", market=market, error=repr(e))
@@ -294,6 +303,57 @@ async def _fetch_all_premarket() -> list[dict]:
 
     _log_expected_comparison(results)
     _save_candidate_snapshot(results)
+    return results
+
+
+async def fetch_ranking_only_candidates() -> list[dict]:
+    """랭킹 응답만으로 F1 후보를 만든다 — 종목별 예상체결 조회를 하지 않는다.
+
+    빠른 경로가 이긴 날에도 레거시가 무엇을 골랐을지 기록하기 위한 감시용이다
+    (docs/FAST_PATH_UNIVERSE_FOLLOWUP_20260929.md 8.5절의 E'). 후보에 필요한 값은
+    전부 랭킹 행에 있다 — prdy_ctrt(갭), stck_prpr(가격), acml_vol/acml_tr_pbmn
+    (수량·금액), avrg_vol(5일 평균). 예상체결 조회 60회는 장전 예상가로 값을
+    다듬을 뿐이고 개장 후에는 그 값이 0이라 생략해도 결과가 같다.
+
+    호출 2회, BACKGROUND 우선순위다. 체결·청산 경로(CRITICAL/PRICE)가 언제나
+    먼저 나간다. 한쪽 시장이 실패해도 다른 쪽 결과는 남긴다 — 감시가 전부
+    아니면 무가 되면 그날 표본을 통째로 잃는다.
+    """
+    results: list[dict] = []
+    for index, market_cfg in enumerate(_PREMARKET_MARKETS):
+        market = market_cfg["label"]
+        if index > 0 and F1_MARKET_INTERVAL_SEC > 0:
+            await asyncio.sleep(F1_MARKET_INTERVAL_SEC)
+        try:
+            resp = await kis_rest.get(
+                "/uapi/domestic-stock/v1/ranking/fluctuation",
+                tr_id="FHPST01710000",
+                params=_ranking_params(market_cfg),
+                request_priority=kis_rest.REQUEST_PRIORITY_BACKGROUND,
+            )
+        except Exception as exc:
+            log("F1_RANKING_ONLY_ERROR", level="WARN", market=market, error=repr(exc))
+            continue
+        for item in resp.get("output") or []:
+            if _candidate_skip_reason(item) is not None:
+                continue
+            try:
+                candidate = await _parse_candidate(
+                    item,
+                    market,
+                    market_cfg["quote_market"],
+                    use_expected_quote=False,
+                )
+            except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+                log(
+                    "F1_RANKING_ONLY_PARSE_ERROR",
+                    level="WARN",
+                    market=market,
+                    error=repr(exc),
+                )
+                continue
+            if candidate is not None:
+                results.append(candidate)
     return results
 
 
@@ -371,7 +431,13 @@ async def _parse_candidates_concurrently(
     }
 
 
-async def _parse_candidate(item: dict, market: str = "J", quote_market: str = "J") -> dict | None:
+async def _parse_candidate(
+    item: dict,
+    market: str = "J",
+    quote_market: str = "J",
+    *,
+    use_expected_quote: bool = True,
+) -> dict | None:
     ticker = item.get("stck_shrn_iscd") or item.get("mksc_shrn_iscd")
     name = item.get("hts_kor_isnm", "")
     if _candidate_skip_reason(item) is not None:
@@ -386,7 +452,11 @@ async def _parse_candidate(item: dict, market: str = "J", quote_market: str = "J
     final_gap_pct = ranking_gap_pct
     gap_source = "ranking.prdy_ctrt"
 
-    expected_quote = await _fetch_expected_quote(ticker, quote_market)
+    # 개장 뒤에는 antc_cnpr 이 0이라 이 조회가 값을 바꾸지 못한다. 감시 경로는
+    # 종목당 1회씩 도는 이 호출을 통째로 건너뛰어 랭킹 2회로 끝낸다.
+    expected_quote = (
+        await _fetch_expected_quote(ticker, quote_market) if use_expected_quote else None
+    )
     if (
         expected_quote
         and expected_quote["expected_price"] > 0
