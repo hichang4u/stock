@@ -24,6 +24,10 @@ DATA = ROOT / "data"
 # 저장소 바깥. .worktrees 안이나 data/ 밑에 두면 이번 사고를 그대로 반복한다.
 DEST_ROOT = ROOT.parent / "stock_backups"
 KEEP = 10
+# 일일 백업에서 빼는 data/ 최상위 디렉터리. krx_daily 는 H5 판정용 KRX 원문 캐시다 —
+# 최대 약 644MB라 10벌이면 6.4GB이고, 다시 받을 수 있으며, KRX 약관상 계약이 끝나면
+# 이 한 곳만 지우면 되게 모아 둔다(H5 스펙 §5.2, §6.1).
+EXCLUDED_TOP_DIRS: tuple[str, ...] = ("krx_daily",)
 
 
 def _backup_sqlite(src: Path, dst: Path) -> None:
@@ -69,6 +73,8 @@ def run(dest_root: Path = DEST_ROOT, keep: int = KEEP,
         if src.is_dir():
             continue
         rel = src.relative_to(source)
+        if rel.parts and rel.parts[0] in EXCLUDED_TOP_DIRS:
+            continue
         out = dest / rel
         # -wal/-shm은 뜨지 않는다. 온라인 백업이 이미 그 내용을 반영한 본체를 만든다.
         if src.suffix in (".db-wal", ".db-shm") or src.name.endswith(("-wal", "-shm")):

@@ -90,3 +90,21 @@ def test_rotation_keeps_the_newest_and_drops_the_rest(tmp_path):
     assert len(left) == 2
     assert "data_20260901_150000" not in left
     assert "data_20260902_150000" not in left
+
+
+def test_backup_skips_the_krx_daily_cache_but_keeps_h5_log(tmp_path):
+    """KRX 캐시는 최대 약 644MB에 다시 받을 수 있고, 약관상 한 곳에서 지울 수 있어야 한다.
+
+    판정 기록(data/h5)은 다시 만들 수 없으므로 백업한다. 스펙 §6.1.
+    """
+    src = _make_source(tmp_path)
+    (src / "krx_daily" / "stk").mkdir(parents=True)
+    (src / "krx_daily" / "stk" / "20170223.json.gz").write_bytes(b"cache")
+    (src / "h5").mkdir()
+    (src / "h5" / "verdict_log.jsonl").write_bytes(b"{}")
+
+    dest = backup_data.run(tmp_path / "backups", keep=10, source=src)
+
+    assert not (dest / "krx_daily").exists()
+    assert (dest / "h5" / "verdict_log.jsonl").exists()
+    assert (dest / "f1_snapshots" / "20260909_090138.jsonl").exists()
