@@ -20,6 +20,10 @@ DAYS = weekdays("20100104", "20110630")
 S = next(i for i, d in enumerate(DAYS) if d >= "20110101") + 5  # 신호일 인덱스
 BIG = 2_000_000_000
 
+# 2015-06-15 제한폭 전환 경계를 다루는 테스트용 별도 달력 (250행 이력 확보)
+DAYS2 = weekdays("20140102", "20150930")
+S2 = next(i for i, d in enumerate(DAYS2) if d >= "20150615")  # 2015-06-15 그 날
+
 
 def rec(ticker, d, *, o, c, chg, val, name):
     return {
@@ -30,16 +34,18 @@ def rec(ticker, d, *, o, c, chg, val, name):
     }
 
 
-def path(at=None):
-    """기본 시가·종가 1,000원. at = {인덱스: (시가, 종가)}."""
-    out = [(1000, 1000)] * len(DAYS)
+def path(at=None, days=None):
+    """기본 시가·종가 1,000원. at = {인덱스: (시가, 종가)}. days 를 생략하면 DAYS 를 쓴다."""
+    days = DAYS if days is None else days
+    out = [(1000, 1000)] * len(days)
     for i, oc in (at or {}).items():
         out[i] = oc
     return out
 
 
 class Market:
-    def __init__(self):
+    def __init__(self, days=None):
+        self.days = DAYS if days is None else days
         self.rows: dict = {}
         self.base: list = []
         self.missing: set = set()
@@ -47,7 +53,7 @@ class Market:
     def add(self, ticker, prices, *, market="stk", value=BIG, name="종목", secugrp="주권",
             kind="보통주", sect="", abbrv="종목", start=0, base=True):
         prev = None
-        for d, (o, c) in zip(DAYS[start:], prices):
+        for d, (o, c) in zip(self.days[start:], prices):
             chg = 0 if prev is None else c - prev
             self.rows.setdefault((market, d), []).append(
                 rec(ticker, d, o=o, c=c, chg=chg, val=value, name=name))
@@ -60,10 +66,11 @@ class Market:
 
     def panel(self):
         # 두 시장 모두 매일 행이 있게 유니버스 밖의 채움 종목을 넣는다(외국주권)
-        self.add("900001", path(), market="stk", secugrp="외국주권")
-        self.add("900002", path(), market="ksq", secugrp="외국주권")
+        self.add("900001", path(days=self.days), market="stk", secugrp="외국주권")
+        self.add("900002", path(days=self.days), market="ksq", secugrp="외국주권")
         table = {key: rows for key, rows in self.rows.items() if key not in self.missing}
-        return build_panel(DAYS, lambda m, d: table.get((m, d)), [("stk", DAYS[0], self.base)])
+        return build_panel(self.days, lambda m, d: table.get((m, d)),
+                            [("stk", self.days[0], self.base)])
 
 
 def test_price_limit_switches_on_20150615():
@@ -208,4 +215,65 @@ def test_run_rules_keeps_a_trade_whose_matched_control_is_empty():
     m.add("000010", path({S: (1000, 1100)}), value=5_000_000_000)
     run = run_rules(m.panel())
     assert run.trades[0].matched_mean is None and run.trades[0].matched_n == 0
+    # 대조군이 비어도 전 신호 이벤트의 순수익 A는 기록된다 — 초과수익 X만 대조군을 요구한다
+    assert len(run.event_net) == 1
     assert run.event_excess == []
+
+
+def test_simulate_refuses_a_limit_up_open_with_the_post_2015_limit():
+    m = Market(days=DAYS2)
+    m.add("000010", path({S2: (1000, 1100), S2 + 1: (1430, 1430)}, days=DAYS2))  # 1100 × 1.30
+    m.add("000020", path({S2: (1000, 1100), S2 + 1: (1422, 1422)}, days=DAYS2))  # 문턱 1422.85 미만
+    p = m.panel()
+    assert simulate(p, "000010", DAYS2[S2]).status == NO_ENTRY_LIMIT_UP
+    assert simulate(p, "000020", DAYS2[S2]).status == COMPLETE
+
+
+def test_simulate_uses_the_entry_days_limit_at_the_2015_boundary():
+    # 신호일 D = 2015-06-12(구 제한폭 15%), 진입일 D+1 = 2015-06-15(신 제한폭 30%).
+    # 기준가 × 1.20 은 구 제한폭(15%)이면 거부되지만 진입일 제한폭(30%)이면 진입된다.
+    m = Market(days=DAYS2)
+    m.add("000010", path({S2 - 1: (1000, 1100), S2: (1320, 1320)}, days=DAYS2))
+    p = m.panel()
+    assert simulate(p, "000010", DAYS2[S2 - 1]).status == COMPLETE
+
+
+def test_run_rules_breaks_the_matched_control_tie_by_code():
+    m = Market()
+    m.add("000050", path({S: (1000, 1100)}), value=1_000_000_000)  # 신호, 최저 거래대금
+    m.add("000010", path(), value=5_000_000_000)  # 상위 10%(1종목) 자리를 놓고 동률, 코드가 낮다
+    m.add("000020", path(), value=5_000_000_000)  # 동일 거래대금, 코드가 높아 상위 자리에서 밀린다
+    run = run_rules(m.panel())
+    trade = run.trades[0]
+    assert trade.matched_n == 1 and math.isclose(trade.matched_mean, 0.0, abs_tol=1e-12)
+
+
+def test_universe_reason_detects_a_spac_from_the_daily_name_alone():
+    m = Market()
+    # 기본정보(소속부·약칭)는 깨끗하고, 일별 종목명에만 '스팩'이 있다
+    m.add("000010", path(), name="한화스팩1호")
+    p = m.panel()
+    assert universe_reason(p, "000010", DAYS[S]) == "SPAC"
+
+
+def test_run_rules_treats_an_exit_exactly_on_d_plus_one_as_still_held():
+    m = Market()
+    # 000010의 첫 거래(S일 신호)는 S+21일에 청산된다. S+20일에 000010이 다시 신규 고점을
+    # 찍어도, 그 진입일(S+21)이 곧 첫 거래의 청산일이므로 "보유 중"이라 건너뛰어야 한다.
+    m.add("000010", path({S: (1000, 1100), S + 20: (1100, 1250), S + 21: (1250, 1250)}),
+          value=5_000_000_000)
+    m.add("000020", path({S + 20: (1000, 1100)}), value=3_000_000_000)
+    run = run_rules(m.panel())
+    assert [(t.ticker, t.signal_date) for t in run.trades] == [
+        ("000010", DAYS[S]), ("000020", DAYS[S + 20])]
+
+
+def test_simulate_exits_a_vanished_stock_when_every_day_from_the_target_is_suspended():
+    m = Market()
+    prices = path({S: (1000, 1100), S + 21: (0, 500), S + 22: (0, 500), S + 23: (0, 500),
+                   S + 24: (0, 500), S + 25: (0, 500)})[: S + 26]
+    m.add("000010", prices)
+    m.add("000020", path())
+    o = simulate(m.panel(), "000010", DAYS[S])
+    assert (o.status, o.exit_date, o.exit_kind) == (COMPLETE, DAYS[S + 25], "VANISHED")
+    assert math.isclose(o.gross, 500 / 1000 - 1)

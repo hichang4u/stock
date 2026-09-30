@@ -194,11 +194,11 @@ def run_rules(panel: Panel) -> RuleRun:
         signal_set = set(signals)
         matched_mean, matched_n = _complete_mean(
             _cached(panel, cache, t, d) for t in top if t not in signal_set)
-        if matched_mean is not None:
-            for t in signals:
-                o = _cached(panel, cache, t, d)
-                if o.complete:
-                    run.event_net.append(o.gross - COST)
+        for t in signals:
+            o = _cached(panel, cache, t, d)
+            if o.complete:
+                run.event_net.append(o.gross - COST)
+                if matched_mean is not None:
                     run.event_excess.append(o.gross - matched_mean)
 
         entry_day = panel.calendar[ci + 1] if ci + 1 < len(panel.calendar) else ""
