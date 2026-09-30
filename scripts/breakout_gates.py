@@ -72,18 +72,25 @@ def samples_from_trades(
     return samples, dropped
 
 
-def block_bootstrap_lower(
+def block_bootstrap_ci(
     values: list[float],
     *,
     block: int = BLOCK,
     reps: int = REPS,
     seed: int = SEED,
-) -> float:
-    """이동 블록 부트스트랩 평균의 95% CI 하한 (스펙 §4.3). 한 블록도 안 되면 -inf."""
+) -> tuple[float, float]:
+    """이동 블록 부트스트랩 평균의 95% CI (스펙 §4.3).
+
+    Returns (lower, upper) at indices 250 and 9749 for 10k reps.
+    Raises ValueError if any value is not finite.
+    Returns (-inf, inf) if fewer than one block.
+    """
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError("non-finite value in bootstrap input")
     n = len(values)
     k = n // block
     if k < 1:
-        return -math.inf
+        return (-math.inf, math.inf)
     prefix = [0.0]
     for v in values:
         prefix.append(prefix[-1] + v)
@@ -94,7 +101,20 @@ def block_bootstrap_lower(
         sum(sums[rng.randrange(m)] for _ in range(k)) / (k * block)
         for _ in range(reps)
     )
-    return means[int(reps * 0.025)]
+    idx_lower = int(reps * 0.025)
+    idx_upper = reps - 1 - idx_lower
+    return (means[idx_lower], means[idx_upper])
+
+
+def block_bootstrap_lower(
+    values: list[float],
+    *,
+    block: int = BLOCK,
+    reps: int = REPS,
+    seed: int = SEED,
+) -> float:
+    """이동 블록 부트스트랩 평균의 95% CI 하한 (스펙 §4.3). 한 블록도 안 되면 -inf."""
+    return block_bootstrap_ci(values, block=block, reps=reps, seed=seed)[0]
 
 
 def trimmed_mean(
@@ -117,13 +137,22 @@ def period_means(samples: list[Sample]) -> dict[str, float | None]:
 
 
 def evaluate(samples: list[Sample]) -> dict:
-    """G1~G5 (스펙 §4.2). 다섯 개 모두여야 통과, 부분 통과 없음."""
+    """G1~G5 (스펙 §4.2). 다섯 개 모두여야 통과, 부분 통과 없음.
+
+    Raises ValueError if entry_date values are not non-decreasing
+    (G2's block structure depends on entry-date order).
+    """
+    # Check entry_date ordering for G2
+    for i in range(1, len(samples)):
+        if samples[i].entry_date < samples[i - 1].entry_date:
+            raise ValueError("entry_date values not non-decreasing")
+
     net = [s.net for s in samples]
     excess = [s.excess for s in samples]
     n = len(samples)
     mean_net = statistics.fmean(net) if net else math.nan
     mean_excess = statistics.fmean(excess) if excess else math.nan
-    lower_excess = block_bootstrap_lower(excess)
+    lower_excess, upper_excess = block_bootstrap_ci(excess)
     trimmed_net, trimmed_excess = (
         trimmed_mean(net),
         trimmed_mean(excess),
@@ -143,6 +172,7 @@ def evaluate(samples: list[Sample]) -> dict:
         "mean_net": mean_net,
         "mean_excess": mean_excess,
         "lower_excess": lower_excess,
+        "upper_excess": upper_excess,
         "trimmed_net": trimmed_net,
         "trimmed_excess": trimmed_excess,
         "period_excess": periods,
@@ -159,6 +189,8 @@ def recorded_metrics(samples: list[Sample]) -> dict:
     by_year: dict[str, list[Sample]] = {}
     for s in samples:
         by_year.setdefault(s.entry_date[:4], []).append(s)
+    lower_net, upper_net = block_bootstrap_ci(net)
+    lower_eq, upper_eq = block_bootstrap_ci(eq)
     return {
         "win_rate": (
             sum(v > 0 for v in net) / len(net) if net else math.nan
@@ -166,11 +198,13 @@ def recorded_metrics(samples: list[Sample]) -> dict:
         "median_net": (
             statistics.median(net) if net else math.nan
         ),
-        "lower_net": block_bootstrap_lower(net),
+        "lower_net": lower_net,
+        "upper_net": upper_net,
         "mean_excess_eq": (
             statistics.fmean(eq) if eq else math.nan
         ),
-        "lower_excess_eq": block_bootstrap_lower(eq),
+        "lower_excess_eq": lower_eq,
+        "upper_excess_eq": upper_eq,
         # 주 대조군 평균 − 동일가중 평균 = X_eq − X. 거래대금이 몰린 종목
         # 집단의 효과 추정치.
         "control_gap": (
@@ -203,8 +237,16 @@ def equity_curve_mdd(
     calendar: list[str],
     slots: int = SLOTS,
 ) -> dict:
-    """자본을 slots 칸으로 나눠 거래마다 한 칸, 보유 종목은 매일 수정 종가로
-    평가 (스펙 §4.4)."""
+    """Marks-to-market equity curve with slots.
+
+    Each slot is a fixed 1/slots of starting capital (does not compound).
+    Each admitted trade occupies one slot. On entry, a position is held at
+    entry_price; on exit, it realizes net return including COST. Open
+    positions are marked to market daily from close_on callback.
+
+    Returns mdd (max drawdown), excluded_trades, and over_capacity_days
+    (the number of distinct entry days on which a trade was refused a slot).
+    """
     admitted: list[Sample] = []
     excluded = 0
     over_days: set[str] = set()
@@ -250,7 +292,7 @@ def equity_curve_mdd(
             s = admitted[idx]
             if s.exit_date <= day:
                 realized += weight * (
-                    s.exit_price / s.entry_price - 1.0
+                    s.exit_price / s.entry_price - 1.0 - COST
                 )
                 continue
             px = close_on(s.ticker, day)

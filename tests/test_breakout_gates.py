@@ -4,7 +4,9 @@ import math
 import statistics
 
 from scripts.breakout_gates import (
+    COST,
     Sample,
+    block_bootstrap_ci,
     block_bootstrap_lower,
     equity_curve_mdd,
     evaluate,
@@ -22,6 +24,8 @@ def sample(entry, net=0.02, excess=0.01, excess_eq=0.0, ticker="000010", exit_="
 def test_block_bootstrap_is_deterministic_and_needs_one_block():
     values = [0.01 * ((i * 7919) % 13 - 6) for i in range(400)]
     first = block_bootstrap_lower(values)
+    # Pinned: a change in how random draws are consumed shows up before sealed run.
+    assert first == -0.0007999999999999999
     assert first == block_bootstrap_lower(values)
     assert first < statistics.fmean(values)
     assert block_bootstrap_lower([1.0] * 100) == 1.0
@@ -108,11 +112,13 @@ def test_recorded_metrics():
     assert m["yearly"]["2012"]["n"] == 1
 
 
-def test_equity_curve_flat_holding_has_no_drawdown():
+def test_equity_curve_realizes_cost_on_exit():
     calendar = ["D1", "D2", "D3"]
-    s = Sample("000010", "D1", "D3", 1000.0, 1000.0, -0.0035, 0.0, 0.0)
+    s = Sample("000010", "D1", "D3", 1000.0, 1000.0, -COST, 0.0, 0.0)
     got = equity_curve_mdd([s], lambda t, d: 1000.0, calendar)
-    assert got == {"mdd": 0.0, "excluded_trades": 0, "over_capacity_days": 0}
+    assert math.isclose(got["mdd"], COST / 20)
+    assert got["excluded_trades"] == 0
+    assert got["over_capacity_days"] == 0
 
 
 def test_equity_curve_marks_open_positions_to_market_with_one_slot_weight():
@@ -128,3 +134,139 @@ def test_equity_curve_excludes_trades_beyond_twenty_slots():
     samples = [Sample(f"{i:06d}", "D1", "D3", 1000.0, 1000.0, 0.0, 0.0, 0.0) for i in range(21)]
     got = equity_curve_mdd(samples, lambda t, d: 1000.0, calendar)
     assert (got["excluded_trades"], got["over_capacity_days"]) == (1, 1)
+
+
+def test_g2_fails_when_block_bootstrap_ci_lower_is_negative():
+    # 120 samples: 40 per period (2012, 2017, 2022), excess in runs of 20
+    # at +0.05 then -0.048 (mean +0.001/period). Net constant 0.02.
+    samples = []
+    for year in ("2012", "2017", "2022"):
+        for i in range(20):
+            samples.append(
+                sample(f"{year}01{i + 1:02d}", net=0.02, excess=0.05)
+            )
+        for i in range(20, 40):
+            samples.append(
+                sample(f"{year}01{i + 1:02d}", net=0.02, excess=-0.048)
+            )
+    result = evaluate(samples)
+    assert result["gates"]["G1"] is True
+    assert result["gates"]["G2"] is False
+    assert result["gates"]["G3"] is True
+    assert result["gates"]["G4"] is True
+    assert result["gates"]["G5"] is True
+    assert result["passed"] is False
+
+
+def test_g5_boundary_at_fifty():
+    # 49 samples (17/17/15) should fail G5
+    samples49 = []
+    for year, n in [("2012", 17), ("2017", 17), ("2022", 15)]:
+        for i in range(n):
+            samples49.append(
+                sample(f"{year}01{i + 1:02d}", net=0.02, excess=0.01)
+            )
+    result49 = evaluate(samples49)
+    assert result49["gates"]["G5"] is False
+
+    # 50 samples (17/17/16) should pass G5
+    samples50 = samples49 + [sample("20220116", net=0.02, excess=0.01)]
+    result50 = evaluate(samples50)
+    assert result50["gates"]["G5"] is True
+    assert result50["gates"]["G1"] is True
+    assert result50["gates"]["G2"] is True
+    assert result50["gates"]["G3"] is True
+    assert result50["gates"]["G4"] is True
+
+
+def test_g1_fails_at_exactly_zero_mean():
+    samples = _even(net=0.0)
+    result = evaluate(samples)
+    assert result["gates"]["G1"] is False
+    assert result["mean_net"] == 0.0
+
+
+def test_g1_passes_despite_negative_bootstrap_ci_lower():
+    # Net follows the excess pattern: runs of 20 at +0.05 then -0.048
+    # (mean +0.001/period). Excess constant 0.01.
+    samples = []
+    for year in ("2012", "2017", "2022"):
+        for i in range(20):
+            samples.append(
+                sample(f"{year}01{i + 1:02d}", net=0.05, excess=0.01)
+            )
+        for i in range(20, 40):
+            samples.append(
+                sample(f"{year}01{i + 1:02d}", net=-0.048, excess=0.01)
+            )
+    result = evaluate(samples)
+    assert result["gates"]["G1"] is True
+    assert result["gates"]["G2"] is True
+    assert result["gates"]["G3"] is True
+    assert result["gates"]["G4"] is True
+    assert result["gates"]["G5"] is True
+    # But bootstrap CI lower for net should be negative
+    m = recorded_metrics(samples)
+    assert m["lower_net"] < 0
+
+
+def test_g3_fails_from_net_outlier_only():
+    # 100 samples spread over three periods, excess constant 0.01,
+    # net 99 x -0.001 plus one 0.5
+    samples = []
+    dates_per_period = [34, 33, 33]  # Spread over three periods
+    cumulative = 0
+    for period_idx, (year, n) in enumerate(
+        [("2012", dates_per_period[0]), ("2017", dates_per_period[1]),
+         ("2022", dates_per_period[2])]
+    ):
+        for i in range(n):
+            day = (i % 28) + 1
+            month = (i // 28) + 1
+            date_str = f"{year}{month:02d}{day:02d}"
+            net_val = 0.5 if (cumulative + i == 99) else -0.001
+            samples.append(
+                sample(date_str, net=net_val, excess=0.01)
+            )
+        cumulative += n
+    result = evaluate(samples)
+    assert result["gates"]["G1"] is True
+    assert result["gates"]["G2"] is True
+    assert result["gates"]["G3"] is False
+    assert result["gates"]["G4"] is True
+    assert result["gates"]["G5"] is True
+    assert result["passed"] is False
+
+
+def test_block_bootstrap_ci_edge_cases():
+    # Should return (-inf, inf) for 19 values (less than one block)
+    lower, upper = block_bootstrap_ci([1.0] * 19)
+    assert lower == -math.inf
+    assert upper == math.inf
+
+    # Should return (lower, upper) with lower <= upper for valid input
+    values = [0.01 * ((i * 7919) % 13 - 6) for i in range(400)]
+    lower, upper = block_bootstrap_ci(values)
+    assert lower <= upper
+    assert lower < statistics.fmean(values)
+    assert upper > statistics.fmean(values)
+
+    # Should raise ValueError for non-finite input
+    try:
+        block_bootstrap_ci([1.0, math.nan, 2.0])
+        assert False, "Should have raised ValueError"
+    except ValueError:
+        pass
+
+
+def test_evaluate_raises_on_unsorted_entry_dates():
+    # Entry dates must be non-decreasing for G2's block structure
+    samples = [
+        sample("20120115", net=0.02, excess=0.01),
+        sample("20120110", net=0.02, excess=0.01),  # Out of order
+    ]
+    try:
+        evaluate(samples)
+        assert False, "Should have raised ValueError"
+    except ValueError as e:
+        assert "entry_date" in str(e).lower()
