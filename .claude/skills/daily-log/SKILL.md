@@ -78,18 +78,30 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 ### 4.1 체결 프레임 점검 — 매일 돌린다
 
 ```bash
-cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts/ws_frame_check.py   --root D:/Private/stock-prod --date <YYYYMMDD>
+cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts/ws_frame_check.py --root D:/Private/stock-prod --date <YYYYMMDD>
 ```
 
-종료 코드 1이면 보고 맨 앞에 쓴다. 이상 종류는 세 가지다.
+종료 코드 1이면 보고 맨 앞에 쓴다. 이상 종류는 네 가지다.
 
 - `FIELD_COUNT_CHANGED`: KIS가 `H0STCNT0` 필드 수를 또 바꿨다(기대값 47).
 - `PARSER_DROPS`: 파서가 다건 프레임의 체결을 버리고 있다(`coverage_pct` < 100).
 - `UNALIGNED`: 레코드로 정렬되지 않는 프레임이 있다.
+- `HEADER_MISMATCH`: 프레임 헤더의 건수와 파서가 낸 레코드 수가 다르다(tick-schema-3 이후).
 
 2026-09-14에 46 → 47로 바뀐 뒤 11거래일 동안 아무도 몰랐다
-(`docs/WS_47FIELD_PARSER_FOLLOWUP_20261001.md`). 파서를 고치기 전까지는 `PARSER_DROPS`가
-매일 나오는 것이 정상이다. 그때는 그 비율만 적는다.
+(`docs/WS_47FIELD_PARSER_FOLLOWUP_20261001.md`).
+
+**무엇을 재는지는 캡처 형식에 따라 다르다.**
+
+- **tick-schema-3**(파서 수정 승격 이후): 행 하나가 운영 파서가 실제로 낸 체결 하나다.
+  `coverage_pct`가 그날 운영의 실제 값이다. **`PARSER_DROPS`가 나오면 결함이다.**
+- **그 전 형식**(행 하나 = 프레임 하나): 이 트리의 **현재** 파서로 다시 쪼갠 결과다. 파서가
+  고쳐진 뒤에는 옛 날짜도 100%로 나온다. 그날 운영 F4가 실제로 본 비율은 `프레임 ÷ 체결`이다
+  (0914 ~ 승격 전에는 다건 프레임의 첫 체결만 봤다).
+
+파서 수정 이후에는 운영 로그에도 `WS_FRAME_UNSPLIT`·`WS_FRAME_HEADER_MISMATCH`(WARN)가
+남는다. 같은 원인이면 처음과 1,000번째마다만 찍히고 `occurrences`에 누계가 있다. 4절의 WS
+검색에 함께 걸린다.
 
 ## 5. 청산이 있었으면 — F4 틱 공백 재측정
 

@@ -5,9 +5,9 @@
 > 관련: [`F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md`](F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md),
 > [`PAPER_STRATEGY_IMPROVEMENT_PLAN.md`](PAPER_STRATEGY_IMPROVEMENT_PLAN.md) 「0단계 정렬 묶음과 롤백 규칙 (2026-09-14 결정)」
 
-**미결.** 아래는 발견 당시 기록이다. `src/api/kis_ws.py`는 `_STRATEGY_FILES`에 들어 있어
-(`src/release.py` 29행) 고치면 지문이 리셋된다. 현재 지문 `365a4b6b6810`의 누적은 2건이다.
-선택지는 나열만 하고 고르지 않았다.
+**수정 구현, 승격 대기 (2026-10-01).** 결정과 구현은 9절에 있다. 아래 1~8절은 발견·분석
+당시 기록이다. `src/api/kis_ws.py`는 `_STRATEGY_FILES`에 들어 있어(`src/release.py` 29행)
+승격하면 지문이 리셋된다. 리셋 전 지문 `365a4b6b6810`의 누적은 2건이었다.
 
 ## 1. 현상
 
@@ -203,6 +203,8 @@ if len(values) < _CNT_FIELD_COUNT or len(values) % _CNT_FIELD_COUNT != 0:
 그 2건도 이 결함 위에서 나온 거래다.
 
 ### 5.1 파서
+
+> **결정 (2026-10-01): B + A·C의 대체 경로 + D, 그리고 헤더 기록(8.4절 ③).** 9절.
 
 **A. `_CNT_FIELD_COUNT = 47`로 고친다.** 가장 작은 변경이다. KIS가 필드를 또 더하면
 같은 일이 반복된다.
@@ -436,3 +438,53 @@ if len(values) < _CNT_FIELD_COUNT or len(values) % _CNT_FIELD_COUNT != 0:
 **③ 운영 `kis_ws.py`가 헤더를 캡처에 함께 남기게 수정.** 운영 세션 그대로라 동시 세션
 위험이 없고, 매일 전 프레임이 표본이 된다. 대신 지문이 리셋된다. 파서 수정(5.1절)과 같은
 릴리스에 묶으면 리셋은 한 번이다.
+
+## 9. 수정 (2026-10-01, 승격 대기)
+
+5.1절의 B를 1순위로 하고, A·C를 대체 경로로, D를 경보로 묶었다. 8.4절 ③(헤더 기록)도 같은
+릴리스에 넣어 지문 리셋을 한 번으로 끝낸다.
+
+### 9.1 파서 (`src/api/kis_ws.py`)
+
+`_split_frame(body, count)`가 레코드 목록과 분할 방식을 함께 돌려준다.
+
+1. `HEADER`: 값 개수를 헤더 건수로 나눈다. 모든 레코드가 같은 종목코드로 시작하고 1번
+   필드가 6자리 시각이면 그 길이를 쓴다. 필드가 또 늘어도 버틴다.
+2. `FIELD_COUNT`: 헤더가 없거나 맞지 않으면 알려진 필드 수 `(47, 46)`으로 같은 정렬 검사를
+   한다. 46은 0914 이전 캡처를 리플레이할 때를 위해 남긴다.
+3. `UNSPLIT`: 그래도 정렬되지 않으면 지금처럼 첫 레코드만 쓴다.
+
+경보(WARN, 같은 원인이면 처음과 1,000번째마다):
+
+- `WS_FRAME_UNSPLIT`: 3으로 물러났다. `values`는 값 개수다.
+- `WS_FRAME_HEADER_MISMATCH`: 2로 쪼갰는데 헤더 건수와 레코드 수가 다르다.
+
+`_CNT_FIELD_COUNT`는 47로 바꿨다. `_split_records(body, count=None)`는 호환용으로 남겼다.
+
+### 9.2 헤더 기록 (8.4절 ③)
+
+파서가 각 체결에 `frame_count`(헤더 건수, 읽을 수 없으면 None), `frame_size`(실제 레코드 수),
+`frame_index`를 붙인다. F4(`_handle_price_tick`)가 캡처로 넘기고, 캡처 행에 남는다.
+`tick_capture.SCHEMA_VERSION`은 `tick-schema-3`이다. 이 버전부터 ws 행 하나는 체결 하나이고
+`raw`는 그 체결의 47필드다.
+
+헤더 실측(8.3절의 "헤더 값의 실제 일치: 미측정")은 승격 다음 날부터 `ws_frame_check.py`의
+`HEADER_MISMATCH`로 매일 확인된다.
+
+### 9.3 검증
+
+- 테스트 16건 추가(`test_ws_frame_header.py` 8, 캡처 배선 3, `ws_frame_check` 새 형식 2,
+  상한가 잠김 3). 기존 46필드 다건 프레임 테스트는 헤더 경로로 그대로 통과한다.
+- 전체 1,594건 통과, ruff 0건, mypy 새 오류 없음. mypy 베이스라인은 f4_tracking에 4줄을 더해
+  기존 `log_extra` 항목의 행 번호가 1431 → 1435로 밀린 것만 다시 동결했다.
+- **실데이터:** 고친 파서로 캡처를 다시 쪼개면 0930 043260의 체결 64,359 / 64,359, 1001 046120의
+  3,809 / 3,809로 **100%**다. 0911(46필드, 단건 프레임)도 61,340건 그대로 쪼개진다.
+- 지문(개발 트리 기준): `e034c84591ac`. 운영 승격 시 실제 값은 `promote.ps1`이 알려준다.
+
+### 9.4 승격 후 확인
+
+- 승격 다음 거래일 `ws_frame_check.py`에서 `coverage_pct = 100`, `HEADER_MISMATCH` 없음.
+- 운영 로그에 `WS_FRAME_UNSPLIT`·`WS_FRAME_HEADER_MISMATCH`가 없는지.
+- DB `high_price`가 전 레코드 고점과 같아졌는지(2.2절 표의 마지막 열이 일치해야 한다).
+- 트레일 판정 집계는 승격 첫 거래일부터 다시 센다(`PAPER_STRATEGY_IMPROVEMENT_PLAN.md`
+  「WS 파서 결함 기간의 표본 제외」).
