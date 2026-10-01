@@ -75,7 +75,8 @@ def write_baseline(counts: Counter[str]) -> None:
     ]
     for entry in sorted(counts):
         lines.extend([entry] * counts[entry])
-    BASELINE_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # write_text는 Windows에서 \n을 CRLF로 바꾼다. 저장소는 LF다(.gitattributes).
+    BASELINE_PATH.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
 
 
 def main(argv: list[str] | None = None) -> int:
