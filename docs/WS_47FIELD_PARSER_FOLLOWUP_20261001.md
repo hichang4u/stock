@@ -225,6 +225,11 @@ if len(values) < _CNT_FIELD_COUNT or len(values) % _CNT_FIELD_COUNT != 0:
 
 ### 5.2 사전등록 표본 (트레일 1.5% 대 2.0%)
 
+> **결정 (2026-10-01): 나.** 20260914부터 파서 수정 승격 전까지의 행을 `data_complete=0` 제외
+> 규칙으로 판정 집계에서 뺀다. discordant는 10건에서 6건이 된다. 범위·재개 조건·시행 방식은
+> [`PAPER_STRATEGY_IMPROVEMENT_PLAN.md`](PAPER_STRATEGY_IMPROVEMENT_PLAN.md) 「WS 파서 결함
+> 기간의 표본 제외」에 있다. 아래 선택지는 결정 당시 기록으로 남긴다.
+
 **가. 0914 이후 섀도 표본을 전 레코드 리플레이로 다시 계산한다.** 원본이 있으므로 가능하다.
 다만 "결과를 보고 데이터를 고친다"로 읽히지 않도록, 재계산 규칙을 결과를 보기 전에 고정한다.
 
