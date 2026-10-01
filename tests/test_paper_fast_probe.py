@@ -1353,3 +1353,68 @@ async def test_record_ranking_shadow_skips_when_shadow_disabled(monkeypatch, tmp
 
     assert await probe.record_ranking_shadow() is None
     fetch.assert_not_awaited()
+
+
+# ── 상한가 잠김 행은 응답 결손이 아니다 (2026-10-01) ─────────────────────
+# 20260930 097800이 +29.98%로 상한가에 잠겨 매도호가가 0이었다. 갭 상한에 걸려
+# 어차피 후보가 될 수 없는 행 하나 때문에 품질이 INVALID_ASK가 되어 빠른 경로 전체가
+# 폴백했다 (docs/FAST_PATH_INVALID_ASK_FOLLOWUP_20260930.md, 선택지 B).
+
+
+def _locked_row(ticker: str, prev_close: int = 2335, limit: int = 3035) -> dict:
+    row = _multi_row(ticker, "상한가", limit, prev_close, ask=0)
+    row.update({"inter2_bidp": str(limit), "inter2_mxpr": str(limit),
+                "total_askp_rsqn": "0", "total_bidp_rsqn": "2703805"})
+    return row
+
+
+async def _observe(monkeypatch, tmp_path, rows: list[dict]) -> list[dict]:
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 30, 9, 0, 0, 300000, tzinfo=probe.KST)
+
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setenv("PAPER_FAST_PROBE", "1")
+    monkeypatch.setenv("DRY_RUN", "0")
+    monkeypatch.setenv("PAPER_FAST_PROBE_DIR", str(tmp_path))
+    monkeypatch.setattr(probe, "datetime", FixedDateTime)
+    probe._prepared_tickers = [str(r["inter_shrn_iscd"]) for r in rows]
+    monkeypatch.setattr(probe.kis_rest, "get",
+                        AsyncMock(return_value={"rt_cd": "0", "output": rows}))
+    return await probe.observe_open_boundary()
+
+
+@pytest.mark.asyncio
+async def test_limit_up_locked_row_does_not_fail_open_quality(monkeypatch, tmp_path):
+    candidates = await _observe(monkeypatch, tmp_path, [
+        _multi_row("005930", "삼성전자", 10300, 10000), _locked_row("097800"),
+    ])
+
+    assert probe.open_quality_ok() is True
+    quality = probe.get_last_open_quality()
+    assert quality["reason"] == "COMPLETE"
+    assert quality["invalid_ask_tickers"] == []
+    assert quality["limit_up_locked_tickers"] == ["097800"]
+    assert "097800" not in [c["ticker"] for c in candidates]
+
+
+@pytest.mark.asyncio
+async def test_zero_ask_with_resting_sell_orders_is_still_invalid(monkeypatch, tmp_path):
+    row = _locked_row("097800")
+    row["total_askp_rsqn"] = "1200"
+    await _observe(monkeypatch, tmp_path, [_multi_row("005930", "삼성전자", 10300, 10000), row])
+
+    quality = probe.get_last_open_quality()
+    assert quality["reason"] == "INVALID_ASK"
+    assert quality["invalid_ask_tickers"] == ["097800"]
+    assert quality["limit_up_locked_tickers"] == []
+
+
+@pytest.mark.asyncio
+async def test_zero_ask_below_the_upper_limit_is_still_invalid(monkeypatch, tmp_path):
+    row = _locked_row("097800")
+    row["inter2_bidp"] = "3000"
+    await _observe(monkeypatch, tmp_path, [_multi_row("005930", "삼성전자", 10300, 10000), row])
+
+    assert probe.get_last_open_quality()["reason"] == "INVALID_ASK"

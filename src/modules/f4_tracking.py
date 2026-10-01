@@ -865,6 +865,10 @@ async def _handle_price_tick(
             # 미해석 원시 필드(WS만 존재, REST 백업은 None). 관측 전용이며
             # 청산 판단은 이 값을 읽지 않는다.
             "raw": meta.get("raw"),
+            # 프레임 안 위치(WS만). 헤더 건수와 실제 레코드 수를 매일 대조한다.
+            "frame_count": meta.get("frame_count"),
+            "frame_size": meta.get("frame_size"),
+            "frame_index": meta.get("frame_index"),
         })
     except Exception:  # noqa: BLE001 — 캡처는 관측 전용, 절대 전파하지 않는다
         pass

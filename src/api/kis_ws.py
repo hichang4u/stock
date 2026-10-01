@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -18,11 +19,20 @@ _RETRY_INTERVAL_MAX  = 30    # 지수 백오프 상한 (초)
 _STALE_TIMEOUT       = 30.0  # 수신 중단 감지 기준 (초)
 _CRIT_THRESHOLD      = 10    # 연속 실패 N회 이후 CRIT 로그
 
-# H0STCNT0 응답 필드 수. KIS 공식 저장소 open-trading-api의
-# examples_llm/domestic_stock/ccnl_krx/ccnl_krx.py columns 목록 기준 46개
+# H0STCNT0 레코드 필드 수. KIS 공식 저장소 open-trading-api의
+# examples_llm/domestic_stock/ccnl_krx/ccnl_krx.py columns 목록 기준
 # (0=MKSC_SHRN_ISCD, 1=STCK_CNTG_HOUR, 2=STCK_PRPR, 12=CNTG_VOL,
-#  18=CTTR 체결강도, 21=CCLD_DVSN 체결구분, 10/11=ASKP1/BIDP1, 45=VI_STND_PRC).
-_CNT_FIELD_COUNT = 46
+#  18=CTTR 체결강도, 21=CCLD_DVSN 체결구분, 10/11=ASKP1/BIDP1, 45=VI_STND_PRC,
+#  46=MARKET_CLS_CODE). 2026-09-14부터 47개이고 그 전에는 46개였다. 46만 가정한
+# 파서가 다건 프레임의 첫 체결만 넘긴 사고가 있었다
+# (docs/WS_47FIELD_PARSER_FOLLOWUP_20261001.md). 그래서 1순위는 프레임 헤더의
+# 건수이고, 이 목록은 헤더를 못 믿을 때의 대체 경로다.
+_CNT_FIELD_COUNT = 47
+_KNOWN_FIELD_COUNTS = (47, 46)
+_HMS = re.compile(r"\d{6}")
+# 프레임 이상은 같은 원인이면 매 프레임 반복된다. 처음과 N번째마다만 남긴다.
+_ANOMALY_LOG_EVERY = 1000
+_frame_anomaly_counts: Counter[str] = Counter()
 
 
 async def subscribe(
@@ -121,29 +131,62 @@ def _exchange_iso(hms: str, now: datetime | None = None) -> str | None:
     return base.replace(hour=hh, minute=mm, second=ss, microsecond=0).isoformat()
 
 
-def _split_records(body: str) -> list[list[str]]:
-    """프레임 데이터부를 체결 레코드(필드 배열) 목록으로 나눈다.
+def _aligned(records: list[list[str]]) -> bool:
+    """모든 레코드가 같은 종목코드로 시작하고 1번이 6자리 체결시각인가."""
+    first = records[0][0]
+    return all(len(r) > 1 and r[0] == first and _HMS.fullmatch(r[1]) for r in records)
 
-    공식 구현(open-trading-api)은 이 부분을
-    ``pd.read_csv(StringIO(body), sep="^", names=<46개 컬럼>)`` 로 읽고
-    ``df.iterrows()`` 로 행을 순회한다 — 즉 한 프레임에 체결이 여러 건 온다.
-    read_csv 기준이면 레코드는 줄바꿈으로 나뉘지만, 구분자 형태에 의존하지
-    않도록 줄바꿈과 ``^``를 모두 값 구분자로 보고 필드 수로 잘라 두 형태를
-    같게 처리한다.
 
-    필드 수가 배수로 떨어지지 않으면 쪼개지 않는다 — 오정렬된 레코드를
-    만들어 잘못된 가격을 내보내느니 첫 레코드만 쓰는 편이 안전하다.
+def _chunk(values: list[str], length: int) -> list[list[str]]:
+    return [values[i:i + length] for i in range(0, len(values), length)]
+
+
+def _header_count(text: str) -> int | None:
+    """프레임 헤더의 건수(``0|H0STCNT0|004|...``의 ``004``). 읽을 수 없으면 None."""
+    try:
+        count = int(text)
+    except (TypeError, ValueError):
+        return None
+    return count if count > 0 else None
+
+
+def _split_frame(body: str, count: int | None) -> tuple[list[list[str]], str]:
+    """프레임 데이터부를 체결 레코드 목록으로 나누고, 어떻게 나눴는지 함께 돌려준다.
+
+    구분자 형태(줄바꿈 또는 ``^``)에 의존하지 않도록 둘 다 값 구분자로 본다.
+
+    1. ``HEADER`` — 값 개수를 헤더 건수로 나눠 정렬되면 그 길이를 쓴다. 필드가 또
+       늘어도 버틴다.
+    2. ``FIELD_COUNT`` — 헤더가 없거나 맞지 않으면 알려진 필드 수(47, 46)로 쪼갠다.
+    3. ``UNSPLIT`` — 그래도 정렬되지 않으면 쪼개지 않는다. 오정렬된 레코드로 잘못된
+       가격을 내보내느니 첫 레코드만 쓰는 편이 안전하다. 호출부가 경보를 남긴다.
     """
     body = body.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
     if not body:
-        return []
+        return [], "EMPTY"
     values = re.split(r"[\^\n]", body)
-    if len(values) < _CNT_FIELD_COUNT or len(values) % _CNT_FIELD_COUNT != 0:
-        return [values]
-    return [
-        values[i:i + _CNT_FIELD_COUNT]
-        for i in range(0, len(values), _CNT_FIELD_COUNT)
-    ]
+    if count and len(values) % count == 0:
+        records = _chunk(values, len(values) // count)
+        if _aligned(records):
+            return records, "HEADER"
+    for length in _KNOWN_FIELD_COUNTS:
+        if len(values) >= length and len(values) % length == 0:
+            records = _chunk(values, length)
+            if _aligned(records):
+                return records, "FIELD_COUNT"
+    return [values], "UNSPLIT"
+
+
+def _split_records(body: str, count: int | None = None) -> list[list[str]]:
+    """프레임 데이터부 → 체결 레코드(필드 배열) 목록. ``_split_frame`` 참고."""
+    return _split_frame(body, count)[0]
+
+
+def _note_frame_anomaly(event: str, **fields) -> None:
+    _frame_anomaly_counts[event] += 1
+    occurrences = _frame_anomaly_counts[event]
+    if occurrences == 1 or occurrences % _ANOMALY_LOG_EVERY == 0:
+        log(event, level="WARN", occurrences=occurrences, **fields)
 
 
 def _tick_from_fields(fields: list[str]) -> dict | None:
@@ -181,8 +224,29 @@ def _parse_ticks(raw: str) -> list[dict]:
         parts = raw.split("|")
         if len(parts) < 4:
             return []
-        ticks = [_tick_from_fields(f) for f in _split_records(parts[3])]
-        return [t for t in ticks if t is not None]
+        count = _header_count(parts[2])
+        records, how = _split_frame(parts[3], count)
+        if how == "UNSPLIT":
+            _note_frame_anomaly(
+                "WS_FRAME_UNSPLIT", tr_id=parts[1], header_count=count,
+                values=len(records[0]),
+            )
+        elif count is not None and count != len(records):
+            _note_frame_anomaly(
+                "WS_FRAME_HEADER_MISMATCH", tr_id=parts[1], header_count=count,
+                records=len(records),
+            )
+        ticks = []
+        for index, fields in enumerate(records):
+            tick = _tick_from_fields(fields)
+            if tick is None:
+                continue
+            # 프레임 안 위치. 캡처가 헤더 건수와 실제 레코드 수를 매일 대조하게 한다.
+            tick["frame_count"] = count
+            tick["frame_size"] = len(records)
+            tick["frame_index"] = index
+            ticks.append(tick)
+        return ticks
     except Exception:
         return []
 

@@ -124,3 +124,34 @@ def test_main_exits_nonzero_when_an_issue_is_found(tmp_path, capsys):
 
 def test_main_exits_two_when_there_is_no_capture(tmp_path):
     assert main(["--root", str(tmp_path), "--date", "20261001"]) == 2
+
+
+# tick-schema-3(파서 수정 이후): ws 행 하나가 체결 하나이고 프레임 위치가 붙는다.
+
+def _row(record: list[str], count, size: int, index: int) -> dict:
+    return {"source": "ws", "received_at": "2026-10-02T09:00:00+09:00",
+            "price": float(record[2]), "raw": record,
+            "frame_count": count, "frame_size": size, "frame_index": index}
+
+
+def test_new_format_rows_are_counted_per_frame_and_fully_covered(tmp_path):
+    _write(tmp_path, "20261002", "005930", [
+        _row(_rec("005930", "090001"), 2, 2, 0),
+        _row(_rec("005930", "090001"), 2, 2, 1),
+        _row(_rec("005930", "090002"), 1, 1, 0),
+    ])
+    out = check_day(tmp_path, "20261002", split=_first_only)
+    t = out["tickers"]["005930"]
+    assert (t["frames"], t["records"], t["multi_frames"], t["parser_records"]) == (2, 3, 1, 3)
+    assert t["coverage_pct"] == 100.0
+    assert out["issues"] == []
+
+
+def test_new_format_flags_a_header_count_that_disagrees(tmp_path):
+    _write(tmp_path, "20261002", "005930", [
+        _row(_rec("005930", "090001"), 3, 2, 0),
+        _row(_rec("005930", "090001"), 3, 2, 1),
+    ])
+    out = check_day(tmp_path, "20261002", split=_first_only)
+    assert out["tickers"]["005930"]["header_mismatch_frames"] == 1
+    assert "HEADER_MISMATCH" in out["issues"]

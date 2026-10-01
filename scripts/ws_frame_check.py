@@ -8,8 +8,11 @@
 
 - 레코드 길이: 모든 조각이 종목코드로 시작하고 6자리 시각이 줄지 않게 되는 가장 작은
   길이를 찾는다. 기대값(`EXPECTED_FIELDS`)과 다르면 KIS가 또 필드를 바꾼 것이다.
-- 파서 손실: 운영 파서에 같은 프레임을 넣어 나온 레코드 수와 실제 레코드 수를 비교한다.
-  파서를 고치면 이 값은 저절로 100%가 된다.
+- 파서 손실: 파서가 낸 체결 수와 실제 레코드 수를 비교한다.
+  - tick-schema-3(2026-10 파서 수정 이후) 행은 운영 파서가 낸 체결 하나씩이다. 그날
+    운영의 실제 손실이다. 헤더 건수와 레코드 수의 불일치(`HEADER_MISMATCH`)도 본다.
+  - 그 전 행은 프레임 하나다. **이 트리의 현재** 파서에 다시 넣어 센다. 파서를 고친 뒤에는
+    옛 날짜도 100%가 된다. 그날 운영이 실제로 본 비율은 프레임 ÷ 체결이다.
 
 장중 파일은 기록 중이라 잘려 있다 — `EOFError`를 삼키고 읽힌 데까지 쓴다.
 
@@ -90,7 +93,8 @@ def check_day(root: Path, date: str, split: Splitter | None = None) -> dict:
         ticker = path.name.split(".")[0]
         t = tickers.setdefault(ticker, {
             "frames": 0, "records": 0, "multi_frames": 0, "parser_records": 0,
-            "unaligned_frames": 0, "record_lengths": Counter(), "truncated": False,
+            "unaligned_frames": 0, "header_mismatch_frames": 0,
+            "record_lengths": Counter(), "truncated": False,
         })
         rows, truncated = _read_frames(path)
         t["truncated"] = t["truncated"] or truncated
@@ -98,16 +102,30 @@ def check_day(root: Path, date: str, split: Splitter | None = None) -> dict:
             raw = row.get("raw")
             if row.get("source") != "ws" or not isinstance(raw, list) or not raw:
                 continue
-            t["frames"] += 1
+            # tick-schema-3: 행 하나가 파서가 낸 체결 하나이고 프레임 위치가 붙는다.
+            # 그 전 행은 프레임 하나이므로 파서에 다시 넣어 낸 체결 수를 센다.
+            per_record = row.get("frame_size") is not None
+            if per_record:
+                if row.get("frame_index") == 0:
+                    t["frames"] += 1
+                    t["multi_frames"] += row["frame_size"] > 1
+                    header = row.get("frame_count")
+                    mismatch = header is not None and header != row["frame_size"]
+                    t["header_mismatch_frames"] += mismatch
+            else:
+                t["frames"] += 1
             length = infer_record_length([str(v) for v in raw], ticker)
             if length is None:
                 t["unaligned_frames"] += 1
                 continue
             count = len(raw) // length
             t["records"] += count
-            t["multi_frames"] += count > 1
             t["record_lengths"][str(length)] += 1
-            t["parser_records"] += len(split("^".join(str(v) for v in raw)))
+            if per_record:
+                t["parser_records"] += 1
+            else:
+                t["multi_frames"] += count > 1
+                t["parser_records"] += len(split("^".join(str(v) for v in raw)))
 
     issues: set[str] = set()
     for t in tickers.values():
@@ -120,6 +138,8 @@ def check_day(root: Path, date: str, split: Splitter | None = None) -> dict:
             issues.add("UNALIGNED")
         if t["parser_records"] < t["records"]:
             issues.add("PARSER_DROPS")
+        if t["header_mismatch_frames"]:
+            issues.add("HEADER_MISMATCH")
     return {
         "date": date, "expected_fields": EXPECTED_FIELDS,
         "tickers": tickers, "issues": sorted(issues),

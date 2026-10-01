@@ -178,3 +178,47 @@ async def test_f4_rest_tick_has_no_raw(monkeypatch) -> None:
         source="rest", tick_meta={"source_ts": "2026-08-13T09:10:10+09:00"},
     )
     assert captured["raw"] is None
+
+
+# ── 프레임 위치 보존 (2026-10-01) ─────────────────────────────────────
+# 헤더 건수가 실제 레코드 수와 맞는지를 운영 데이터로 매일 대조하려면
+# 프레임 위치가 캡처까지 와야 한다 (docs/WS_47FIELD_PARSER_FOLLOWUP_20261001.md 8.4절).
+
+
+async def test_f4_forwards_frame_position_to_capture(monkeypatch) -> None:
+    from src.modules import f4_tracking
+
+    captured = {}
+    monkeypatch.setattr(f4_tracking, "_price_observation_active", lambda *a, **k: True)
+    monkeypatch.setattr(f4_tracking.live, "push_tick", lambda *a, **k: None)
+    monkeypatch.setattr(f4_tracking.tick_capture, "enqueue",
+                        lambda row: captured.update(row))
+    monkeypatch.setattr(f4_tracking.state, "get",
+                        lambda: type("S", (), {"position_status": "CLOSED",
+                                               "target_ticker": "005930"})())
+
+    tick = _parse_one(_cnt_frame())
+    await f4_tracking._handle_price_tick(
+        10300.0, "005930", f4_tracking.SpikeFilter(),
+        source="ws", tick_meta=tick,
+    )
+    assert (captured["frame_count"], captured["frame_size"], captured["frame_index"]) == (1, 1, 0)
+
+
+async def test_capture_row_persists_frame_position(mem, tmp_path) -> None:
+    cap = _capture(tmp_path)
+    cap.start()
+    ts = "2026-08-13T09:10:10+09:00"
+    cap.enqueue({"source_ts": ts, "received_at": ts, "price": 10_000.0,
+                 "qty": 10, "source": "ws", "valid": True,
+                 "raw": ["005930", "091010", "10000"],
+                 "frame_count": 3, "frame_size": 3, "frame_index": 2})
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+
+    row = _rows(tmp_path)[0]
+    assert (row["frame_count"], row["frame_size"], row["frame_index"]) == (3, 3, 2)
+
+
+def test_schema_version_marks_frame_position_rows() -> None:
+    """프레임 위치 열이 생긴 행을 판독기가 구분할 수 있어야 한다."""
+    assert tc.SCHEMA_VERSION == "tick-schema-3"

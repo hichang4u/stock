@@ -119,6 +119,17 @@ def _to_int(value: Any) -> int:
     return int(_to_float(value))
 
 
+def _limit_up_locked(row: dict) -> bool:
+    """멀티시세 행이 상한가에 잠겼는가 — 매도호가·매도잔량이 없고 매수1호가가 상한가."""
+    bid = _to_float(row.get("inter2_bidp"))
+    return (
+        _to_float(row.get("inter2_askp")) <= 0
+        and _to_float(row.get("total_askp_rsqn")) <= 0
+        and bid > 0
+        and bid == _to_float(row.get("inter2_mxpr"))
+    )
+
+
 def _rows(resp: dict, key: str = "output") -> list[dict]:
     value = resp.get(key) or []
     if isinstance(value, dict):
@@ -1081,8 +1092,20 @@ async def observe_open_boundary() -> list[dict]:
         for row in rows
         if _to_float(row.get("inter2_askp")) > 0
     } & requested_set
+    # 상한가에 잠긴 행은 매도호가가 0인 것이 정확한 값이다 — 응답 결손이 아니다.
+    # 후보로는 올리지 않되(호가가 없다) 품질 판정에서는 뺀다. 한 종목 때문에 빠른
+    # 경로 전체가 폴백한 20260930 사례(docs/FAST_PATH_INVALID_ASK_FOLLOWUP_20260930.md).
+    limit_up_locked_tickers = [
+        ticker for ticker in requested_tickers
+        if ticker not in valid_ask_tickers
+        and any(
+            str(row.get("inter_shrn_iscd") or "") == ticker and _limit_up_locked(row)
+            for row in rows
+        )
+    ]
     invalid_ask_tickers = [
-        ticker for ticker in requested_tickers if ticker not in valid_ask_tickers
+        ticker for ticker in requested_tickers
+        if ticker not in valid_ask_tickers and ticker not in limit_up_locked_tickers
     ]
     response_ok = str(resp.get("rt_cd") or "") == "0"
     if not response_ok:
@@ -1103,6 +1126,7 @@ async def observe_open_boundary() -> list[dict]:
         "valid_ask_count": len(valid_ask_tickers),
         "missing_tickers": missing_tickers,
         "invalid_ask_tickers": invalid_ask_tickers,
+        "limit_up_locked_tickers": limit_up_locked_tickers,
         "unexpected_tickers": unexpected_tickers,
         "rt_cd": resp.get("rt_cd"),
         "msg_cd": resp.get("msg_cd"),
