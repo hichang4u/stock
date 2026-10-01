@@ -75,10 +75,34 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 `keepalive ping timeout` 단절은 큐 포화 계열이라 무겁게 본다. 다른 사유의 단절은
 서버·네트워크 쪽일 수 있다.
 
+### 4.1 체결 프레임 점검 — 매일 돌린다
+
+```bash
+cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts/ws_frame_check.py   --root D:/Private/stock-prod --date <YYYYMMDD>
+```
+
+종료 코드 1이면 보고 맨 앞에 쓴다. 이상 종류는 세 가지다.
+
+- `FIELD_COUNT_CHANGED`: KIS가 `H0STCNT0` 필드 수를 또 바꿨다(기대값 47).
+- `PARSER_DROPS`: 파서가 다건 프레임의 체결을 버리고 있다(`coverage_pct` < 100).
+- `UNALIGNED`: 레코드로 정렬되지 않는 프레임이 있다.
+
+2026-09-14에 46 → 47로 바뀐 뒤 11거래일 동안 아무도 몰랐다
+(`docs/WS_47FIELD_PARSER_FOLLOWUP_20261001.md`). 파서를 고치기 전까지는 `PARSER_DROPS`가
+매일 나오는 것이 정상이다. 그때는 그 비율만 적는다.
+
 ## 5. 청산이 있었으면 — F4 틱 공백 재측정
 
 `docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md` §5의 통과 조건을 다시 잰다.
 체결 확인이 20초를 넘긴 날이 가장 강한 검증이다.
+
+- 캡처의 ws 행 하나는 **체결 하나가 아니라 프레임 하나**다. 아래 공백은 프레임 도착 간격이라
+  파서 결함과 무관하다. 그러나 `price`·`qty`는 프레임의 첫 체결뿐이다. 가격이나 체결량을
+  볼 때는 `raw`를 47필드씩 쪼갠다(2 = 가격, 12 = 체결량, 13 = 누계거래량).
+- 체결이 얇은 종목은 공백이 잦다. "체결이 없었다"와 "ws가 놓쳤다"를 가르려면 전 레코드의
+  누계거래량이 이어지는지 본다(`raw[13]` 차 = 다음 레코드 `raw[12]`).
+- 시간별 틱 파일은 **장 마감(15:20)에 한꺼번에 닫힌다.** 장중에는 그 시각 이전 파일도 잘려
+  있으니, 청산 구간까지 읽히지 않으면 15:20 이후에 다시 잰다.
 
 ```bash
 cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
