@@ -15,12 +15,14 @@ r"""C1 오버나이트 체 — 후보를 D-0 종가에 산 것으로 두고 D+1 
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import sqlite3
 import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from statistics import mean, median
+from statistics import StatisticsError, correlation, mean, median
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +33,7 @@ from scripts.overnight_calendar import load_calendar, next_trading_date  # noqa:
 from scripts.strategy_backtest import read_cached_bars  # noqa: E402
 from scripts.track_b_backtest import bootstrap_ci  # noqa: E402
 from scripts.track_b_rules import HARD_STOP, simulate_exit  # noqa: E402
+from scripts.ws_frame_check import infer_record_length  # noqa: E402
 from src import warmup  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
@@ -88,10 +91,162 @@ def simulate_overnight(bars: list[dict], entry_price: float) -> dict:
     }
 
 
+def simulate_overnight_ticks(
+    bars: list[dict], ticks: list[tuple[str, float]], entry_price: float
+) -> dict:
+    """§4.2 틱 재생. 갭 판정은 분봉 재생과 같고, 틱이 있는 구간만 틱으로 바꿔 F4를 돈다.
+
+    틱 캡처는 A의 진입 뒤에 시작해 15:20에 끝난다. 그래서 첫 틱의 분 이전과 마지막 틱의 분
+    이후는 분봉으로 잇는다. 틱 하나는 시·고·저·종이 같은 봉 하나로 넘긴다(시각은 HHMMSS).
+    """
+    base = simulate_overnight(bars, entry_price)
+    if base["exit_reason"] in ("SUSPECT_CORPORATE_ACTION", "GAP_HARD_STOP") or not ticks:
+        return base
+    first_min, last_min = ticks[0][0][:4], ticks[-1][0][:4]
+    prefix = [b for b in bars if str(b["time"])[:4] < first_min]
+    suffix = [b for b in bars if str(b["time"])[:4] > last_min]
+    tick_bars = [{"time": hms, "open": p, "high": p, "low": p, "close": p} for hms, p in ticks]
+    result = simulate_exit(prefix + tick_bars + suffix, 0, entry_price, order="low_first")
+    return {
+        "open": base["open"], "gap_pct": base["gap_pct"], "exit_reason": result["reason"],
+        "exit_time": result["exit_time"], "exit_price": result["exit_price"],
+        "gross_pct": result["pct"], "bars_complete": base["bars_complete"],
+    }
+
+
+def _hms(received_at: str) -> str:
+    return str(received_at)[11:19].replace(":", "")
+
+
+def load_tick_prices(root: Path, date: str, ticker: str) -> list[tuple[str, float]] | None:
+    """그날 그 종목의 틱 캡처 → [(체결시각 HHMMSS, 가격)]. 캡처가 없으면 None.
+
+    2026-09-14 ~ 10-01 캡처는 ws 행 하나가 다건 프레임이라 `raw`를 레코드 길이로 쪼갠다
+    (docs/WS_47FIELD_PARSER_FOLLOWUP_20261001.md). tick-schema-3 행(`frame_size` 있음)은 체결
+    하나다. REST 백업 행은 수신 시각과 가격만 쓴다. 장중 잘린 파일은 읽힌 데까지 쓴다.
+    """
+    files = sorted((root / "data" / "strategy_ticks" / date).glob(f"{ticker}.*.jsonl.gz"))
+    if not files:
+        return None
+    rows: list[dict] = []
+    for path in files:
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except EOFError:
+            pass
+    rows.sort(key=lambda r: (str(r.get("received_at", "")), r.get("frame_index") or 0))
+    out: list[tuple[str, float]] = []
+    for row in rows:
+        raw = row.get("raw")
+        if row.get("source") == "ws" and isinstance(raw, list) and raw:
+            values = [str(v) for v in raw]
+            length = (
+                len(values) if row.get("frame_size") is not None
+                else infer_record_length(values, ticker)
+            )
+            if length is None:
+                if row.get("price"):
+                    out.append((_hms(row.get("received_at", "")), float(row["price"])))
+                continue
+            for i in range(0, len(values), length):
+                out.append((values[i + 1], float(values[i + 2])))
+        elif row.get("price"):
+            out.append((_hms(row.get("received_at", "")), float(row["price"])))
+    return out
+
+
 def apply_costs(gross_pct: float, exit_reason: str) -> dict:
     net_cost = gross_pct - BASE_ROUND_TRIP_COST_PCT
     slip = _SLIPPAGE_BY_REASON.get(exit_reason, TIMEOUT_SLIPPAGE_PCT) + ENTRY_SLIPPAGE_PCT
     return {"net_cost_pct": net_cost, "net_slip_pct": net_cost - slip}
+
+
+# §4.2 비용 민감도 격자 — 비용 0.10/0.18/0.25%p, 슬리피지 0.5/1.0/1.5배.
+COST_GRID_PCT = (0.10, 0.18, 0.25)
+SLIP_MULTIPLIERS = (0.5, 1.0, 1.5)
+
+
+def _primary_rank1(results: list[dict]) -> list[dict]:
+    """§4.1 주 표본: 랭크 1, 분봉 완결, 기업 행위 의심 제외. 날짜순."""
+    return sorted(
+        (r for r in results if r.get("rank") == 1 and r.get("bars_complete")
+         and r.get("exit_reason") != "SUSPECT_CORPORATE_ACTION"),
+        key=lambda r: r["date"],
+    )
+
+
+def cost_sensitivity(results: list[dict]) -> dict[str, float]:
+    """주 표본 평균을 비용·슬리피지 격자로 다시 낸다. 기본값(0.18, 1.0)은 주 지표와 같다."""
+    rank1 = [r for r in _primary_rank1(results) if r.get("gross_pct") is not None]
+    if not rank1:
+        return {}
+    grid: dict[str, float] = {}
+    for cost in COST_GRID_PCT:
+        for mult in SLIP_MULTIPLIERS:
+            values = [
+                float(r["gross_pct"]) - cost
+                - (_SLIPPAGE_BY_REASON.get(r["exit_reason"], TIMEOUT_SLIPPAGE_PCT)
+                   + ENTRY_SLIPPAGE_PCT) * mult
+                for r in rank1
+            ]
+            grid[f"cost_{cost:.2f}_slip_{mult:.1f}"] = mean(values)
+    return grid
+
+
+def load_a_pnl(root: Path) -> dict[str, float]:
+    """트랙 A 실거래 손익(%)을 날짜별로. 운영 DB를 읽기 전용으로 연다."""
+    path = root / "data" / "db" / "trading.db"
+    if not path.exists():
+        return {}
+    db = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        rows = db.execute(
+            "select date, pnl_pct from trades where track='A' and pnl_pct is not null"
+        ).fetchall()
+    finally:
+        db.close()
+    return {str(d): float(p) for d, p in rows}
+
+
+def a_correlation(results: list[dict], a_pnl: dict[str, float]) -> dict:
+    """§4.2 A와 같은 날 상관 — C 랭크 1의 청산일(D+1) 손익과 그날 A 손익. 3쌍 미만이면 None."""
+    pairs = [
+        (float(r["net_slip_pct"]), a_pnl[r["next_date"]])
+        for r in _primary_rank1(results) if r.get("next_date") in a_pnl
+    ]
+    if len(pairs) < 3:
+        return {"n": len(pairs), "pearson": None}
+    xs, ys = zip(*pairs)
+    try:
+        pearson: float | None = correlation(xs, ys)
+    except StatisticsError:
+        pearson = None   # 한쪽이 상수면 정의되지 않는다
+    return {"n": len(pairs), "pearson": pearson}
+
+
+def tick_vs_bar(results: list[dict]) -> dict:
+    """§4.2 틱 vs 분봉 재생 차이 — 틱 캡처가 있는 행(= A가 그 종목을 거래한 날)만."""
+    rows = [
+        {"date": r["date"], "next_date": r["next_date"], "ticker": r["ticker"],
+         "rank": r["rank"], "bar_reason": r["exit_reason"],
+         "tick_reason": r["tick"]["exit_reason"], "bar_pct": r["gross_pct"],
+         "tick_pct": r["tick"]["gross_pct"]}
+        for r in results if isinstance(r.get("tick"), dict)
+    ]
+    diffs = [float(x["tick_pct"]) - float(x["bar_pct"]) for x in rows]
+    return {
+        "n": len(rows),
+        "mean_diff_pct": mean(diffs) if diffs else None,
+        "reason_agree": sum(1 for x in rows if x["bar_reason"] == x["tick_reason"]),
+        "rows": rows,
+    }
 
 
 # 스펙 §4.1 — 바꾸지 않는다.
@@ -121,11 +276,7 @@ def summarize(results: list[dict], *, missing: dict) -> dict:
     )
     # SUSPECT_CORPORATE_ACTION(|시가 갭| > 30%)은 급락이 아니라 액면분할·감자 등 기업
     # 행위로 의심되는 값이라 주 표본에서 뺀다 — 정상 갭하락 분포에 섞이면 안 된다.
-    rank1 = sorted(
-        (r for r in results if r.get("rank") == 1 and r.get("bars_complete")
-         and r.get("exit_reason") != "SUSPECT_CORPORATE_ACTION"),
-        key=lambda r: r["date"]
-    )
+    rank1 = _primary_rank1(results)
     values = [float(r["net_slip_pct"]) for r in rank1]
     n = len(values)
     avg = mean(values) if values else None
@@ -182,6 +333,8 @@ def summarize(results: list[dict], *, missing: dict) -> dict:
             "share_positive": (sum(1 for g in gaps if g > 0) / n) if n else None,
         },
         "rank_means": {k: mean(v) for k, v in sorted(by_rank.items())},
+        "cost_sensitivity": cost_sensitivity(results),
+        "tick_vs_bar": tick_vs_bar(results),
         "missing": missing_out,
     }
 
@@ -301,11 +454,18 @@ def run(root: Path) -> tuple[list[dict], dict]:
             if not sim["bars_complete"]:
                 missing["bars_incomplete"] += 1
             costs = apply_costs(sim["gross_pct"], sim["exit_reason"])
-            day_results.append({
+            result = {
                 "date": date, "next_date": next_date, "ticker": str(row["ticker"]),
                 "rank": int(row["rank"]), "entry_price": float(row["close"]),
                 **sim, **costs, "ambiguous": False,
-            })
+            }
+            # §4.2 틱 vs 분봉 — A가 D+1에 같은 종목을 거래해 틱 캡처가 있을 때만.
+            ticks = load_tick_prices(root, next_date, str(row["ticker"]))
+            if ticks:
+                tick_sim = simulate_overnight_ticks(bars, ticks, float(row["close"]))
+                result["tick"] = {k: tick_sim[k] for k in
+                                  ("exit_reason", "exit_time", "exit_price", "gross_pct")}
+            day_results.append(result)
         if day_results:
             results_dir.mkdir(parents=True, exist_ok=True)
             (results_dir / f"{date}.json").write_text(
@@ -328,6 +488,16 @@ def print_report(results: list[dict], summary: dict) -> None:
     print(f"판정 가능 n≥{MIN_N}: {s['pass_conditions']['evaluable']}  조건: {s['pass_conditions']}")
     print(f"조기 중단(n={EARLY_STOP_N}): {s['early_stop']}")
     print(f"청산 사유: {s['reasons']}   갭: {s['gap']}   랭크별 평균: {s['rank_means']}")
+    print("\n[부 지표 — 기록만, 판정에 안 씀 (스펙 §4.2)]")
+    print(f"비용 민감도(랭크1 평균): {s['cost_sensitivity']}")
+    tvb = s["tick_vs_bar"]
+    print(f"틱 vs 분봉: n={tvb['n']}  평균 차이(틱-분봉) {tvb['mean_diff_pct']}  "
+          f"청산 사유 일치 {tvb['reason_agree']}/{tvb['n']}")
+    for x in tvb["rows"]:
+        print(f"  {x['next_date']} {x['ticker']} 랭크{x['rank']}: 분봉 {x['bar_reason']} "
+              f"{x['bar_pct']:+.2f}% / 틱 {x['tick_reason']} {x['tick_pct']:+.2f}%")
+    if "a_correlation" in s:
+        print(f"A와 같은 날 상관: {s['a_correlation']}")
     print(f"결측: {s['missing']}")
 
 
@@ -338,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     results, missing = run(args.root)
     summary = summarize(results, missing=missing)
+    summary["a_correlation"] = a_correlation(results, load_a_pnl(args.root))
     print_report(results, summary)
     if args.json:
         args.json.write_text(json.dumps({"summary": summary, "results": results},
