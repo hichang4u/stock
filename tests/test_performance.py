@@ -1,13 +1,18 @@
 """공통 성과 계산 — docs/superpowers/specs/2026-10-04-performance-report-design.md."""
 
+from datetime import date
+
 import pytest
 
 from scripts.performance import (
     OverlapError,
+    annotate,
     apply_costs,
     compute_metrics,
     ordered,
     period_of,
+    segment_of,
+    summarize,
 )
 
 
@@ -85,3 +90,76 @@ def test_period_counts_calendar_and_trading_days():
     assert period_of(trades) == {"start": "2026-07-01", "end": "2026-07-03",
                                  "days": 3, "trading_days": 2}
     assert period_of([]) is None
+
+
+# ── 구간·연도 요약 ───────────────────────────────────────────────────────
+
+SEGMENTS = [
+    {"name": "S1", "start": "20260701", "end": "20260731", "changed": ["시작"]},
+    {"name": "S2", "start": "20260801", "end": None, "changed": ["A 변경", "B 변경"]},
+]
+
+
+def _raw(tid, day, gross, reason="TRAILING", excluded=None, fp=None):
+    return {"trade_id": tid, "ticker": "000001", "track": "A",
+            "entry_at": f"{day}T09:01:00+09:00", "exit_at": f"{day}T09:30:00+09:00",
+            "gross_pct": gross, "exit_reason": reason, "excluded": excluded,
+            "meta": {"strategy_fingerprint": fp}}
+
+
+def test_segment_of_uses_inclusive_bounds_and_open_end():
+    assert segment_of(date(2026, 7, 31), SEGMENTS) == "S1"
+    assert segment_of(date(2026, 8, 1), SEGMENTS) == "S2"
+    assert segment_of(date(2026, 6, 30), SEGMENTS) is None
+
+
+def test_annotate_adds_costs_segment_and_year_but_no_costs_for_excluded():
+    rows = annotate([_raw("1", "2026-07-02", 2.0),
+                     _raw("2", "2026-07-03", None, reason="MANUAL", excluded="MANUAL")],
+                    SEGMENTS)
+    assert rows[0]["net_conservative_pct"] == pytest.approx(1.67)
+    assert (rows[0]["segment"], rows[0]["year"]) == ("S1", 2026)
+    assert "net_conservative_pct" not in rows[1] and rows[1]["segment"] == "S1"
+
+
+def test_summarize_restarts_equity_per_segment_and_year():
+    rows = annotate([_raw("1", "2026-07-02", 10.0 + 0.18 + 0.15, fp="f1"),   # 보수 +10%
+                     _raw("2", "2026-08-03", -10.0 + 0.18 + 0.15, fp="f2")],  # 보수 -10%
+                    SEGMENTS)
+    s = summarize(rows, SEGMENTS)
+    s1, s2 = s["segments"]
+    assert s1["conservative"]["total_return"] == pytest.approx(0.10)
+    assert s2["conservative"]["total_return"] == pytest.approx(-0.10)
+    assert s2["conservative"]["mdd"] == pytest.approx(-0.10)   # 구간 시작 1.0에서 다시
+    assert s["overall"]["conservative"]["total_return"] == pytest.approx(1.1 * 0.9 - 1)
+    assert s["years"][0]["year"] == 2026 and s["years"][0]["conservative"]["n"] == 2
+    assert s["overall"]["period"]["start"] == "2026-07-02"
+
+
+def test_multiple_fingerprints_or_changes_flag_the_segment():
+    rows = annotate([_raw("1", "2026-07-02", 1.0, fp="f1"),
+                     _raw("2", "2026-07-03", 1.0, fp="f2"),
+                     _raw("3", "2026-08-03", 1.0, fp="f3")], SEGMENTS)
+    s1, s2 = summarize(rows, SEGMENTS)["segments"]
+    assert s1["multiple_changes"] is True and s1["fingerprints"] == ["f1", "f2"]
+    assert s2["multiple_changes"] is True and s2["fingerprints"] == ["f3"]   # changed 2개
+
+
+def test_missing_fingerprints_are_not_counted():
+    one = [{"name": "S1", "start": "20260701", "end": None, "changed": ["x"]}]
+    rows = annotate([_raw("1", "2026-07-02", 1.0), _raw("2", "2026-07-03", 1.0)], one)
+    seg = summarize(rows, one)["segments"][0]
+    assert seg["fingerprints"] == [] and seg["multiple_changes"] is False
+
+
+def test_summarize_counts_exclusions_unknown_reasons_and_warns():
+    rows = annotate([_raw("1", "2026-07-02", 1.0, reason="WEIRD"),
+                     _raw("2", "2026-07-03", None, reason="MANUAL", excluded="MANUAL")],
+                    SEGMENTS)
+    s = summarize(rows, SEGMENTS, holding_overnight=True, extra_warnings=("추가 경고",))
+    assert s["basis"] == "strategy_capital" and s["headline"] == "conservative"
+    assert s["excluded"] == {"MANUAL": 1}
+    assert s["unknown_reasons"] == {"WEIRD": 1}
+    text = " ".join(s["warnings"])
+    assert "1년 미만" in text and "보유 중 평가손" in text and "추가 경고" in text
+    assert "복수 변경" in text   # S2의 changed 2개

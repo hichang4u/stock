@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, datetime
 from statistics import mean, median
 
@@ -95,4 +96,86 @@ def compute_metrics(trades: list[dict], key: str) -> dict:
         "win_rate": sum(1 for v in values if v > 0) / len(values),
         "mean_pct": mean(values),
         "median_pct": median(values),
+    }
+
+
+def segment_of(day: date, segments: list[dict]) -> str | None:
+    key = day.strftime("%Y%m%d")
+    for seg in segments:
+        if seg["start"] <= key and (seg.get("end") is None or key <= seg["end"]):
+            return str(seg["name"])
+    return None
+
+
+def annotate(trades: list[dict], segments: list[dict]) -> list[dict]:
+    """비용 두 벌과 소속(구간·연도)을 붙인 사본. 소속은 청산일 기준이다."""
+    out = []
+    for trade in trades:
+        row = dict(trade)
+        if not row.get("excluded"):
+            row.update(apply_costs(float(row["gross_pct"]), str(row["exit_reason"])))
+        day = _day(row["exit_at"])
+        row["segment"] = segment_of(day, segments)
+        row["year"] = day.year
+        out.append(row)
+    return out
+
+
+def _block(trades: list[dict]) -> dict:
+    return {"period": period_of(trades),
+            "conservative": compute_metrics(trades, "net_conservative_pct"),
+            "cost_only": compute_metrics(trades, "net_cost_pct")}
+
+
+def summarize(
+    trades: list[dict],
+    segments: list[dict],
+    *,
+    holding_overnight: bool = False,
+    extra_warnings: tuple[str, ...] = (),
+) -> dict:
+    """``annotate`` 된 거래 → 전체·구간·연도 요약. 구간과 연도는 자산을 1.0에서 다시 시작한다."""
+    included = [t for t in trades if not t.get("excluded")]
+    warnings: list[str] = ["MDD는 청산 직후 자산으로 쟀다(보유 중 평가손 미포함)."]
+    if holding_overnight:
+        warnings.append("하루 넘게 보유하는 전략 — 보유 중 평가손이 빠져 MDD가 작게 나올 수 있다.")
+
+    seg_out = []
+    for seg in segments:
+        xs = [t for t in included if t.get("segment") == seg["name"]]
+        fps = sorted({
+            str((t.get("meta") or {}).get("strategy_fingerprint"))
+            for t in xs if (t.get("meta") or {}).get("strategy_fingerprint")
+        })
+        changed = list(seg.get("changed") or [])
+        multiple = len(fps) > 1 or len(changed) > 1
+        if multiple:
+            warnings.append(
+                f"구간 '{seg['name']}': 복수 변경 — 성과 변화를 한 조건에 귀속할 수 없다 "
+                f"(지문 {len(fps)}개, 바뀐 조건 {len(changed)}개)."
+            )
+        seg_out.append({"name": seg["name"], "start": seg["start"], "end": seg.get("end"),
+                        "changed": changed, "fingerprints": fps,
+                        "multiple_changes": multiple, **_block(xs)})
+
+    years = sorted({int(t["year"]) for t in included})
+    year_out = [{"year": y, **_block([t for t in included if t["year"] == y])} for y in years]
+
+    overall = _block(included)
+    if overall["conservative"]["cagr_reference_only"]:
+        warnings.append("1년 미만 CAGR은 참고 — 연환산이 크게 흔들린다. 총수익률을 함께 본다.")
+    warnings.extend(extra_warnings)
+
+    return {
+        "basis": "strategy_capital",
+        "headline": "conservative",
+        "overall": overall,
+        "segments": seg_out,
+        "years": year_out,
+        "excluded": dict(Counter(str(t["excluded"]) for t in trades if t.get("excluded"))),
+        "unknown_reasons": dict(Counter(
+            str(t["exit_reason"]) for t in included
+            if t["exit_reason"] not in SLIPPAGE_BY_REASON
+        )),
+        "warnings": warnings,
     }
