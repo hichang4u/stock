@@ -10,8 +10,11 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 from collections import Counter
 from datetime import date, datetime
+from pathlib import Path
 from statistics import mean, median
 
 # 개선 계획 §2 초기 PAPER 비용·체결 가정. 연구 상수이며 요율의 단정이 아니다.
@@ -29,6 +32,8 @@ SLIPPAGE_BY_REASON = {
 
 CAGR_MIN_DAYS = 365        # 이보다 짧으면 CAGR은 참고 표시
 DAYS_PER_YEAR = 365.25
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class OverlapError(ValueError):
@@ -179,3 +184,87 @@ def summarize(
         )),
         "warnings": warnings,
     }
+
+
+def daily_rows(trades: list[dict]) -> list[dict]:
+    """청산이 있었던 날 1줄. 매매 없는 날은 자산이 그대로라 만들지 않는다."""
+    equity, equity_cost, peak = 1.0, 1.0, 1.0
+    rows: dict[str, dict] = {}
+    for trade in ordered(trades):
+        day = _day(trade["exit_at"]).isoformat()
+        row = rows.setdefault(day, {"date": day, "trades": 0, "_start": equity,
+                                    "segment": trade.get("segment")})
+        equity *= 1 + float(trade["net_conservative_pct"]) / 100
+        equity_cost *= 1 + float(trade["net_cost_pct"]) / 100
+        peak = max(peak, equity)
+        row.update(trades=row["trades"] + 1, equity=equity, equity_cost=equity_cost,
+                   peak=peak, drawdown_pct=(equity / peak - 1) * 100)
+    out = []
+    for row in rows.values():
+        row["day_return_pct"] = (row["equity"] / row.pop("_start") - 1) * 100
+        out.append(row)
+    return out
+
+
+def git_info(root: Path = ROOT) -> dict:
+    def _git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                                  text=True, timeout=10, check=True)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip()
+
+    commit = _git("rev-parse", "HEAD")
+    status = _git("status", "--porcelain")
+    return {"git_commit": commit, "git_dirty": None if status is None else bool(status)}
+
+
+def _write_json(path: Path, obj: object) -> None:
+    path.write_bytes((json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    path.write_bytes(body.encode("utf-8"))
+
+
+def write_run(
+    out_root: Path,
+    name: str,
+    trades: list[dict],
+    segments: list[dict],
+    *,
+    now: datetime,
+    manifest_extra: dict | None = None,
+    extra_summary: dict | None = None,
+    holding_overnight: bool = False,
+    extra_warnings: tuple[str, ...] = (),
+) -> tuple[Path, dict]:
+    """표준 거래 → ``out_root/name/<YYYYMMDD_HHMMSS>/`` 네 파일. 기존 실행은 덮어쓰지 않는다."""
+    rows = annotate(trades, segments)
+    equity, after = 1.0, {}
+    for trade in ordered(rows):
+        equity *= 1 + float(trade["net_conservative_pct"]) / 100
+        after[trade["trade_id"]] = equity
+    for row in rows:
+        row["equity_after"] = after.get(row["trade_id"])
+
+    summary = summarize(rows, segments, holding_overnight=holding_overnight,
+                        extra_warnings=extra_warnings)
+    summary.update(extra_summary or {})
+
+    run_id = now.strftime("%Y%m%d_%H%M%S")
+    run_dir = out_root / name / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    _write_jsonl(run_dir / "trades.jsonl", rows)
+    _write_jsonl(run_dir / "daily.jsonl", daily_rows(rows))
+    _write_json(run_dir / "summary.json", summary)
+    _write_json(run_dir / "manifest.json", {
+        "adapter": name, "run_id": run_id, "created_at": now.isoformat(), **git_info(),
+        "costs": {"BASE_ROUND_TRIP_COST_PCT": BASE_ROUND_TRIP_COST_PCT,
+                  "SLIPPAGE_BY_REASON": SLIPPAGE_BY_REASON,
+                  "UNKNOWN_REASON_SLIPPAGE_PCT": TIMEOUT_SLIPPAGE_PCT},
+        "segments": segments, **(manifest_extra or {}),
+    })
+    return run_dir, summary

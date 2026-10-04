@@ -1,6 +1,8 @@
 """공통 성과 계산 — docs/superpowers/specs/2026-10-04-performance-report-design.md."""
 
-from datetime import date
+import json
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -9,10 +11,12 @@ from scripts.performance import (
     annotate,
     apply_costs,
     compute_metrics,
+    daily_rows,
     ordered,
     period_of,
     segment_of,
     summarize,
+    write_run,
 )
 
 
@@ -163,3 +167,54 @@ def test_summarize_counts_exclusions_unknown_reasons_and_warns():
     text = " ".join(s["warnings"])
     assert "1년 미만" in text and "보유 중 평가손" in text and "추가 경고" in text
     assert "복수 변경" in text   # S2의 changed 2개
+
+
+# ── 네 파일 쓰기 ─────────────────────────────────────────────────────────
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def test_daily_rows_compound_both_cost_bases_and_track_drawdown():
+    rows = annotate([_raw("1", "2026-07-02", 10.0 + 0.18 + 0.15),     # 보수 +10%
+                     _raw("2", "2026-07-03", -10.0 + 0.18 + 0.15)],    # 보수 -10%
+                    SEGMENTS)
+    d1, d2 = daily_rows(rows)
+    assert d1["date"] == "2026-07-02" and d1["trades"] == 1
+    assert d1["equity"] == pytest.approx(1.10) and d1["day_return_pct"] == pytest.approx(10.0)
+    assert d2["equity"] == pytest.approx(0.99) and d2["peak"] == pytest.approx(1.10)
+    assert d2["drawdown_pct"] == pytest.approx(-10.0)
+    assert d2["equity_cost"] == pytest.approx((1 + 0.1015) * (1 - 0.0985))
+
+
+def test_write_run_writes_four_lf_files_with_equity_after_and_manifest(tmp_path):
+    trades = [_raw("1", "2026-07-02", 2.0, fp="f1"),
+              _raw("2", "2026-07-03", None, reason="MANUAL", excluded="MANUAL")]
+    now = datetime(2026, 10, 5, 16, 0, 0, tzinfo=KST)
+    run_dir, summary = write_run(
+        tmp_path, "track_a", trades, SEGMENTS, now=now,
+        manifest_extra={"source": {"rows_read": 2}},
+        extra_summary={"account_reference": {"total_pnl_krw": 1.0}},
+    )
+    assert run_dir == tmp_path / "track_a" / "20261005_160000"
+    for name in ("trades.jsonl", "daily.jsonl", "summary.json", "manifest.json"):
+        data = (run_dir / name).read_bytes()
+        assert b"\r\n" not in data and data.endswith(b"\n")
+    lines = [json.loads(x) for x in (run_dir / "trades.jsonl").read_text("utf-8").splitlines()]
+    assert lines[0]["equity_after"] == pytest.approx(1.0167)
+    assert lines[1]["equity_after"] is None and lines[1]["excluded"] == "MANUAL"
+    saved = json.loads((run_dir / "summary.json").read_text("utf-8"))
+    assert saved["account_reference"] == {"total_pnl_krw": 1.0}
+    assert summary["overall"]["conservative"]["n"] == 1
+    manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["adapter"] == "track_a" and manifest["run_id"] == "20261005_160000"
+    assert manifest["segments"] == SEGMENTS and manifest["source"] == {"rows_read": 2}
+    assert manifest["costs"]["BASE_ROUND_TRIP_COST_PCT"] == 0.18
+    assert "git_commit" in manifest and "git_dirty" in manifest
+
+
+def test_write_run_with_only_excluded_trades_still_writes_files(tmp_path):
+    trades = [_raw("1", "2026-07-02", None, reason="MANUAL", excluded="MANUAL")]
+    now = datetime(2026, 10, 5, 16, 0, 1, tzinfo=KST)
+    run_dir, summary = write_run(tmp_path, "track_a", trades, SEGMENTS, now=now)
+    assert summary["overall"]["conservative"]["n"] == 0
+    assert (run_dir / "daily.jsonl").read_bytes() == b""
