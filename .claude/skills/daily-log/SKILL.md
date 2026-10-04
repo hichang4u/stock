@@ -152,6 +152,18 @@ keepalive 단절 없음.
 누계거래량에는 KIS 쪽 바탕 잡음이 있다. 같은 프레임 안에서도 불연속이 난다(§7.5). 그러므로
 공백 경계의 불연속은 같은 날 "같은 프레임 안" 불연속 빈도와 비교해서만 판단한다.
 
+## 5.5 누적 성과 (CAGR·MDD)
+
+```bash
+cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts/performance_report.py --track A --root D:/Private/stock-prod
+```
+
+보고 맨 끝에 전체 기간과 현재 구간("파서 수정 후")의 CAGR·MDD를 한 줄씩 붙인다. 대표값은
+전략 자본 기준 보수 손익이다. 1년 미만 CAGR에는 "(참고)"가 붙는다 — 총수익률을 함께 적는다.
+`※ 복수 변경`이 붙은 구간은 성과 변화를 한 조건에 귀속하지 않는다. 결과 폴더
+`data/performance/track_a/<실행ID>/`에 네 파일이 남는다(설계:
+`docs/superpowers/specs/2026-10-04-performance-report-design.md`).
+
 ## 6. 보고할 때
 
 - 손익은 금액과 %를 함께 쓴다(`trades.pnl_pct`, `pnl_amount`).

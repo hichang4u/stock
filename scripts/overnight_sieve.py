@@ -30,6 +30,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.overnight_calendar import load_calendar, next_trading_date  # noqa: E402
+from scripts.performance import (  # noqa: E402, F401 — 비용 상수 재수출
+    BASE_ROUND_TRIP_COST_PCT,
+    HARD_STOP_SLIPPAGE_PCT,
+    SLIPPAGE_BY_REASON,
+    TIMEOUT_SLIPPAGE_PCT,
+    TRAILING_SLIPPAGE_PCT,
+)
 from scripts.strategy_backtest import read_cached_bars  # noqa: E402
 from scripts.track_b_backtest import bootstrap_ci  # noqa: E402
 from scripts.track_b_rules import HARD_STOP, simulate_exit  # noqa: E402
@@ -38,20 +45,10 @@ from src import warmup  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
 
-# 개선 계획 §2 초기 PAPER 비용·체결 가정. 연구 상수이며 요율의 단정이 아니다.
-BASE_ROUND_TRIP_COST_PCT = 0.18
-HARD_STOP_SLIPPAGE_PCT = 0.30
-TRAILING_SLIPPAGE_PCT = 0.15
-TIMEOUT_SLIPPAGE_PCT = 0.20
+# 비용 상수는 scripts/performance.py 한 곳에 둔다(개선 계획 §2). 테스트가 이 모듈에서
+# HARD_STOP_SLIPPAGE_PCT·TRAILING_SLIPPAGE_PCT를 가져가므로 위 import에 F401 noqa를 단다.
 ENTRY_SLIPPAGE_PCT = 0.0  # 마감 동시호가 단일가 체결 가정 (스펙 §3.2)
-
-_SLIPPAGE_BY_REASON = {
-    "GAP_HARD_STOP": HARD_STOP_SLIPPAGE_PCT,
-    "HARD_STOP": HARD_STOP_SLIPPAGE_PCT,
-    "TRAILING": TRAILING_SLIPPAGE_PCT,
-    "TIMEOUT": TIMEOUT_SLIPPAGE_PCT,
-    "DATA_END": TIMEOUT_SLIPPAGE_PCT,
-}
+_SLIPPAGE_BY_REASON = SLIPPAGE_BY_REASON
 
 
 # ±30%를 넘는 갭은 기준가 변경(액면분할·감자 등) 없이는 불가능하다 — 정정(2026-09-21,
