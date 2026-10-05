@@ -218,3 +218,26 @@ def test_write_run_with_only_excluded_trades_still_writes_files(tmp_path):
     run_dir, summary = write_run(tmp_path, "track_a", trades, SEGMENTS, now=now)
     assert summary["overall"]["conservative"]["n"] == 0
     assert (run_dir / "daily.jsonl").read_bytes() == b""
+
+
+# ── 30일 미만은 CAGR을 내지 않는다 (2026-10-05) ─────────────────────────
+
+def test_cagr_is_suppressed_under_thirty_days():
+    trades = [_t("1", "2026-10-02", "2026-10-02", 2.58)]
+    m = compute_metrics(trades, "net_conservative_pct")
+    assert m["cagr"] is None and m["cagr_suppressed"] is True
+    assert m["total_return"] == pytest.approx(0.0258)
+
+
+def test_cagr_at_thirty_days_is_computed():
+    trades = [_t("1", "2026-07-01", "2026-07-01", 1.0),
+              _t("2", "2026-07-30", "2026-07-30", 1.0)]
+    m = compute_metrics(trades, "net_conservative_pct")
+    assert m["cagr"] is not None and m["cagr_suppressed"] is False
+
+
+def test_summarize_warns_once_when_any_block_is_suppressed():
+    rows = annotate([_raw("1", "2026-07-02", 1.0), _raw("2", "2026-08-03", 1.0)], SEGMENTS)
+    s = summarize(rows, SEGMENTS)
+    assert s["segments"][0]["conservative"]["cagr_suppressed"] is True
+    assert sum("30일 미만" in w for w in s["warnings"]) == 1

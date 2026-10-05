@@ -160,6 +160,7 @@ cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts
 
 보고 맨 끝에 전체 기간과 현재 구간("파서 수정 후")의 CAGR·MDD를 한 줄씩 붙인다. 대표값은
 전략 자본 기준 보수 손익이다. 1년 미만 CAGR에는 "(참고)"가 붙는다 — 총수익률을 함께 적는다.
+기간 30일 미만인 구간은 CAGR이 "— (30일 미만)"으로 나온다. 그 구간은 총수익률만 적는다.
 `※ 복수 변경`이 붙은 구간은 성과 변화를 한 조건에 귀속하지 않는다. 결과 폴더
 `data/performance/track_a/<실행ID>/`에 네 파일이 남는다(설계:
 `docs/superpowers/specs/2026-10-04-performance-report-design.md`).

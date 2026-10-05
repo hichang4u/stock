@@ -91,6 +91,9 @@
 - **일수 < 365면 `cagr_reference_only: true`**, `warnings`에 "1년 미만 CAGR은 참고". 총수익률
   (`최종자산 − 1`)을 항상 함께 낸다.
 - 거래가 0건이면 CAGR·MDD는 None.
+- **기간이 30일 미만이면 CAGR을 내지 않는다**(`cagr: None`, `cagr_suppressed: true`, 화면에는
+  "— (30일 미만)"). 연환산이 무의미하게 커지기 때문이다(예: 1건·1일 구간에서 +1,098,018%).
+  총수익률은 그대로 낸다. 2026-10-05 추가.
 
 ### 5.5 보조 지표
 
@@ -128,7 +131,7 @@
      "excluded": {"MANUAL": 1}, "unknown_reasons": {}, "warnings": [...]
    }
    ```
-   `{...}` 지표 묶음 = `n`, `cagr`, `cagr_reference_only`, `total_return`, `mdd`, `win_rate`,
+   `{...}` 지표 묶음 = `n`, `cagr`, `cagr_reference_only`, `cagr_suppressed`, `total_return`, `mdd`, `win_rate`,
    `mean_pct`, `median_pct`. `period` = `start`, `end`, `days`, `trading_days`.
 4. **`manifest.json`** — `adapter`, `run_id`, `created_at`, `git_commit`, `git_dirty`, 비용 상수,
    구간 정의 전체, 입력 출처(`db_path`, `rows_read`, `rows_used`, 기간), 계좌 규모 상수.

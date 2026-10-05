@@ -31,6 +31,7 @@ SLIPPAGE_BY_REASON = {
 }
 
 CAGR_MIN_DAYS = 365        # 이보다 짧으면 CAGR은 참고 표시
+CAGR_DISPLAY_MIN_DAYS = 30  # 이보다 짧으면 CAGR을 내지 않는다(연환산이 무의미) — 2026-10-05
 DAYS_PER_YEAR = 365.25
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,8 +82,9 @@ def compute_metrics(trades: list[dict], key: str) -> dict:
     """복리 자산곡선 위의 CAGR·MDD와 보조 지표. ``key``는 손익 필드(퍼센트)."""
     xs = ordered(trades)
     if not xs:
-        return {"n": 0, "cagr": None, "cagr_reference_only": None, "total_return": None,
-                "mdd": None, "win_rate": None, "mean_pct": None, "median_pct": None}
+        return {"n": 0, "cagr": None, "cagr_reference_only": None, "cagr_suppressed": None,
+                "total_return": None, "mdd": None, "win_rate": None, "mean_pct": None,
+                "median_pct": None}
     values = [float(t[key]) for t in xs]
     equity, peak, mdd = 1.0, 1.0, 0.0
     for v in values:
@@ -92,10 +94,12 @@ def compute_metrics(trades: list[dict], key: str) -> dict:
     period = period_of(xs)
     assert period is not None
     days = period["days"]
+    suppressed = days < CAGR_DISPLAY_MIN_DAYS
     return {
         "n": len(values),
-        "cagr": equity ** (DAYS_PER_YEAR / days) - 1,
+        "cagr": None if suppressed else equity ** (DAYS_PER_YEAR / days) - 1,
         "cagr_reference_only": days < CAGR_MIN_DAYS,
+        "cagr_suppressed": suppressed,
         "total_return": equity - 1,
         "mdd": mdd,
         "win_rate": sum(1 for v in values if v > 0) / len(values),
@@ -169,6 +173,10 @@ def summarize(
     overall = _block(included)
     if overall["conservative"]["cagr_reference_only"]:
         warnings.append("1년 미만 CAGR은 참고 — 연환산이 크게 흔들린다. 총수익률을 함께 본다.")
+    if any(b["conservative"]["cagr_suppressed"] for b in [overall, *seg_out, *year_out]):
+        warnings.append(
+            f"기간 {CAGR_DISPLAY_MIN_DAYS}일 미만인 구간·연도는 CAGR을 내지 않는다(총수익률만)."
+        )
     warnings.extend(extra_warnings)
 
     return {

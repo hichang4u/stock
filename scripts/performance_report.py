@@ -100,7 +100,12 @@ def _pct(value: float | None) -> str:
 
 def _line(label: str, block: dict) -> str:
     m = block["conservative"]
-    ref = " (참고)" if m["cagr_reference_only"] else ""
+    if m["cagr_suppressed"]:
+        ref = " (30일 미만)"
+    elif m["cagr_reference_only"]:
+        ref = " (참고)"
+    else:
+        ref = ""
     win = "—" if m["win_rate"] is None else f"{m['win_rate'] * 100:.0f}%"
     return (f"{label:<14} n={m['n']:>3}  CAGR {_pct(m['cagr'])}{ref}  MDD {_pct(m['mdd'])}  "
             f"총수익 {_pct(m['total_return'])}  승률 {win}")

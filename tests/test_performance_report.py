@@ -112,3 +112,10 @@ def test_main_survives_a_cp949_console(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "stdout", console)
     assert main(["--track", "A", "--root", str(tmp_path),
                  "--out-dir", str(tmp_path / "out")]) == 0
+
+
+def test_report_prints_a_dash_for_a_suppressed_cagr(tmp_path, capsys):
+    _db(tmp_path, [_row(1, "20261002", 2.0)])
+    main(["--track", "A", "--root", str(tmp_path), "--out-dir", str(tmp_path / "out")])
+    printed = capsys.readouterr().out
+    assert "CAGR — (30일 미만)" in printed
