@@ -10,6 +10,10 @@ import pytest
 # 바꾸지 않도록, 어떤 테스트 모듈보다 먼저 dotenv 로드를 비활성화한다.
 os.environ["STOCK_SKIP_DOTENV"] = "1"
 
+# 체결통보는 기본으로 끈다. 기존 진입·F4 테스트가 주문을 장부에 등록하거나 가짜 소켓에 통보 구독을
+# 보내 동작이 달라지지 않게 한다. 체결통보 테스트는 각자 monkeypatch로 켠다.
+os.environ.setdefault("F3_FILL_NOTICE_ENABLED", "0")
+
 # 테스트 중 stock 로거 stdout/파일 출력 억제
 _stock_log = logging.getLogger("stock")
 _stock_log.handlers = []

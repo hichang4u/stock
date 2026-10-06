@@ -23,3 +23,6 @@ uvicorn[standard]==0.32.1
 # 테스트
 pytest==8.3.4
 pytest-asyncio==0.24.0
+
+# 실시간 체결통보 복호화 (AES256-CBC, KIS 공식 예제와 같은 라이브러리)
+pycryptodome==3.24.0

@@ -87,7 +87,7 @@ async def run(seconds: int) -> int:
         print("KIS_HTS_ID 없음")
         return 2
     tr_id = "H0STCNI0" if os.getenv("KIS_MODE", "PAPER") == "REAL" else "H0STCNI9"
-    report = {n: {"closed": None, "pingpong": 0, "frames": 0, "responses": []}
+    report: dict[str, dict] = {n: {"closed": None, "pingpong": 0, "frames": 0, "responses": []}
               for n in ("quote", "notice")}
 
     key1 = await approval_key()
