@@ -10,6 +10,7 @@ AES256-CBC 복호화한다. 체결(CNTG_YN=2) 통보만 주문별 장부에 쌓�
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from base64 import b64decode
@@ -19,6 +20,8 @@ from zoneinfo import ZoneInfo
 
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
+
+from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
 NOTICE_TR = {"PAPER": "H0STCNI9", "REAL": "H0STCNI0"}
@@ -180,5 +183,92 @@ def latency_ms(order_id: str) -> int | None:
     return _book.latency_ms(order_id)
 
 
+_state: dict = {"healthy": False, "key": None, "iv": None, "disabled_day": None}
+
+
 def reset() -> None:
+    """장부와 구독 상태를 비운다(테스트·재시작용)."""
     _book.reset()
+    _state.update(healthy=False, key=None, iv=None, disabled_day=None)
+
+
+def healthy() -> bool:
+    return bool(_state["healthy"])
+
+
+def tr_id() -> str:
+    return NOTICE_TR["REAL"] if os.getenv("KIS_MODE", "PAPER") == "REAL" else NOTICE_TR["PAPER"]
+
+
+def should_subscribe() -> bool:
+    """설정돼 있고 오늘 구독이 거절된 적이 없으면 True."""
+    return enabled() and _state["disabled_day"] != datetime.now(KST).date()
+
+
+def subscribe_request(approval_key: str) -> str:
+    return json.dumps({
+        "header": {"approval_key": approval_key, "custtype": "P", "tr_type": "1",
+                   "content-type": "utf-8"},
+        "body": {"input": {"tr_id": tr_id(), "tr_key": os.getenv("KIS_HTS_ID", "").strip()}},
+    }, ensure_ascii=False)
+
+
+def connection_lost() -> None:
+    """세션이 끊기면 key/iv를 버린다. 다음 구독 응답이 새로 준다."""
+    _state.update(healthy=False, key=None, iv=None)
+
+
+def handle_message(raw: str) -> str | None:
+    """세션 수신 메시지 하나. 반환: "PONG"(PINGPONG) / "DISABLE"(구독 거절) / None.
+
+    체결통보 구독 응답에서 key/iv를 저장하고, 체결통보 프레임은 복호화해 장부에 쌓는다.
+    시세(H0STCNT0)와 그 밖의 메시지는 건드리지 않는다.
+    """
+    if raw.startswith("{"):
+        msg = json.loads(raw)
+        header, body = msg.get("header") or {}, msg.get("body") or {}
+        tr = header.get("tr_id")
+        if tr == "PINGPONG":
+            return "PONG"
+        if tr not in NOTICE_TR.values() or not body:
+            return None
+        out = body.get("output") or {}
+        if str(body.get("rt_cd")) == "0":
+            if out.get("key") and out.get("iv"):
+                _state["key"], _state["iv"] = out["key"], out["iv"]
+            _state["healthy"] = True
+            log("FILL_NOTICE_SUBSCRIBED", level="INFO", tr_id=tr, msg1=body.get("msg1"),
+                has_key=bool(out.get("key")))
+            return None
+        _state["healthy"] = False
+        _state["disabled_day"] = datetime.now(KST).date()
+        log("FILL_NOTICE_DISABLED", level="WARN", reason="SUBSCRIBE_REJECTED",
+            msg_cd=body.get("msg_cd"), msg1=body.get("msg1"))
+        return "DISABLE"
+
+    parts = raw.split("|")
+    if len(parts) < 4 or parts[1] not in NOTICE_TR.values():
+        return None
+    data = parts[3]
+    if parts[0] == "1":
+        if not (_state["key"] and _state["iv"]):
+            log("FILL_NOTICE_UNDECRYPTABLE", level="WARN", reason="NO_KEY")
+            return None
+        try:
+            data = decrypt(str(_state["key"]), str(_state["iv"]), data)
+        except Exception as exc:  # noqa: BLE001 — 깨진 프레임 하나가 세션을 끊으면 안 된다
+            log("FILL_NOTICE_UNDECRYPTABLE", level="WARN", reason="DECRYPT", error=repr(exc))
+            return None
+    try:
+        count: int | None = int(parts[2])
+    except ValueError:
+        count = None
+    for fields in split_records(data, count):
+        notice = parse(fields)
+        if notice is None:
+            continue
+        record(notice)
+        log("FILL_NOTICE_RECEIVED", level="INFO", ticker=notice.ticker,
+            order_id=notice.order_id, qty=notice.qty, price=notice.price,
+            exchange_time=notice.hms, side=notice.side)
+    return None

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import websockets
 
-from src.api import auth
+from src.api import auth, kis_notice
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -65,6 +65,10 @@ async def subscribe(
                 ws_key_ready = True
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
                 await _send_subscribe(ws, ticker)
+                # 체결통보를 같은 세션·같은 접속키로 얹는다 — 앱키당 WS 세션은 하나뿐이다
+                # (OPSP8996, docs/superpowers/specs/2026-10-06-fill-notice-design.md 10절).
+                if kis_notice.should_subscribe():
+                    await ws.send(kis_notice.subscribe_request(auth.get_ws_key()))
                 connected = True
                 if on_connection_change is not None:
                     on_connection_change(True)
@@ -82,6 +86,7 @@ async def subscribe(
                     # 한 프레임에 체결이 여러 건 올 수 있다. 전부 전달한다 —
                     # 프레임이 묶이는 건 체결 폭주 구간이고, 그 구간이 바로
                     # 트레일링·하드스탑 판정이 가장 민감한 구간이다.
+                    _route_notice(raw)
                     for tick in _parse_ticks(raw):
                         await on_tick(tick)
 
@@ -98,8 +103,18 @@ async def subscribe(
             await asyncio.sleep(interval)
             interval = min(interval * 2, _RETRY_INTERVAL_MAX)
         finally:
+            kis_notice.connection_lost()
             if connected and on_connection_change is not None:
                 on_connection_change(False)
+
+
+def _route_notice(raw: str | bytes) -> None:
+    """체결통보 구독 응답·프레임을 kis_notice로 넘긴다. 실패가 시세 수신을 끊으면 안 된다."""
+    try:
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        kis_notice.handle_message(text)
+    except Exception as exc:  # noqa: BLE001
+        log("FILL_NOTICE_ERROR", level="WARN", error=repr(exc))
 
 
 async def _send_subscribe(ws: websockets.WebSocketClientProtocol, ticker: str) -> None:
@@ -224,6 +239,8 @@ def _parse_ticks(raw: str) -> list[dict]:
         parts = raw.split("|")
         if len(parts) < 4:
             return []
+        if parts[1] != "H0STCNT0":
+            return []  # 체결통보 등 다른 TR 프레임은 시세가 아니다
         count = _header_count(parts[2])
         records, how = _split_frame(parts[3], count)
         if how == "UNSPLIT":

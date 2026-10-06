@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import json
 from base64 import b64encode
 
 import pytest
@@ -115,3 +116,66 @@ async def test_event_can_be_awaited():
     asyncio.get_running_loop().call_soon(
         kis_notice.record, Notice("1226", "348340", 10, 1.0, "090008", "02"))
     await asyncio.wait_for(event.wait(), timeout=1)
+
+
+def _ack(tr_id="H0STCNI9", rt_cd="0"):
+    out = {"key": KEY, "iv": IV} if rt_cd == "0" else {}
+    return json.dumps({"header": {"tr_id": tr_id, "tr_key": "x", "encrypt": "Y"},
+                       "body": {"rt_cd": rt_cd, "msg_cd": "OPSP0000",
+                                "msg1": "SUBSCRIBE SUCCESS", "output": out}})
+
+
+def test_handle_message_subscribes_then_books_an_encrypted_fill(monkeypatch):
+    logs = []
+    monkeypatch.setattr(kis_notice, "log", lambda e, **k: logs.append(e))
+    assert kis_notice.handle_message(_ack()) is None
+    assert kis_notice.healthy() is True
+    kis_notice.expect("0000001226", 295)
+    assert kis_notice.handle_message("1|H0STCNI9|001|" + _encrypt("^".join(_fields()))) is None
+    assert kis_notice.fill("1226")["fill_qty"] == 295
+    assert "FILL_NOTICE_SUBSCRIBED" in logs and "FILL_NOTICE_RECEIVED" in logs
+
+
+def test_rejected_subscription_disables_for_the_day(monkeypatch):
+    monkeypatch.setenv("KIS_HTS_ID", "hts-user")
+    monkeypatch.setenv("F3_FILL_NOTICE_ENABLED", "1")
+    monkeypatch.setattr(kis_notice, "log", lambda e, **k: None)
+    assert kis_notice.should_subscribe() is True
+    assert kis_notice.handle_message(_ack(rt_cd="1")) == "DISABLE"
+    assert kis_notice.healthy() is False and kis_notice.should_subscribe() is False
+
+
+def test_quote_traffic_and_pingpong_are_not_notices(monkeypatch):
+    monkeypatch.setattr(kis_notice, "log", lambda e, **k: None)
+    assert kis_notice.handle_message(json.dumps({"header": {"tr_id": "PINGPONG"}})) == "PONG"
+    assert kis_notice.handle_message(_ack(tr_id="H0STCNT0")) is None
+    assert kis_notice.healthy() is False
+    assert kis_notice.handle_message("0|H0STCNT0|001|005930^091015^10300") is None
+
+
+def test_encrypted_frame_without_a_key_is_not_booked(monkeypatch):
+    logs = []
+    monkeypatch.setattr(kis_notice, "log", lambda e, **k: logs.append(e))
+    kis_notice.expect("1226", 295)
+    kis_notice.handle_message("1|H0STCNI9|001|" + _encrypt("^".join(_fields())))
+    assert kis_notice.fill("1226") is None and "FILL_NOTICE_UNDECRYPTABLE" in logs
+
+
+def test_connection_lost_forgets_the_key(monkeypatch):
+    monkeypatch.setattr(kis_notice, "log", lambda e, **k: None)
+    kis_notice.handle_message(_ack())
+    kis_notice.connection_lost()
+    assert kis_notice.healthy() is False
+    kis_notice.expect("1226", 295)
+    kis_notice.handle_message("1|H0STCNI9|001|" + _encrypt("^".join(_fields())))
+    assert kis_notice.fill("1226") is None
+
+
+def test_subscribe_request_uses_hts_id_and_mode(monkeypatch):
+    monkeypatch.setenv("KIS_HTS_ID", "hts-user")
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    body = json.loads(kis_notice.subscribe_request("quote-key"))
+    assert body["header"]["approval_key"] == "quote-key"
+    assert body["body"]["input"] == {"tr_id": "H0STCNI9", "tr_key": "hts-user"}
+    monkeypatch.setenv("KIS_MODE", "REAL")
+    assert kis_notice.tr_id() == "H0STCNI0"
