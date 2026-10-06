@@ -27,6 +27,7 @@ _STRATEGY_FILES = (
     "src/db.py",
     "src/api/kis_rest.py",
     "src/api/kis_ws.py",
+    "src/api/kis_notice.py",
     "src/modules/f1_filter.py",
     "src/modules/f1_selector.py",
     "src/modules/f2_lockup.py",

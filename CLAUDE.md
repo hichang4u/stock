@@ -24,7 +24,7 @@
 
 ## 전략 지문 = 실계좌 20건 카운터
 
-`src/release.py`의 `_STRATEGY_FILES`(19개 파일)나 `_STRATEGY_ENV_PREFIXES`
+`src/release.py`의 `_STRATEGY_FILES`(20개 파일)나 `_STRATEGY_ENV_PREFIXES`
 (`F1_`~`F5_`, `PAPER_FAST_`, `TRAILING_SHADOW_`, `STRATEGY_TICK_`, `VI_`,
 `BALANCE_SNAPSHOT_`, `EXIT_RECONCILE_`, `KIS_RATE_`, `KIS_*TRANSIENT_`,
 `KIS_LOW_PRIORITY_`) 환경변수를 건드리면 **지문이 바뀌고 20건 카운터가 0이 된다.**

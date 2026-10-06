@@ -26,7 +26,9 @@ import websockets
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / ".env")
+# 테스트 수집 중에는 .env를 읽지 않는다(conftest가 STOCK_SKIP_DOTENV=1).
+if os.getenv("STOCK_SKIP_DOTENV", "0") != "1":
+    load_dotenv(ROOT / ".env")
 KST = ZoneInfo("Asia/Seoul")
 WS_URL = os.getenv("KIS_WS_URL", "ws://ops.koreainvestment.com:31000")
 

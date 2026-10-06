@@ -103,6 +103,26 @@ cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts
 남는다. 같은 원인이면 처음과 1,000번째마다만 찍히고 `occurrences`에 누계가 있다. 4절의 WS
 검색에 함께 걸린다.
 
+### 4.2 체결통보 (2026-10 이후)
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import json
+for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
+    d=json.loads(l); e=d.get('event','')
+    if e.startswith('FILL_NOTICE') or e in ('ENTRY_ORDER_SENT','ENTRY_FILL_CONFIRMED_BY_NOTICE','ENTRY_EXECUTED'):
+        x={k:v for k,v in d.items() if k in ('order_id','stage','notice_latency_ms','qty','price','exchange_time','reason','msg1','error')}
+        print(d['ts'][11:23], e, x)
+"
+```
+
+- `FILL_NOTICE_SUBSCRIBED`가 F4 시세 세션이 열릴 때마다(재연결 포함) 있어야 한다. `FILL_NOTICE_DISABLED`면
+  사유(`msg_cd`·`msg1`)를 보고 맨 앞에 쓴다.
+- 진입마다 `ENTRY_ORDER_SENT` → `FILL_NOTICE_RECEIVED` → (`ENTRY_FILL_CONFIRMED_BY_NOTICE` 또는 조회 확인) 순서를
+  본다. 통보 없이 조회로만 확인된 진입은 "통보 누락"으로 센다.
+- `notice_latency_ms`(주문 등록 → 첫 체결 통보)와 조회 확인 시각을 비교한다.
+- 설계: `docs/superpowers/specs/2026-10-06-fill-notice-design.md`(B안 — F4 시세 세션에 얹음).
+
 ## 5. 청산이 있었으면 — F4 틱 공백 재측정
 
 `docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md` §5의 통과 조건을 다시 잰다.
