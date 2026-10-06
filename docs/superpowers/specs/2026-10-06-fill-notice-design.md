@@ -108,7 +108,7 @@
   `H0STCNI9`(HTS ID)를 차례로 구독하자 둘 다 `rt_cd=0`, `OPSP0000 "SUBSCRIBE SUCCESS"`, key/iv 수신. 40초 유지.
   `KIS_HTS_ID`로 구독이 받아들여졌다. 다만 실제 체결 통보가 와야 끝까지 확인된다(장 마감 후라 체결 없음).
 - 첫 실패의 모양(새 연결 직후 이유 없는 `ConnectionClosedError(None, None, None)`)은 빠른 경로 날마다 09:00:01에
-  보이는 WS 단절과 같다. 같은 원인일 가능성이 크다 — `OPENING_WINDOW_FOLLOWUP_20261006.md` §1.5에 기록.
+  보이는 WS 단절과 같다. 같은 원인일 가능성이 크다 — `OPENING_WINDOW_FOLLOWUP_20261006.md` §1.4에 기록.
 - 다음: 공용 세션 위에서 구독하는 방식으로 2절·4절·5절을 다시 설계한다(사용자 결정 대기).
 
 ## 11. 테스트 (TDD)
