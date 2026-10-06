@@ -10,11 +10,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import ROUND_FLOOR, Decimal
-from typing import Literal
+from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
 from src import db, notifier, state
-from src.api import kis_rest
+from src.api import kis_notice, kis_rest
 from src.modules import f1_selector, paper_fast_probe, tick_capture, vi_watch
 from src.utils.logger import log
 from src.utils.number import to_float
@@ -195,6 +195,22 @@ F3_FILL_POLL_INTERVAL_SEC = max(
     0.05,
     _env_float("F3_FILL_POLL_INTERVAL_SEC", 1.0),
 )
+# 진입 체결을 실시간 체결통보로도 확인한다(docs/superpowers/specs/2026-10-06-fill-notice-design.md).
+# 끄면 기존 조회만 쓴다. F3_ 접두어라 지문에 잡힌다.
+F3_FILL_NOTICE_ENABLED = os.getenv("F3_FILL_NOTICE_ENABLED", "1") == "1"
+_NOTICE_WON = object()
+
+
+def _notice_fill(order_id: str) -> dict | None:
+    return kis_notice.fill(order_id) if F3_FILL_NOTICE_ENABLED else None
+
+
+def _log_notice_confirmed(order_id: str, ticker: str | None, stage: str, fill: dict) -> None:
+    log("ENTRY_FILL_CONFIRMED_BY_NOTICE", level="INFO", ticker=ticker, order_id=order_id,
+        stage=stage, fill_qty=fill.get("fill_qty"), fill_price=fill.get("fill_price"),
+        notice_latency_ms=kis_notice.latency_ms(order_id))
+
+
 F3_RECHECK_MAX_ATTEMPTS = max(1, int(os.getenv("F3_RECHECK_MAX_ATTEMPTS", "3")))
 F3_RECHECK_RETRY_DELAY_SEC = max(0.0, _env_float("F3_RECHECK_RETRY_DELAY_SEC", 0.5))
 # Hard wall-clock cap on the whole opening-transition recheck (all gets + sleeps).
@@ -2655,6 +2671,10 @@ async def _cancel_entry_order_confirmed(
     아니면 취소를 1회 재시도한다. 끝까지 확인되지 않으면 UNCERTAIN —
     호출부는 재주문·후보 전환·IDLE 전환을 해서는 안 된다.
     """
+    notice = _notice_fill(order_id)
+    if notice is not None and _is_confirmed_full_fill(notice, expected_qty):
+        _log_notice_confirmed(order_id, ticker, "BEFORE_CANCEL", notice)
+        return "FILLED", _more_complete_fill(known_fill, notice)
     cancel_resp = await _cancel_order(order_id, org_no, mode)
     log(
         "ENTRY_CANCEL_SENT",
@@ -4085,7 +4105,7 @@ async def _send_buy(
     """양수 제출가가 필수인 지정가 매수."""
     if limit_price <= 0:
         raise ValueError("limit_price must be positive for buy orders")
-    return await kis_rest.post(
+    resp = await kis_rest.post(
         "/uapi/domestic-stock/v1/trading/order-cash",
         tr_id=_BUY_TR[mode],
         send_guard=send_guard,
@@ -4098,6 +4118,12 @@ async def _send_buy(
             "ORD_UNPR": str(int(limit_price)),
         },
     )
+    # 주문번호를 체결통보 장부에 등록한다. 통보가 주문 응답보다 먼저 와도 장부가 합친다.
+    if F3_FILL_NOTICE_ENABLED and isinstance(resp, dict):
+        odno = str((resp.get("output") or {}).get("ODNO") or "")
+        if odno:
+            kis_notice.expect(odno, qty)
+    return resp
 
 
 async def _send_sell(ticker: str, qty: int, mode: str) -> dict:
@@ -4137,6 +4163,33 @@ async def _cancel_order(order_id: str, org_no: str, mode: str) -> dict:
     )
 
 
+async def _fetch_or_notice(
+    order_id: str, event: asyncio.Event, timeout: float, *,
+    ticker: str | None, expected_qty: int | None,
+) -> object:
+    """조회 한 번과 체결통보 신호를 경합시킨다. 신호가 먼저면 _NOTICE_WON."""
+    fetch = asyncio.ensure_future(_fetch_order_fill_snapshot(
+        order_id, ticker=ticker, expected_qty=expected_qty, update_poll_summary=True))
+    waiter = asyncio.ensure_future(event.wait())
+    done, _ = await asyncio.wait({fetch, waiter}, timeout=max(0.001, timeout),
+                                 return_when=asyncio.FIRST_COMPLETED)
+    if waiter in done and fetch not in done:
+        fetch.cancel()
+        return _NOTICE_WON
+    waiter.cancel()
+    if fetch not in done:
+        fetch.cancel()
+        raise asyncio.TimeoutError
+    return fetch.result()
+
+
+async def _wait_or_notice(event: asyncio.Event, seconds: float) -> None:
+    try:
+        await asyncio.wait_for(event.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
+
+
 async def _poll_fill(
     order_id: str,
     deadline: datetime,
@@ -4163,7 +4216,15 @@ async def _poll_fill(
         "poll_last_ccld_amt": 0.0,
         "poll_last_error": None,
     }
+    notice_event = kis_notice.event_for(order_id) if F3_FILL_NOTICE_ENABLED else None
     while True:
+        if notice_event is not None and notice_event.is_set():
+            notice = _notice_fill(order_id)
+            if notice is not None:
+                _log_notice_confirmed(order_id, ticker, "POLL_WAIT", notice)
+                if expected_qty is None:
+                    return {"fill_price": notice["fill_price"], "fill_qty": notice["fill_qty"]}
+                return notice
         if datetime.now(KST) >= deadline:
             log(
                 "ENTRY_FILL_POLL_TIMEOUT",
@@ -4181,15 +4242,22 @@ async def _poll_fill(
         try:
             attempts += 1
             remaining = (deadline - datetime.now(KST)).total_seconds()
-            latest = await asyncio.wait_for(
-                _fetch_order_fill_snapshot(
-                    order_id,
-                    ticker=ticker,
-                    expected_qty=expected_qty,
-                    update_poll_summary=True,
-                ),
-                timeout=max(0.001, remaining),
-            )
+            if notice_event is None:
+                latest = await asyncio.wait_for(
+                    _fetch_order_fill_snapshot(
+                        order_id,
+                        ticker=ticker,
+                        expected_qty=expected_qty,
+                        update_poll_summary=True,
+                    ),
+                    timeout=max(0.001, remaining),
+                )
+            else:
+                result = await _fetch_or_notice(
+                    order_id, notice_event, remaining, ticker=ticker, expected_qty=expected_qty)
+                if result is _NOTICE_WON:
+                    continue
+                latest = cast("dict | None", result)
             _last_fill_poll_summary["poll_attempts"] = attempts
             latest_fill = _more_complete_fill(latest_fill, latest)
             if latest_fill:
@@ -4238,10 +4306,13 @@ async def _poll_fill(
         remaining = (deadline - datetime.now(KST)).total_seconds()
         if remaining <= 0:
             continue
-        await asyncio.sleep(min(F3_FILL_POLL_INTERVAL_SEC, remaining))
+        if notice_event is None:
+            await asyncio.sleep(min(F3_FILL_POLL_INTERVAL_SEC, remaining))
+        else:
+            await _wait_or_notice(notice_event, min(F3_FILL_POLL_INTERVAL_SEC, remaining))
 
 
-async def _fetch_order_fill_snapshot(
+async def _query_order_fill_snapshot(
     order_id: str,
     *,
     ticker: str | None = None,
@@ -4336,3 +4407,19 @@ async def _fetch_order_fill_snapshot(
             )
         return snapshot.as_fill() if fill_qty > 0 else None
     return None
+
+async def _fetch_order_fill_snapshot(
+    order_id: str,
+    *,
+    ticker: str | None = None,
+    expected_qty: int | None = None,
+    update_poll_summary: bool = False,
+) -> dict | None:
+    """조회 한 번 + 체결통보 장부. 더 많이 체결된 쪽을 돌려준다."""
+    queried = await _query_order_fill_snapshot(
+        order_id, ticker=ticker, expected_qty=expected_qty,
+        update_poll_summary=update_poll_summary,
+    )
+    notice = _notice_fill(order_id)
+    return queried if notice is None else _more_complete_fill(queried, notice)
+
