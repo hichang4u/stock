@@ -75,6 +75,11 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 `keepalive ping timeout` 단절은 큐 포화 계열이라 무겁게 본다. 다른 사유의 단절은
 서버·네트워크 쪽일 수 있다.
 
+`WS_SUBSCRIBE_RESPONSE`(2026-10-07~)는 시세 구독 응답이다. 위 검색에 걸리지만 `error`만 찍히므로
+`rt_cd`·`msg_cd`·`msg1`을 따로 본다. 09:00:01 직후 단절 앞에 `msg_cd=OPSP8996`(WARN)이 있으면 같은 앱키의
+다른 세션 때문이다. `OPSP0000`(성공) 뒤에 끊기면 그 원인은 아니다
+(`docs/OPENING_WINDOW_FOLLOWUP_20261006.md` 1.4절).
+
 ### 4.1 체결 프레임 점검 — 매일 돌린다
 
 ```bash

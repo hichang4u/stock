@@ -67,6 +67,7 @@ EVENT_LABELS = {
     "FILL_NOTICE_RECEIVED": "체결통보 수신(Fill Notice Received)",
     "FILL_NOTICE_FRAME": "체결통보 프레임(Fill Notice Frame)",
     "WS_FRAME_UNKNOWN_TR": "알 수 없는 TR 프레임(WS Frame Unknown TR)",
+    "WS_SUBSCRIBE_RESPONSE": "웹소켓 구독 응답(WS Subscribe Response)",
     "ENTRY_FILL_CONFIRMED_BY_NOTICE": "진입 체결 통보로 확인(Entry Fill Confirmed By Notice)",
     "WS_KEY_HTTP_ERR": "웹소켓 키 HTTP 오류(WebSocket Key HTTP Error)",
     "WS_KEY_ATTEMPT_FAIL": "웹소켓 키 재시도 실패(WebSocket Key Attempt Failed)",

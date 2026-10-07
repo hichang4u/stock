@@ -149,3 +149,25 @@ async def test_reconnect_resubscribes_the_notice(monkeypatch):
     second = FakeWS([_ack("H0STCNT0"), _ack("H0STCNI9")])
     await _run(monkeypatch, [first, second])
     assert _trs(first) == ["H0STCNT0", "H0STCNI9"] and _trs(second) == ["H0STCNT0", "H0STCNI9"]
+
+
+# ── 시세 구독 응답 로그 (docs/OPENING_WINDOW_FOLLOWUP_20261006.md §1.4) ──
+
+
+def _rejected(tr_id, msg_cd, msg1):
+    return json.dumps({"header": {"tr_id": tr_id, "tr_key": "001440", "encrypt": "N"},
+                       "body": {"rt_cd": "9", "msg_cd": msg_cd, "msg1": msg1}})
+
+
+@pytest.mark.asyncio
+async def test_quote_subscribe_responses_are_logged_with_their_codes(monkeypatch):
+    logs = []
+    monkeypatch.setattr(kis_ws, "log", lambda e, **k: logs.append((e, k)))
+    ws = FakeWS([_ack("H0STCNT0"), _ack("H0STCNI9"),
+                 _rejected("H0STCNT0", "OPSP8996", "ALREADY IN USE appkey"),
+                 json.dumps({"header": {"tr_id": "PINGPONG"}})])
+    await _run(monkeypatch, [ws])
+    resp = [(k["level"], k["tr_id"], k["rt_cd"], k["msg_cd"])
+            for e, k in logs if e == "WS_SUBSCRIBE_RESPONSE"]
+    assert resp == [("INFO", "H0STCNT0", "0", "OPSP0000"),
+                    ("WARN", "H0STCNT0", "9", "OPSP8996")]

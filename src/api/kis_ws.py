@@ -86,6 +86,7 @@ async def subscribe(
                     # 한 프레임에 체결이 여러 건 올 수 있다. 전부 전달한다 —
                     # 프레임이 묶이는 건 체결 폭주 구간이고, 그 구간이 바로
                     # 트레일링·하드스탑 판정이 가장 민감한 구간이다.
+                    _log_subscribe_response(raw)
                     _route_notice(raw)
                     for tick in _parse_ticks(raw):
                         await on_tick(tick)
@@ -106,6 +107,28 @@ async def subscribe(
             kis_notice.connection_lost()
             if connected and on_connection_change is not None:
                 on_connection_change(False)
+
+
+def _log_subscribe_response(raw: str | bytes) -> None:
+    """시세 등 체결통보가 아닌 TR의 구독 응답을 남긴다(체결통보 응답은 kis_notice가 남긴다).
+
+    09:00:01 연결 직후 단절이 같은 앱키의 다른 세션 때문(OPSP8996)인지 가리기 위한 기록이다
+    (docs/OPENING_WINDOW_FOLLOWUP_20261006.md 1.4절).
+    """
+    if not isinstance(raw, str) or not raw.startswith("{"):
+        return
+    try:
+        msg = json.loads(raw)
+        header, body = msg.get("header") or {}, msg.get("body") or {}
+        tr = header.get("tr_id")
+        if not body or tr == "PINGPONG" or tr in kis_notice.NOTICE_TR.values():
+            return
+        rt_cd = str(body.get("rt_cd"))
+        log("WS_SUBSCRIBE_RESPONSE", level="INFO" if rt_cd == "0" else "WARN", tr_id=tr,
+            tr_key=header.get("tr_key"), rt_cd=rt_cd, msg_cd=body.get("msg_cd"),
+            msg1=body.get("msg1"))
+    except Exception as exc:  # noqa: BLE001 — 기록 실패가 시세 수신을 끊으면 안 된다
+        log("WS_SUBSCRIBE_RESPONSE", level="WARN", error=repr(exc))
 
 
 def _route_notice(raw: str | bytes) -> None:
