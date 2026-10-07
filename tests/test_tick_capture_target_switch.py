@@ -7,6 +7,7 @@
 import asyncio
 import gzip
 import json
+import threading
 
 import pytest
 
@@ -231,3 +232,29 @@ async def test_stuck_switch_finalize_does_not_wedge_shutdown(mem, tmp_path, monk
     # 직접 닫아 다음 테스트에 경고가 새지 않게 한다.
     assert detached is not None and detached._task is not None
     detached._task.cancel()
+
+
+def test_drain_returns_when_only_finished_tasks_remain():
+    """끝났지만 빼기 콜백이 아직 안 돈 작업만 남으면 대기가 곧바로 끝나야 한다.
+
+    Python 3.12의 gather는 받은 작업이 모두 끝났으면 루프에 양보하지 않고 끝난 결과를
+    돌려준다. 그래서 `while 집합: await gather(*집합)`은 빼기 콜백이 돌 기회를 주지 못하고
+    무한히 돈다(2026-10-07 preflight 멈춤). 별도 스레드에서 돌려, 결함이 있으면 멈추는 대신
+    실패하게 한다.
+    """
+    result: dict = {}
+
+    def run() -> None:
+        async def main() -> None:
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result(None)
+            tc._switch_finalizers.add(fut)  # type: ignore[arg-type]  # 빼기 콜백 없음
+            await tc.drain_switch_finalizers()
+            result["returned"] = True
+
+        asyncio.run(main())
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(timeout=2)
+    assert result.get("returned") is True

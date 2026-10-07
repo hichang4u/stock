@@ -744,9 +744,14 @@ def _forget_pending_switch(ticker: str, task: asyncio.Task) -> None:
 
 
 async def drain_switch_finalizers() -> None:
-    """전환으로 예약된 마감을 모두 기다린다(프로세스 종료 정리용)."""
-    while _switch_finalizers:
-        await asyncio.gather(*list(_switch_finalizers), return_exceptions=True)
+    """전환으로 예약된 마감을 모두 기다린다(프로세스 종료 정리용).
+
+    끝나지 않은 작업만 기다린다. Python 3.12의 gather는 받은 작업이 모두 끝났으면 루프에
+    양보하지 않으므로, 끝났지만 빼기 콜백이 아직 안 돈 작업까지 넘기면 이 반복이 루프를
+    붙잡고 무한히 돈다(2026-10-07 preflight 멈춤, wait_for 시간 제한도 듣지 않는다).
+    """
+    while pending := [t for t in _switch_finalizers if not t.done()]:
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 def start(
