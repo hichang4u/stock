@@ -179,3 +179,55 @@ def test_subscribe_request_uses_hts_id_and_mode(monkeypatch):
     assert body["body"]["input"] == {"tr_id": "H0STCNI9", "tr_key": "hts-user"}
     monkeypatch.setenv("KIS_MODE", "REAL")
     assert kis_notice.tr_id() == "H0STCNI0"
+
+
+# ── 진단 로그 (docs/FILL_NOTICE_FOLLOWUP_20261007.md 5절 가, 6.4절) ──
+
+
+def _capture(monkeypatch):
+    logs = []
+    monkeypatch.setattr(kis_notice, "log", lambda e, **k: logs.append((e, k)))
+    return logs
+
+
+def _frames(logs, event="FILL_NOTICE_FRAME"):
+    return [k for e, k in logs if e == event]
+
+
+def test_every_notice_record_logs_its_shape_without_account_fields(monkeypatch):
+    logs = _capture(monkeypatch)
+    kis_notice.handle_message(_ack())
+    accept = _fields(cntg="1")
+    fill = _fields()
+    for f in (accept, fill):
+        f[FIELDS.index("CUST_ID")] = "HTS-SECRET"
+        f[FIELDS.index("ACNT_NO")] = "ACCT-SECRET"
+        f[FIELDS.index("ACNT_NAME")] = "NAME-SECRET"
+    kis_notice.handle_message("1|H0STCNI9|001|" + _encrypt("^".join(accept)))
+    kis_notice.handle_message("1|H0STCNI9|001|" + _encrypt("^".join(fill)))
+    frames = _frames(logs)
+    assert [(f["cntg_yn"], f["booked"], f["reason"]) for f in frames] == [
+        ("1", False, "NOT_FILL"), ("2", True, "FILL")]
+    assert frames[0]["field_count"] == 26 and frames[0]["encrypted"] is True
+    assert frames[0]["header_count"] == 1 and frames[0]["order_id"] == "1226"
+    assert "SECRET" not in repr(logs)
+
+
+def test_short_notice_record_is_logged_but_not_booked(monkeypatch):
+    logs = _capture(monkeypatch)
+    kis_notice.expect("1226", 295)
+    kis_notice.handle_message("0|H0STCNI9|001|" + "^".join(_fields()[:20]))
+    (frame,) = _frames(logs)
+    assert frame["field_count"] == 20 and frame["reason"] == "SHORT"
+    assert frame["booked"] is False and kis_notice.fill("1226") is None
+
+
+def test_unknown_tr_frame_is_logged_once_with_its_tr_id(monkeypatch):
+    logs = _capture(monkeypatch)
+    kis_notice.handle_message("1|K0STCNI9|001|abcd")
+    kis_notice.handle_message("1|K0STCNI9|001|abcd")
+    kis_notice.handle_message("0|H0STCNT0|001|005930^091015^10300")
+    (unknown,) = _frames(logs, "WS_FRAME_UNKNOWN_TR")
+    assert unknown["tr_id"] == "K0STCNI9" and unknown["encrypted"] is True
+    assert unknown["header_count"] == "001" and unknown["occurrences"] == 1
+    assert _frames(logs) == []

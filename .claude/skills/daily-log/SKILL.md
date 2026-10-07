@@ -110,8 +110,8 @@ cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
 import json
 for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
     d=json.loads(l); e=d.get('event','')
-    if e.startswith('FILL_NOTICE') or e in ('ENTRY_ORDER_SENT','ENTRY_FILL_CONFIRMED_BY_NOTICE','ENTRY_EXECUTED'):
-        x={k:v for k,v in d.items() if k in ('order_id','stage','notice_latency_ms','qty','price','exchange_time','reason','msg1','error')}
+    if e.startswith('FILL_NOTICE') or e in ('WS_FRAME_UNKNOWN_TR','ENTRY_ORDER_SENT','ENTRY_FILL_CONFIRMED_BY_NOTICE','ENTRY_EXECUTED'):
+        x={k:v for k,v in d.items() if k in ('order_id','stage','notice_latency_ms','qty','price','exchange_time','reason','msg1','error','tr_id','encrypted','header_count','records','field_count','cntg_yn','rfus_yn','acpt_yn','booked','occurrences')}
         print(d['ts'][11:23], e, x)
 "
 ```
@@ -121,6 +121,12 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 - 진입마다 `ENTRY_ORDER_SENT` → `FILL_NOTICE_RECEIVED` → (`ENTRY_FILL_CONFIRMED_BY_NOTICE` 또는 조회 확인) 순서를
   본다. 통보 없이 조회로만 확인된 진입은 "통보 누락"으로 센다.
 - `notice_latency_ms`(주문 등록 → 첫 체결 통보)와 조회 확인 시각을 비교한다.
+- `FILL_NOTICE_FRAME`은 체결통보 레코드마다 하나다(접수 통보 포함, 2026-10-07 진단 로그). 주문 하나에 보통
+  접수(`cntg_yn=1`, `reason=NOT_FILL`) → 체결(`cntg_yn=2`, `booked=true`) 순서다. `SHORT`·`BAD_VALUE`가 있으면
+  해석 결함이다.
+- `WS_FRAME_UNKNOWN_TR`(WARN)는 시세도 체결통보도 아닌 TR 프레임이다. `tr_id`가 `K0STCNI9`면 통보가 그 이름으로
+  오고 있다는 뜻이다(`docs/FILL_NOTICE_FOLLOWUP_20261007.md` 6.2절).
+- 주문이 있었는데 `FILL_NOTICE_FRAME`도 `WS_FRAME_UNKNOWN_TR`도 없으면, 그 세션으로는 통보가 오지 않은 것이다.
 - 설계: `docs/superpowers/specs/2026-10-06-fill-notice-design.md`(B안 — F4 시세 세션에 얹음).
 
 ## 5. 청산이 있었으면 — F4 틱 공백 재측정

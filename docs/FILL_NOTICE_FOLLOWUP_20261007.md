@@ -142,3 +142,25 @@
 출처:
 - https://github.com/koreainvestment/open-trading-api
 - https://github.com/starwook/quantlog/pull/40
+
+## 7. 선택지 가 구현 — 진단 로그 (2026-10-07)
+
+매매 동작은 바꾸지 않는다. `src/api/kis_notice.py`에 로그 두 가지를 더한다.
+
+- **`FILL_NOTICE_FRAME`(INFO)** — 체결통보 TR 프레임의 레코드마다 하나.
+  - 남기는 것: `tr_id`, `encrypted`, `header_count`, `records`, `field_count`, `cntg_yn`·`rfus_yn`·`acpt_yn`,
+    `order_id`, `booked`, `reason`
+  - `reason`은 다섯 가지다: `FILL` / `NOT_FILL` / `REJECTED` / `SHORT`(필드 26개 미만) / `BAD_VALUE`(수량·단가)
+  - 고객 ID·계좌번호·계좌명은 남기지 않는다(테스트로 고정).
+- **`WS_FRAME_UNKNOWN_TR`(WARN)** — `H0STCNT0`도 체결통보 TR도 아닌 프레임.
+  - 남기는 것: `tr_id`, `encrypted`, `header_count`, `body_len`, `occurrences`
+  - 같은 TR이면 처음과 1,000번째마다만 남긴다.
+
+판정은 다음과 같이 한다(daily-log 4.2절).
+
+| 다음 진입일 로그 | 뜻 |
+|---|---|
+| `FILL_NOTICE_FRAME`이 있고 `booked=true` | 통보가 온다. 6.2절 후보가 아니면 10/07은 서버 쪽 누락 |
+| `FILL_NOTICE_FRAME`이 있고 `SHORT`/`BAD_VALUE` | (b) 해석 결함 — 필드 정의를 고친다 |
+| `WS_FRAME_UNKNOWN_TR tr_id=K0STCNI9` | (b) TR 이름 — `K0STCNI*` 수용을 별도 조건으로 결정 |
+| 둘 다 없음 | (a) 모의서버가 이 세션으로 통보를 보내지 않는다 |

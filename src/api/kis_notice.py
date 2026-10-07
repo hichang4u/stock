@@ -184,12 +184,18 @@ def latency_ms(order_id: str) -> int | None:
 
 
 _state: dict = {"healthy": False, "key": None, "iv": None, "disabled_day": None}
+# 시세도 체결통보도 아닌 TR 프레임 — 처음과 1,000번째마다만 남긴다
+# (docs/FILL_NOTICE_FOLLOWUP_20261007.md 6.2절: K0STCNI9로 올 가능성).
+_QUOTE_TR = "H0STCNT0"
+_UNKNOWN_LOG_EVERY = 1000
+_unknown_tr_counts: dict[str, int] = {}
 
 
 def reset() -> None:
     """장부와 구독 상태를 비운다(테스트·재시작용)."""
     _book.reset()
     _state.update(healthy=False, key=None, iv=None, disabled_day=None)
+    _unknown_tr_counts.clear()
 
 
 def healthy() -> bool:
@@ -247,7 +253,11 @@ def handle_message(raw: str) -> str | None:
         return "DISABLE"
 
     parts = raw.split("|")
-    if len(parts) < 4 or parts[1] not in NOTICE_TR.values():
+    if len(parts) < 4:
+        return None
+    if parts[1] not in NOTICE_TR.values():
+        if parts[1] != _QUOTE_TR:
+            _log_unknown_tr(parts)
         return None
     data = parts[3]
     if parts[0] == "1":
@@ -263,8 +273,10 @@ def handle_message(raw: str) -> str | None:
         count: int | None = int(parts[2])
     except ValueError:
         count = None
-    for fields in split_records(data, count):
+    records = split_records(data, count)
+    for fields in records:
         notice = parse(fields)
+        _log_frame(parts, count, len(records), fields, notice)
         if notice is None:
             continue
         record(notice)
@@ -272,3 +284,37 @@ def handle_message(raw: str) -> str | None:
             order_id=notice.order_id, qty=notice.qty, price=notice.price,
             exchange_time=notice.hms, side=notice.side)
     return None
+
+
+def _field(fields: list[str], name: str) -> str | None:
+    i = _IDX[name]
+    return fields[i] if i < len(fields) else None
+
+
+def _skip_reason(fields: list[str]) -> str:
+    if len(fields) < len(FIELDS):
+        return "SHORT"
+    if fields[_IDX["CNTG_YN"]] != "2":
+        return "NOT_FILL"
+    if fields[_IDX["RFUS_YN"]] == "1":
+        return "REJECTED"
+    return "BAD_VALUE"
+
+
+def _log_frame(parts: list[str], count: int | None, records: int, fields: list[str],
+               notice: Notice | None) -> None:
+    """체결통보 레코드 하나의 모양. 고객 ID·계좌번호·계좌명은 남기지 않는다."""
+    log("FILL_NOTICE_FRAME", level="INFO", tr_id=parts[1], encrypted=parts[0] == "1",
+        header_count=count, records=records, field_count=len(fields),
+        cntg_yn=_field(fields, "CNTG_YN"), rfus_yn=_field(fields, "RFUS_YN"),
+        acpt_yn=_field(fields, "ACPT_YN"), order_id=_norm(_field(fields, "ODER_NO") or ""),
+        booked=notice is not None, reason="FILL" if notice is not None else _skip_reason(fields))
+
+
+def _log_unknown_tr(parts: list[str]) -> None:
+    tr = parts[1][:16]
+    n = _unknown_tr_counts.get(tr, 0) + 1
+    _unknown_tr_counts[tr] = n
+    if n == 1 or n % _UNKNOWN_LOG_EVERY == 0:
+        log("WS_FRAME_UNKNOWN_TR", level="WARN", tr_id=tr, encrypted=parts[0] == "1",
+            header_count=parts[2][:8], body_len=len(parts[3]), occurrences=n)
