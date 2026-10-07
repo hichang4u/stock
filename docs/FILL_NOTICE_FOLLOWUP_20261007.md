@@ -79,3 +79,66 @@
   지문 비용은 가와 같다.
 - **라. 통보 기능을 끄고 조회만 쓰기** (`F3_FILL_NOTICE_ENABLED=0`). 효과 없는 경로를 정리한다.
   `F3_` 접두어라 이 역시 지문이 바뀐다.
+
+## 6. 선택지 나 결과 — KIS 사양·사례 확인 (2026-10-07 장중, 코드 변경 없음)
+
+대조한 자료는 아래와 같다.
+- 공식 저장소 `koreainvestment/open-trading-api` (마지막 커밋 2026-09-28)
+  - `examples_llm/domestic_stock/ccnl_notice`
+  - `examples_user/kis_auth.py`
+  - `backtester/kis_backtest/providers/kis/websocket.py`
+  - `legacy/websocket/python/ws_domestic_stock.py`, `multi_processing_sample_ws.py`
+  - `MCP/KIS Code Assistant MCP/data.csv`(API 설명)
+- 공개 사례 검색
+
+### 6.1 우리 구현과 일치하는 것
+
+| 항목 | 공식 | 우리 (`src/api/kis_notice.py`) |
+|---|---|---|
+| 모의 구독 TR | `H0STCNI9` ("모의투자는 H0STCNI9 로 변경하여 사용") | 같음 |
+| 필드 수 | 26 | 26 |
+| 체결 여부 | "14번째 값(CNTG_YN)이 2이면 체결통보, 1이면 주문·정정·취소·거부 접수 통보" | 인덱스 13, `"2"`만 장부 기록 |
+| 암호화 | AES256-CBC, 구독 응답의 key/iv | 같음 |
+| tr_key | API 설명에는 "종목코드"라고 돼 있으나 예제 코드는 HTS ID | HTS ID (10/06 실측: 가짜 ID는 `OPSP0017`로 거절) |
+
+### 6.2 우리 구현과 다를 수 있는 것 — 조용히 버려지는 경로
+
+1. **수신 프레임의 TR 이름.**
+   - 공식 레거시 예제 두 곳은 수신 프레임의 `tr_id`가 `K0STCNI0`·`K0STCNI9`이어도 체결통보로 처리한다
+     (`trid0 in ("K0STCNI0", "K0STCNI9", "H0STCNI0", "H0STCNI9")`).
+   - 우리 `handle_message`는 `H0STCNI0`/`H0STCNI9`만 받는다. `_parse_ticks`도 `H0STCNT0`이 아니면 버린다.
+     그래서 **`K0STCNI9`로 오면 아무 로그 없이 사라진다.**
+   - 다만 최신 공식 코드(`examples_user`, `backtester`)는 수신 프레임을 구독 TR(`H0STCNI9`) 그대로 분기한다.
+     지금 서버가 어느 이름으로 보내는지는 공개 자료로 확정되지 않는다.
+2. **필드 수가 26보다 적을 때.**
+   - `split_records`는 헤더 건수로 나누어떨어지지 않으면 한 레코드로 두고, `parse`는 26개 미만이면 None을 돌려준다.
+     로그는 없다.
+   - 공식 자료는 모두 26개다. 다만 백테스터의 컬럼 이름은 4·17번째가 다르다(`ODER_QTY`, `ACNT_NO2`).
+     예제마다 컬럼 정의가 일관되지 않다는 뜻이다. 체결 여부(14번째)·수량(10번째)·단가(11번째)의 위치는 모두 같다.
+3. **거부 여부 값.** 우리는 `RFUS_YN == "1"`을 거부로 본다. 공식 백테스터는 `== "Y"`로 본다.
+   어느 쪽이든 통보를 버리는 방향은 아니라 이번 누락의 원인 후보는 아니다.
+
+### 6.3 모의투자에서 실제 통보가 오는가
+
+- 공개 자료에서 **"모의투자에서 체결 통보 프레임을 실제로 받았다"는 확인을 찾지 못했다.**
+- 같은 기능을 만든 외부 프로젝트(`starwook/quantlog` PR #40)도 모의에서 "두 TR 모두 SUBSCRIBE SUCCESS + 암호화 키
+  수신 확인"까지만 적었다. "체결 메시지는 아직 실측 전"이다. 우리 10/06 실측과 같은 단계다.
+- 레거시 예제 주석은 `H0STCNI9`를 "테스트용 직원체결통보"라고 부른다.
+
+### 6.4 결론
+
+공개 자료로는 3절의 (a)와 (b)를 가를 수 없다. 대신 (b) 안에서 구체적인 후보 하나(6.2-1, `K0` 접두 TR)가
+나왔다. 4절에 정한 대로 **선택지 가(진단 로그)로 넘어간다.** 가를 설계할 때 아래를 기록 범위에 넣는다.
+
+- 체결통보 TR이 아닌 프레임 중 `H0STCNT0`도 아닌 것의 `tr_id`·암호화 여부·헤더 건수
+  (`K0STCNI9`가 오면 여기에 잡힌다)
+- 체결통보 프레임마다 필드 수, `CNTG_YN`·`RFUS_YN`·`ACPT_YN`, 장부에 기록됐는지 여부
+
+**`K0STCNI*`를 체결통보로 받아들이는 변경은 진단 로그와 별개의 동작 변경이다.**
+- 같은 조건("체결을 무엇으로 아는가")에 속하는 버그 수정이다.
+- 그래도 진단 로그로 실제 TR 이름을 확인한 뒤에 따로 결정한다.
+- 확인 없이 미리 넣으면, 다음 날 통보가 잡혀도 무엇이 원인이었는지 기록이 남지 않는다.
+
+출처:
+- https://github.com/koreainvestment/open-trading-api
+- https://github.com/starwook/quantlog/pull/40
