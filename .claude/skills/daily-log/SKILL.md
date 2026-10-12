@@ -116,7 +116,7 @@ import json
 for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
     d=json.loads(l); e=d.get('event','')
     if e.startswith('FILL_NOTICE') or e in ('WS_FRAME_UNKNOWN_TR','ENTRY_ORDER_SENT','ENTRY_FILL_CONFIRMED_BY_NOTICE','ENTRY_EXECUTED'):
-        x={k:v for k,v in d.items() if k in ('order_id','stage','notice_latency_ms','qty','price','exchange_time','reason','msg1','error','tr_id','encrypted','header_count','records','field_count','cntg_yn','rfus_yn','acpt_yn','booked','occurrences')}
+        x={k:v for k,v in d.items() if k in ('order_id','stage','notice_latency_ms','qty','price','exchange_time','reason','msg1','error','tr_id','encrypted','header_count','records','field_count','cntg_yn','rfus_yn','acpt_yn','booked','occurrences','side','ticker','cntg_qty','cntg_unpr')}
         print(d['ts'][11:23], e, x)
 "
 ```
@@ -129,6 +129,10 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 - `FILL_NOTICE_FRAME`은 체결통보 레코드마다 하나다(접수 통보 포함, 2026-10-07 진단 로그). 주문 하나에 보통
   접수(`cntg_yn=1`, `reason=NOT_FILL`) → 체결(`cntg_yn=2`, `booked=true`) 순서다. `SHORT`·`BAD_VALUE`가 있으면
   해석 결함이다.
+- 2026-10-12부터 모의 통보는 23필드라 전부 `SHORT`다(티켓 8절). 2026-10-13 이후 로그의 `FILL_NOTICE_FRAME`에는
+  `side`·`ticker`·`cntg_qty`·`cntg_unpr`·`exchange_time`(공식 순서 인덱스 4·8~11의 원문)이 있다. 체결 통보
+  (`cntg_yn=2`)의 `cntg_qty` 합이 주문 체결수량과, `cntg_unpr`가 DB 체결가와 맞는지 대조한다(분할 체결이면 수량
+  가중 평균). 맞으면 위치가 확인된 것이다. `<len=N>`은 코드 모양이 아닌 값이라 가렸다는 뜻이다.
 - `WS_FRAME_UNKNOWN_TR`(WARN)는 시세도 체결통보도 아닌 TR 프레임이다. `tr_id`가 `K0STCNI9`면 통보가 그 이름으로
   오고 있다는 뜻이다(`docs/FILL_NOTICE_FOLLOWUP_20261007.md` 6.2절).
 - 주문이 있었는데 `FILL_NOTICE_FRAME`도 `WS_FRAME_UNKNOWN_TR`도 없으면, 그 세션으로는 통보가 오지 않은 것이다.

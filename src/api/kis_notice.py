@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from base64 import b64decode
 from dataclasses import dataclass
@@ -301,13 +302,33 @@ def _skip_reason(fields: list[str]) -> str:
     return "BAD_VALUE"
 
 
+_CODE = re.compile(r"[0-9A-Z.]{0,12}")
+
+
+def _code(fields: list[str], name: str) -> str | None:
+    """정렬이 맞아 보일 때만 원문을 낸다. 코드 모양이 아니면 길이만 낸다."""
+    if _field(fields, "CNTG_YN") not in ("1", "2"):
+        return None
+    value = _field(fields, name)
+    if value is None or _CODE.fullmatch(value):
+        return value
+    return f"<len={len(value)}>"
+
+
 def _log_frame(parts: list[str], count: int | None, records: int, fields: list[str],
                notice: Notice | None) -> None:
-    """체결통보 레코드 하나의 모양. 고객 ID·계좌번호·계좌명은 남기지 않는다."""
+    """체결통보 레코드 하나의 모양. 고객 ID·계좌번호·계좌명은 남기지 않는다.
+
+    side~exchange_time은 공식 순서 인덱스 4·8~11의 원문이다. 2026-10-12 모의 통보가 23필드라
+    수량·단가 위치를 실제 체결과 대조하려고 남긴다(docs/FILL_NOTICE_FOLLOWUP_20261007.md 8절).
+    """
     log("FILL_NOTICE_FRAME", level="INFO", tr_id=parts[1], encrypted=parts[0] == "1",
         header_count=count, records=records, field_count=len(fields),
         cntg_yn=_field(fields, "CNTG_YN"), rfus_yn=_field(fields, "RFUS_YN"),
         acpt_yn=_field(fields, "ACPT_YN"), order_id=_norm(_field(fields, "ODER_NO") or ""),
+        side=_code(fields, "SELN_BYOV_CLS"), ticker=_code(fields, "STCK_SHRN_ISCD"),
+        cntg_qty=_code(fields, "CNTG_QTY"), cntg_unpr=_code(fields, "CNTG_UNPR"),
+        exchange_time=_code(fields, "STCK_CNTG_HOUR"),
         booked=notice is not None, reason="FILL" if notice is not None else _skip_reason(fields))
 
 

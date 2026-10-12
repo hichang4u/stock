@@ -231,3 +231,44 @@ def test_unknown_tr_frame_is_logged_once_with_its_tr_id(monkeypatch):
     assert unknown["tr_id"] == "K0STCNI9" and unknown["encrypted"] is True
     assert unknown["header_count"] == "001" and unknown["occurrences"] == 1
     assert _frames(logs) == []
+
+
+def _short(fields: list[str]) -> list[str]:
+    # 2026-10-12 모의 통보는 23필드였다. 앞쪽 위치는 공식과 같고 뒤가 빠진 모양.
+    return fields[:23]
+
+
+def test_short_record_logs_the_values_needed_to_check_alignment(monkeypatch):
+    """23필드 통보의 수량·단가 위치를 실제 체결과 대조하려면 원문 값이 있어야 한다
+    (docs/FILL_NOTICE_FOLLOWUP_20261007.md 8.4절 가)."""
+    logs = _capture(monkeypatch)
+    fill = _fields(qty="36", price="26750", hms="090100")
+    fill[FIELDS.index("SELN_BYOV_CLS")] = "01"
+    kis_notice.handle_message("0|H0STCNI9|001|" + "^".join(_short(fill)))
+    (frame,) = _frames(logs)
+    assert frame["reason"] == "SHORT" and frame["booked"] is False
+    assert (frame["side"], frame["ticker"], frame["cntg_qty"], frame["cntg_unpr"],
+            frame["exchange_time"]) == ("01", fill[FIELDS.index("STCK_SHRN_ISCD")],
+                                        "36", "26750", "090100")
+
+
+def test_value_fields_are_withheld_when_the_record_looks_misaligned(monkeypatch):
+    """체결 여부가 1·2가 아니면 위치를 믿을 수 없다. 그 자리에 계좌 필드가 올 수 있다."""
+    logs = _capture(monkeypatch)
+    rec = _fields(cntg="X")
+    rec[FIELDS.index("CNTG_QTY")] = "ACCT-SECRET"
+    kis_notice.handle_message("0|H0STCNI9|001|" + "^".join(_short(rec)))
+    (frame,) = _frames(logs)
+    assert frame["cntg_qty"] is None and frame["ticker"] is None
+    assert "SECRET" not in repr(logs)
+
+
+def test_value_fields_that_do_not_look_like_codes_are_masked(monkeypatch):
+    """숫자·영문 대문자 코드가 아니면 길이만 남긴다(계좌명이 끼어들어도 새지 않게)."""
+    logs = _capture(monkeypatch)
+    rec = _fields()
+    rec[FIELDS.index("STCK_SHRN_ISCD")] = "홍길동"
+    kis_notice.handle_message("0|H0STCNI9|001|" + "^".join(_short(rec)))
+    (frame,) = _frames(logs)
+    assert frame["ticker"] == "<len=3>"
+    assert "홍길동" not in repr(logs)
