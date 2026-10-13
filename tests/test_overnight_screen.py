@@ -491,3 +491,89 @@ def test_main_async_normal_run_writes_candidates_with_summary_last_and_calendar(
     assert lines[-1]["summary"] is True
     assert any(r.get("ticker") == "000001" and r.get("rank") == 1 for r in lines[:-1])
     assert _calendar_path(tmp_path).exists()
+
+
+# --- E: 15:20 병행 기록 (스펙 §6(a), 판정에 안 씀) -----------------------------------
+
+
+def _intraday_path(root, date):
+    return root / "data" / "overnight" / "candidates_1520" / f"{date}.jsonl"
+
+
+def _normal_fetchers():
+    calendar_rows = [_daily_row("20260921", 100.0, 1e9)]
+
+    async def fetch_ranking(market: str) -> list[dict]:
+        return _ranking_output("000001") if market == "0001" else []
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        if ticker == "005930":
+            return calendar_rows, None
+        rows = [_daily_row("20260921", 10800.0, 5e9, high=11000.0, low=9900.0, open_=10000.0)]
+        rows += [_daily_row(f"202608{d:02d}", 100.0, 1e9) for d in range(1, 26)]
+        return rows, None
+
+    return fetch_ranking, fetch_daily
+
+
+def test_main_async_1520_writes_its_own_file_with_phase_and_leaves_the_calendar_alone(
+    tmp_path, monkeypatch
+):
+    fetch_ranking, fetch_daily = _normal_fetchers()
+    _install_main_async_fakes(monkeypatch, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+
+    rc = main(["--root", str(tmp_path), "--date", "20260921", "--phase", "1520"])
+
+    assert rc == 0
+    lines = [json.loads(x) for x in
+             _intraday_path(tmp_path, "20260921").read_text(encoding="utf-8").splitlines()]
+    summary = lines[-1]
+    assert summary["summary"] is True and summary["phase"] == "1520"
+    assert summary["status"] == "OK" and summary["screened_at"].startswith("20")
+    assert any(r.get("ticker") == "000001" and r.get("rank") == 1 for r in lines[:-1])
+    assert not _candidates_path(tmp_path, "20260921").exists()   # 종가 판은 건드리지 않는다
+    assert not _calendar_path(tmp_path).exists()                 # 달력은 15:32 판이 맡는다
+
+
+def test_main_async_1520_without_todays_bar_leaves_a_summary_only_marker(tmp_path, monkeypatch):
+    """15:20에 일봉에 오늘 행이 없으면 휴장일과 구별할 수 없다. 조용히 빠지지 않게 표시를
+    남기고, 휴장일인지는 15:32 판의 달력으로 가린다."""
+    calendar_rows = [_daily_row("20260918", 100.0, 1e9)]
+
+    async def fetch_ranking(market: str) -> list[dict]:
+        return []
+
+    async def fetch_daily(ticker: str) -> tuple[list[dict], str | None]:
+        return calendar_rows, None
+
+    _install_main_async_fakes(monkeypatch, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+
+    rc = main(["--root", str(tmp_path), "--date", "20260921", "--phase", "1520"])
+
+    assert rc == 0
+    lines = [json.loads(x) for x in
+             _intraday_path(tmp_path, "20260921").read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["summary"] is True and lines[0]["status"] == "NO_TODAY_BAR"
+    assert not _calendar_path(tmp_path).exists()
+
+
+def test_main_async_1520_dry_run_writes_nothing(tmp_path, monkeypatch):
+    fetch_ranking, fetch_daily = _normal_fetchers()
+    _install_main_async_fakes(monkeypatch, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+
+    rc = main(["--root", str(tmp_path), "--date", "20260921", "--phase", "1520", "--dry-run"])
+
+    assert rc == 0
+    assert not (tmp_path / "data").exists()
+
+
+def test_main_async_close_phase_output_is_unchanged(tmp_path, monkeypatch):
+    fetch_ranking, fetch_daily = _normal_fetchers()
+    _install_main_async_fakes(monkeypatch, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
+
+    assert main(["--root", str(tmp_path), "--date", "20260921"]) == 0
+    summary = json.loads(
+        _candidates_path(tmp_path, "20260921").read_text(encoding="utf-8").splitlines()[-1])
+    assert set(summary) == {"summary", "date", "universe", "candidates", "degraded"}
+    assert not _intraday_path(tmp_path, "20260921").exists()

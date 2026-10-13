@@ -14,6 +14,11 @@ data/overnight/candidates/<date>.jsonl 에 남긴다.
 같은 날 15:40 이후 재실행은 15:32 실행과 동등하지 않다 — 시간외 거래가
 `acml_tr_pbmn`(거래대금)과 거래량 순위를 바꾼다. 15:32 실행이 실패했으면 15:40 전에
 즉시 재실행하고, 그러지 못했으면 그날은 결측으로 둔다(재실행으로 메우지 않는다).
+
+`--phase 1520`은 같은 규칙을 15:20 장중 값(현재가·장중 고저·누적 거래대금)으로 돌려
+data/overnight/candidates_1520/<date>.jsonl 에 따로 남긴다. 실주문은 마감 동시호가 전에
+내야 하므로, 그때 고를 수 있는 후보가 종가 후보와 얼마나 같은지 미리 잰다(스펙 §6(a)).
+판정에는 쓰지 않는다. 달력은 건드리지 않는다.
 """
 
 from __future__ import annotations
@@ -395,12 +400,28 @@ def _kis_fetchers(
     return fetch_ranking, fetch_daily
 
 
+PHASE_CLOSE = "close"
+PHASE_1520 = "1520"
+
+
+def candidates_dir(root: Path, phase: str) -> Path:
+    """15:32 종가 판은 candidates/, 15:20 장중 판은 candidates_1520/ (스펙 §6(a) 병행 기록)."""
+    name = "candidates" if phase == PHASE_CLOSE else "candidates_1520"
+    return root / "data" / "overnight" / name
+
+
 async def main_async(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="C1 종가 스크리닝 (15:32)")
     parser.add_argument("--dry-run", action="store_true", help="호출은 하되 기록하지 않는다")
     parser.add_argument("--root", type=Path, default=ROOT, help="data/ 가 있는 트리")
     parser.add_argument("--date", default=None, help="기록 파일 이름(기본: 오늘 KST). 테스트용")
+    parser.add_argument(
+        "--phase", choices=(PHASE_CLOSE, PHASE_1520), default=PHASE_CLOSE,
+        help="1520: 같은 규칙을 15:20 장중 값으로 돌려 따로 기록한다(판정에 안 씀, 스펙 §6(a))",
+    )
     args = parser.parse_args(argv)
+    intraday = args.phase == PHASE_1520
+    screened_at = datetime.now(KST).isoformat(timespec="seconds")
 
     from scripts.catalyst_label import CALENDAR_TICKER, trading_days_from_daily_chart
     from scripts.fast_path_counterfactual import PocStop, Throttle
@@ -423,19 +444,29 @@ async def main_async(argv: list[str] | None = None) -> int:
         raise PocStop("CALENDAR_PROBE_FAILED", calendar_error)
     # 프로브가 통과했으면(TRADING_DAY·HOLIDAY 둘 다) 005930 일봉에서 나온 거래일로
     # 거래일 달력을 갱신한다 — D+1 추정을 파일 존재가 아니라 이 달력에 기대게 한다
-    # (스펙 §3.4 정정, 2026-09-21).
-    write_calendar(
-        args.root / "data" / "overnight" / "calendar.json",
-        trading_days_from_daily_chart(calendar_output2),
-    )
+    # (스펙 §3.4 정정, 2026-09-21). 15:20 판은 달력을 건드리지 않는다 — 15:32 판이 맡는다.
+    if not intraday:
+        write_calendar(
+            args.root / "data" / "overnight" / "calendar.json",
+            trading_days_from_daily_chart(calendar_output2),
+        )
     if calendar_status == "HOLIDAY":
         latest = latest_bar_date(calendar_output2)
         print(f"휴장일 또는 장 마감 전: {date} 봉 없음 (최신 봉 {latest}) — 기록하지 않음")
+        if intraday and not args.dry_run:
+            # 장중 일봉에 오늘 행이 없는 것과 휴장일은 여기서 구별되지 않는다. 조용히 빠지지
+            # 않게 표시만 남기고, 휴장일인지는 15:32 판의 달력으로 가린다(overnight_sieve).
+            write_candidates(candidates_dir(args.root, args.phase) / f"{date}.jsonl", [], {
+                "summary": True, "date": date, "phase": PHASE_1520,
+                "status": "NO_TODAY_BAR", "screened_at": screened_at,
+            })
         return 0
 
     rows, summary = await screen(date, fetch_ranking=fetch_ranking, fetch_daily=fetch_daily)
     if summary["universe"] == 0:
         raise PocStop("EMPTY_UNIVERSE")
+    if intraday:
+        summary.update(phase=PHASE_1520, status="OK", screened_at=screened_at)
     print(f"유니버스 {summary['universe']} / 후보 {summary['candidates']} / "
           f"호출 {budget.used} / degraded={summary['degraded']}")
     for row in rows:
@@ -445,7 +476,7 @@ async def main_async(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print("(dry-run: 기록하지 않음)")
         return 0
-    path = args.root / "data" / "overnight" / "candidates" / f"{date}.jsonl"
+    path = candidates_dir(args.root, args.phase) / f"{date}.jsonl"
     write_candidates(path, rows, summary)
     print(f"기록: {path}")
     return 0

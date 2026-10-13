@@ -380,6 +380,88 @@ def _is_valid_candidate_row(row: dict) -> bool:
         return False
 
 
+ScreenFile = tuple[list[dict], dict]
+
+
+def load_screen_dir(screen_dir: Path) -> dict[str, ScreenFile]:
+    """{날짜: (후보·거부 행 전부, 요약 행)}. 요약 행이 없는 파일(중간에 죽은 것)은 뺀다."""
+    out: dict[str, ScreenFile] = {}
+    if not screen_dir.exists():
+        return out
+    for path in sorted(screen_dir.glob("*.jsonl")):
+        rows: list[dict] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line) if line.strip() else None
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        if rows and rows[-1].get("summary"):
+            out[path.stem] = (rows[:-1], rows[-1])
+    return out
+
+
+def _rank1(rows: list[dict]) -> dict | None:
+    return next((r for r in rows if r.get("rank") == 1), None)
+
+
+def compare_intraday(close: dict[str, ScreenFile], intraday: dict[str, ScreenFile]) -> dict:
+    """15:20 병행 기록과 15:32 종가 후보의 비교 (스펙 §6(a)) — 판정에 쓰지 않는다.
+
+    병행 기록을 시작한 날(가장 이른 15:20 파일) 이후의 종가 판 날짜만 센다. 15:20 판이
+    ``NO_TODAY_BAR``인 날은 종가 판이 있으므로 거래일이었다 — 장중 일봉에 오늘 행이 없었다는
+    뜻이라 따로 센다. ``entry_vs_close_pct``는 15:20 판 1순위를 15:20 가격에 샀을 때 그 종목의
+    종가 대비 몇 % 비쌌는가다(종가 판에서 탈락한 종목도 종가는 거부 행에 남아 있다).
+    """
+    out: dict = {"compared": 0, "intraday_missing": 0, "intraday_no_bar": 0,
+                 "rank1_same": 0, "rank1_both_empty": 0, "close_unknown": 0,
+                 "top5_overlap_mean": None, "entry_vs_close_mean_pct": None, "rows": []}
+    if not intraday:
+        return out
+    start = min(intraday)
+    overlaps: list[int] = []
+    gaps: list[float] = []
+    for date in sorted(d for d in close if d >= start):
+        if date not in intraday:
+            out["intraday_missing"] += 1
+            continue
+        i_rows, i_summary = intraday[date]
+        if i_summary.get("status") == "NO_TODAY_BAR":
+            out["intraday_no_bar"] += 1
+            continue
+        c_rows = close[date][0]
+        c1, i1 = _rank1(c_rows), _rank1(i_rows)
+        c_top = {r.get("ticker") for r in c_rows if isinstance(r.get("rank"), int)}
+        i_top = {r.get("ticker") for r in i_rows if isinstance(r.get("rank"), int)}
+        gap: float | None = None
+        if i1 is not None:
+            close_of = {r.get("ticker"): r.get("close") for r in c_rows}
+            c_price, i_price = close_of.get(i1.get("ticker")), i1.get("close")
+            if c_price and i_price:
+                gap = (float(i_price) / float(c_price) - 1) * 100
+                gaps.append(gap)
+            else:
+                out["close_unknown"] += 1
+        same = c1 is not None and i1 is not None and c1.get("ticker") == i1.get("ticker")
+        out["compared"] += 1
+        out["rank1_same"] += int(same)
+        out["rank1_both_empty"] += int(c1 is None and i1 is None)
+        overlaps.append(len(c_top & i_top))
+        out["rows"].append({
+            "date": date,
+            "close_rank1": None if c1 is None else c1.get("ticker"),
+            "intraday_rank1": None if i1 is None else i1.get("ticker"),
+            "rank1_same": same, "top5_overlap": len(c_top & i_top),
+            "entry_vs_close_pct": gap,
+        })
+    if overlaps:
+        out["top5_overlap_mean"] = sum(overlaps) / len(overlaps)
+    if gaps:
+        out["entry_vs_close_mean_pct"] = sum(gaps) / len(gaps)
+    return out
+
+
 def _next_dates(
     candidate_dates: list[str], bars_dir: Path, calendar: list[str] | None = None
 ) -> dict[str, str | None]:
@@ -495,6 +577,14 @@ def print_report(results: list[dict], summary: dict) -> None:
               f"{x['bar_pct']:+.2f}% / 틱 {x['tick_reason']} {x['tick_pct']:+.2f}%")
     if "a_correlation" in s:
         print(f"A와 같은 날 상관: {s['a_correlation']}")
+    if "intraday_1520" in s:
+        ic = s["intraday_1520"]
+        print(f"15:20 병행 기록(§6(a)): 비교 {ic['compared']}일  1순위 같음 {ic['rank1_same']}  "
+              f"둘 다 후보 없음 {ic['rank1_both_empty']}  "
+              f"상위5 겹침 평균 {ic['top5_overlap_mean']}  "
+              f"15:20 진입가의 종가 대비 평균 {ic['entry_vs_close_mean_pct']}%  "
+              f"(누락 {ic['intraday_missing']} / 장중 봉 없음 {ic['intraday_no_bar']} / "
+              f"종가 모름 {ic['close_unknown']})")
     print(f"결측: {s['missing']}")
 
 
@@ -506,6 +596,11 @@ def main(argv: list[str] | None = None) -> int:
     results, missing = run(args.root)
     summary = summarize(results, missing=missing)
     summary["a_correlation"] = a_correlation(results, load_a_pnl(args.root))
+    overnight_dir = args.root / "data" / "overnight"
+    summary["intraday_1520"] = compare_intraday(
+        load_screen_dir(overnight_dir / "candidates"),
+        load_screen_dir(overnight_dir / "candidates_1520"),
+    )
     print_report(results, summary)
     if args.json:
         args.json.write_text(json.dumps({"summary": summary, "results": results},

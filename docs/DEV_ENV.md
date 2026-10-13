@@ -457,6 +457,36 @@ requirements-dev.txt (개발/테스트 전용)
   파일을 지운다 — 그래야 그날이 결측(overnight_sieve의 screen_failed)으로 정확히
   집계된다.
 
+  15:20 병행 기록 (StockBot_OvernightScreen1520, 2026-10-13 추가)
+  스펙 §6(a). 같은 규칙을 15:20 장중 값으로 돌려 data\overnight\candidates_1520\<날짜>.jsonl
+  에 따로 남긴다. 판정에 쓰지 않는다. 런처가 15:19~15:29 밖에서는 거부한다.
+
+  $Action = New-ScheduledTaskAction `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"D:\Private\stock-prod\scripts\run_overnight_screen.ps1`" -Phase 1520"
+
+  $Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At 15:20
+
+  $Settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 9) `
+    -RestartCount 0
+
+  Register-ScheduledTask `
+    -TaskName "StockBot_OvernightScreen1520" `
+    -Action $Action `
+    -Trigger $Trigger `
+    -Settings $Settings
+
+  확인: 등록 다음 거래일 15:24에 data\overnight\candidates_1520\<날짜>.jsonl 의 마지막 줄이
+  {"summary": true, "phase": "1520", "status": "OK", ...} 인지. status가 "NO_TODAY_BAR"면
+  장중 일봉에 오늘 행이 없었던 것이다 — 휴장일이 아닌데 이 값이 계속 나오면 장중 값을 다른
+  TR로 받아야 한다. 로그는 data\logs\overnight_screen_1520_*.log.
+  운영 프로세스가 살아 있는 시각이라 같은 앱키의 호출 한도를 함께 쓴다(약 20콜, 1.2초 간격,
+  배경 우선순위).
+
+  운영 예외일 2026-11-19(수능일)에는 15:20이 장중 한가운데라 의미가 없다. 그날은
+  StockBot_OvernightScreen1520도 비활성화한다(파일이 남았으면 지운다).
+
 
 ──────────────────────────────────────────────────
 11-4. StockBot_Backfill 종료 코드 읽는 법
