@@ -133,6 +133,8 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
   `side`·`ticker`·`cntg_qty`·`cntg_unpr`·`exchange_time`(공식 순서 인덱스 4·8~11의 원문)이 있다. 체결 통보
   (`cntg_yn=2`)의 `cntg_qty` 합이 주문 체결수량과, `cntg_unpr`가 DB 체결가와 맞는지 대조한다(분할 체결이면 수량
   가중 평균). 맞으면 위치가 확인된 것이다. `<len=N>`은 코드 모양이 아닌 값이라 가렸다는 뜻이다.
+  **2026-10-14·15 4개 주문에서 모두 맞았다(티켓 8.6절).** 이후에는 어긋나는 날만 맨 앞에 쓴다. 접수 통보
+  (`cntg_yn=1`)의 수량·가격은 주문값이므로 대조에서 뺀다.
 - `WS_FRAME_UNKNOWN_TR`(WARN)는 시세도 체결통보도 아닌 TR 프레임이다. `tr_id`가 `K0STCNI9`면 통보가 그 이름으로
   오고 있다는 뜻이다(`docs/FILL_NOTICE_FOLLOWUP_20261007.md` 6.2절).
 - 주문이 있었는데 `FILL_NOTICE_FRAME`도 `WS_FRAME_UNKNOWN_TR`도 없으면, 그 세션으로는 통보가 오지 않은 것이다.
