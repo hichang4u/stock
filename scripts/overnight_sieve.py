@@ -492,7 +492,9 @@ def count_screen_failed(calendar: list[str], file_dates: set[str], today: str) -
     return sum(1 for d in calendar if earliest <= d < today and d not in file_dates)
 
 
-def run(root: Path) -> tuple[list[dict], dict]:
+def run(root: Path, *, write_results: bool = True) -> tuple[list[dict], dict]:
+    """후보의 D+1 재생. ``write_results=False``면 결과 파일을 남기지 않는다(성과 보고서가
+    운영 트리를 읽기만 할 때)."""
     candidates_dir = root / "data" / "overnight" / "candidates"
     results_dir = root / "data" / "overnight" / "results"
     bars_dir = root / "data" / "backtest_bars"
@@ -545,7 +547,7 @@ def run(root: Path) -> tuple[list[dict], dict]:
                 result["tick"] = {k: tick_sim[k] for k in
                                   ("exit_reason", "exit_time", "exit_price", "gross_pct")}
             day_results.append(result)
-        if day_results:
+        if day_results and write_results:
             results_dir.mkdir(parents=True, exist_ok=True)
             (results_dir / f"{date}.json").write_text(
                 json.dumps(day_results, ensure_ascii=False, indent=2), encoding="utf-8"
