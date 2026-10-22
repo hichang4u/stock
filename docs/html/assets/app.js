@@ -1362,7 +1362,7 @@ function renderFactorGrid(s) {
 }
 
 function reasonName(reason) {
-  return {TRAILING:'트레일링 청산',TIMEOUT:'시간 청산',HARD_STOP:'손절 청산',SLIPPAGE_GUARD:'슬리피지 차단',ENTRY_FAIL:'진입 실패',MANUAL:'수동 청산',MARKET_CLOSED:'휴장일',VI_ACTIVE:'VI 차단'}[reason] || reason;
+  return {TRAILING:'트레일링 청산',TIMEOUT:'시간 청산',HARD_STOP:'손절 청산',SLIPPAGE_GUARD:'슬리피지 차단',ENTRY_FAIL:'진입 실패',MANUAL:'수동 청산',MARKET_CLOSED:'휴장일',VI_ACTIVE:'일시정지(VI) 진입 보류'}[reason] || reason;
 }
 
 function yn(v) {
@@ -1436,9 +1436,9 @@ function renderSettings(s) {
         ['F5 마감 청산', s.f5?.timeout_time ? `${s.f5.timeout_time} · 점검 ${s.f5.precheck_time || '—'}` : '—'],
       ]),
       settingBox('시세 감시', [
-        ['VI 감시', s.vi?.watch_enabled ? '활성' : '비활성', s.vi?.watch_enabled ? 'pup' : 'pdn'],
-        ['VI 동결 의심', `무시세 ${fmt(s.vi?.freeze_suspect_sec, 0)}초`],
-        ['VI 조회 쿨다운', `${fmt(s.vi?.check_cooldown_sec, 0)}초`],
+        ['급등락 일시정지(VI) 감시', s.vi?.watch_enabled ? '활성' : '비활성', s.vi?.watch_enabled ? 'pup' : 'pdn'],
+        ['일시정지 의심 기준', `가격 ${fmt(s.vi?.freeze_suspect_sec, 0)}초 멈춤`],
+        ['일시정지 재조회 간격', `${fmt(s.vi?.check_cooldown_sec, 0)}초`],
         ['REST 백업', restBackupLabel(s.f4?.rest_backup), s.f4?.rest_backup?.enabled ? 'pup' : 'pdn'],
       ]),
       settingBox('경로/계정', [
@@ -1819,7 +1819,7 @@ function renderSlipTable(sl, quality = {}) {
 
 function renderSkipHold(d) {
   const el = $('imp-skip-hold');
-  const skipLabel = {NO_TARGET:'후보 없음', GAP_CHANGED:'갭 이탈', ENTRY_FAIL:'진입 실패', SLIPPAGE_GUARD:'슬리피지', MANUAL:'수동', MARKET_CLOSED:'휴장일', VI_ACTIVE:'VI 차단'};
+  const skipLabel = {NO_TARGET:'후보 없음', GAP_CHANGED:'갭 이탈', ENTRY_FAIL:'진입 실패', SLIPPAGE_GUARD:'슬리피지', MANUAL:'수동', MARKET_CLOSED:'휴장일', VI_ACTIVE:'일시정지(VI)'};
   const skipRows = Object.entries(d.candidates.skips || {})
     .map(([k, v]) => `<div class="factor-row"><span>${esc(skipLabel[k] || k)}</span><span>${fmt(v)}건</span></div>`)
     .join('') || '<div class="empty">스킵 없음</div>';

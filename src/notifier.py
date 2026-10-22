@@ -52,9 +52,9 @@ _ALERT_TITLES = {
     "WS_KEY_REFRESH_FAIL": "실시간 접속키 갱신 실패",
     "STALE_POSITION_DETECTED": "이전 포지션 상태 확인 필요",
     "PROCESS_RESTART_DETECTED": "프로세스 재시작 감지",
-    "VI_DETECTED": "VI 발동",
-    "VI_RELEASED": "VI 해제",
-    "VI_ENTRY_BLOCKED": "진입 전 VI 차단",
+    "VI_DETECTED": "급등락 일시정지 시작(VI)",
+    "VI_RELEASED": "급등락 일시정지 끝(VI)",
+    "VI_ENTRY_BLOCKED": "급등락 일시정지라 진입 보류(VI)",
     "ENTRY_CANCEL_UNCONFIRMED": "진입 주문 취소 확인 실패",
     "BALANCE_QUERY_FAILED": "잔고 조회 실패로 진입 차단",
 }
