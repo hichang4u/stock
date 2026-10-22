@@ -112,7 +112,7 @@ def f3_detail_from_event(event: dict | None) -> str:
         "ABOVE_MAX": "갭 상한 초과",
         "GAP_CHANGED": "진입 전 갭 변동",
         "GAP_RECHECK_UNAVAILABLE": "진입 전 갭 재검증 불가",
-        "VI_ACTIVE": "급등락 일시정지라 진입 보류(VI)",
+        "VI_ACTIVE": "변동성완화장치(VI) 발동으로 진입 보류",
         "CANCEL_UNCONFIRMED": "진입 주문 취소 확인 실패",
         "BUYABLE_QTY_ZERO": "매수가능수량 0",
         "BUYABLE_QTY_QUERY_FAILED": "매수가능수량 조회 실패",

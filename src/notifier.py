@@ -52,9 +52,9 @@ _ALERT_TITLES = {
     "WS_KEY_REFRESH_FAIL": "실시간 접속키 갱신 실패",
     "STALE_POSITION_DETECTED": "이전 포지션 상태 확인 필요",
     "PROCESS_RESTART_DETECTED": "프로세스 재시작 감지",
-    "VI_DETECTED": "급등락 일시정지 시작(VI)",
-    "VI_RELEASED": "급등락 일시정지 끝(VI)",
-    "VI_ENTRY_BLOCKED": "급등락 일시정지라 진입 보류(VI)",
+    "VI_DETECTED": "변동성완화장치(VI) 발동",
+    "VI_RELEASED": "변동성완화장치(VI) 해제",
+    "VI_ENTRY_BLOCKED": "변동성완화장치(VI) 발동으로 진입 보류",
     "ENTRY_CANCEL_UNCONFIRMED": "진입 주문 취소 확인 실패",
     "BALANCE_QUERY_FAILED": "잔고 조회 실패로 진입 차단",
 }
