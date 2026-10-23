@@ -173,6 +173,16 @@ const one = priceFlowYDomain('full', [10000], {});
 check('도메인 degenerate: 단일 값 min<max(NaN 없음)',
   one.min < one.max && Number.isFinite(one.min) && Number.isFinite(one.max));
 
+// 미보유 관측: 진입 실패 뒤 ticker는 비고 observe_ticker로 관측이 이어진다(2026-10-23).
+eval(extract('flowTicker'));
+eval(extract('isObservingFlow'));
+check('관측 종목: 보유 종목이 우선', flowTicker({ticker: '005930', observe_ticker: '065450'}) === '005930');
+check('관측 종목: 미보유면 observe_ticker', flowTicker({ticker: null, observe_ticker: '065450'}) === '065450');
+check('관측 종목: 둘 다 없으면 null', flowTicker({}) === null);
+check('관측 중: 미보유 + observe_ticker', isObservingFlow({position_status: 'IDLE', observe_ticker: '065450'}));
+check('관측 중 아님: 보유 중', !isObservingFlow({position_status: 'HOLDING', ticker: '065450', observe_ticker: null}));
+check('관측 중 아님: 종목 없음', !isObservingFlow({position_status: 'IDLE'}));
+
 Date.now = realNow;
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures ? 1 : 0);

@@ -396,6 +396,71 @@ async def test_status_includes_tick_history_while_holding_and_closed(monkeypatch
     server.live.clear_tick_history()
 
 
+@pytest.mark.asyncio
+async def test_status_exposes_observed_ticker_prices_while_idle(monkeypatch):
+    # 2026-10-23: 진입 2회 미체결 뒤 F4는 1순위(observe_ticker)를 15:20까지 계속
+    # 관측하는데, 화면에는 종목도 가격 흐름도 비어 있었다.
+    s = server.state.get()
+    server.live.clear_tick_history()
+    monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
+    monkeypatch.setattr(
+        server, "_read_f1_snapshot",
+        lambda: (Path("20261023_090000.jsonl"), [{"ticker": "065450", "name": "빅텍"}]),
+    )
+    monkeypatch.setattr(s, "position_status", "IDLE")
+    monkeypatch.setattr(s, "target_ticker", None)
+    monkeypatch.setattr(s, "target_name", None)
+    monkeypatch.setattr(s, "observe_ticker", "065450")
+    monkeypatch.setattr(s, "entry_at", None)
+    server.live.push_tick(4_065.0, ticker="065450")
+    server.live.push_tick(9_999.0, ticker="030960")
+
+    payload = json.loads((await server.api_status()).body.decode("utf-8"))
+
+    assert payload["ticker"] is None
+    assert payload["observe_ticker"] == "065450"
+    assert payload["observe_name"] == "빅텍"
+    assert [row["price"] for row in payload["tick_history"]] == [4_065.0]
+    assert [row["price"] for row in payload["minute_price_history"]] == [4_065.0]
+    assert payload["trade_marks"] == []
+    server.live.clear_tick_history()
+
+
+@pytest.mark.asyncio
+async def test_status_observed_prices_exclude_previous_days(monkeypatch):
+    s = server.state.get()
+    server.live.clear_tick_history()
+    monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
+    monkeypatch.setattr(server, "_read_f1_snapshot", lambda: (None, []))
+    monkeypatch.setattr(s, "position_status", "IDLE")
+    monkeypatch.setattr(s, "target_ticker", None)
+    monkeypatch.setattr(s, "observe_ticker", "065450")
+    server.live._tick_history.append(
+        {"ts": "2026-07-06T09:10:00+09:00", "ticker": "065450", "price": 3_900.0})
+
+    payload = json.loads((await server.api_status()).body.decode("utf-8"))
+
+    assert payload["observe_ticker"] == "065450"
+    assert payload["observe_name"] is None
+    assert payload["tick_history"] == []
+    server.live.clear_tick_history()
+
+
+@pytest.mark.asyncio
+async def test_status_has_no_observed_ticker_while_holding(monkeypatch):
+    s = server.state.get()
+    monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
+    monkeypatch.setattr(s, "position_status", "HOLDING")
+    monkeypatch.setattr(s, "target_ticker", "065450")
+    monkeypatch.setattr(s, "observe_ticker", "065450")
+    monkeypatch.setattr(s, "entry_at", "2026-10-23T09:00:20+09:00")
+
+    payload = json.loads((await server.api_status()).body.decode("utf-8"))
+
+    assert payload["ticker"] == "065450"
+    assert payload["observe_ticker"] is None
+
+
 async def test_status_includes_vi_events_while_holding_and_closed(monkeypatch):
     s = server.state.get()
     server.live.clear_tick_history()

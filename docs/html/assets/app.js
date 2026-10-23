@@ -183,8 +183,10 @@ function applyStatus(d) {
   _lastStatus = d;
 
   // 탑바 심볼
-  $('tb-sym').textContent = d.ticker || '—';
-  $('tb-sname').textContent = d.ticker ? tickerName(d.ticker, d.name) : '대기중';
+  const observing = isObservingFlow(d);
+  $('tb-sym').textContent = flowTicker(d) || '—';
+  $('tb-sname').textContent = d.ticker ? tickerName(d.ticker, d.name)
+    : observing ? `${tickerName(d.observe_ticker, d.observe_name)} · 관측 중` : '대기중';
 
   // 모드 뱃지
   const isReal = d.mode!=='PAPER';
@@ -209,8 +211,9 @@ function applyStatus(d) {
   const badge = $('st-badge');
   badge.textContent = {IDLE:'대기중',ENTERING:'진입중',HOLDING:'보유중',CLOSED:'청산됨'}[d.position_status]||d.position_status;
   badge.className = 'st-badge '+(d.position_status||'IDLE');
-  $('st-tk').textContent  = d.ticker || '';
-  $('st-name').textContent = d.ticker ? tickerName(d.ticker, d.name) : '';
+  $('st-tk').textContent  = flowTicker(d) || '';
+  $('st-name').textContent = d.ticker ? tickerName(d.ticker, d.name)
+    : observing ? `${tickerName(d.observe_ticker, d.observe_name)} · 미보유 관측 중` : '';
   const trackingStopBtn = $('tracking-stop-btn');
   if(trackingStopBtn) {
     const closed = d.position_status === 'CLOSED';
@@ -407,8 +410,17 @@ function appendPriceFlowTick(ts, price, ticker) {
   }
 }
 
+// 차트가 그릴 종목. 미보유 중에는 F4가 관측하는 종목(observe_ticker)이다 —
+// 진입이 실패해도 관측은 15:20까지 이어진다(2026-10-23 빅텍).
+function flowTicker(d) {
+  return d?.ticker || d?.observe_ticker || null;
+}
+function isObservingFlow(d) {
+  return !d?.ticker && Boolean(d?.observe_ticker);
+}
+
 function updatePriceFlow(d) {
-  const ticker = d?.ticker || null;
+  const ticker = flowTicker(d);
   if(ticker !== _priceFlowTicker) {
     _priceFlowTicker = ticker;
     _priceFlow = [];
@@ -656,6 +668,8 @@ function drawPriceFlow(d) {
   const sub = $('flow-sub');
   const holding = d?.position_status === 'HOLDING';
   const closed = d?.position_status === 'CLOSED';
+  const observing = isObservingFlow(d);
+  const live = holding || observing;
 
   const spanMin = Math.max(1, (endTs - startTs) / 60000);
   // 창 크기에 맞춰 눈금 간격 선택: 20분 창이면 1분 눈금, 청산 후 장기 보유 리뷰면 확대
@@ -692,7 +706,7 @@ function drawPriceFlow(d) {
       }
     }
     const nowTs = Date.now();
-    if(holding && nowTs >= startTs && nowTs <= endTs) {
+    if(live && nowTs >= startTs && nowTs <= endTs) {
       const x = xAtTs(nowTs);
       ctx.strokeStyle = themeVal('rgba(247,166,0,.45)', 'rgba(247,166,0,.5)');
       ctx.setLineDash([3,4]);
@@ -736,7 +750,7 @@ function drawPriceFlow(d) {
     .map(Number).filter(v => v > 0);
   const values = points.map(p => p.price).concat(refs).concat(visibleMarks.map(m => m.price));
 
-  if(!values.length || (!holding && !closed)) {
+  if(!values.length || (!holding && !closed && !observing)) {
     const emptyText = closed ? '청산 완료 · 차트 데이터 없음' : '보유 포지션 없음';
     if(sub) sub.textContent = emptyText;
     ctx.fillStyle = themeVal('#787b86', '#4f5260');
@@ -763,8 +777,8 @@ function drawPriceFlow(d) {
       : `최근 ${PRICE_FLOW_VIEW_MIN}분`;
     const stateLabel = closed
       ? `청산 완료${d.close_reason ? ` (${d.close_reason})` : ''} · ${rangeLabel}`
-      : rangeLabel;
-    const priceLabel = lastPrice > 0 ? ` · ${holding ? '현재' : '마지막'} ${fmt(lastPrice)}원` : '';
+      : observing ? `미보유 관측 · ${rangeLabel}` : rangeLabel;
+    const priceLabel = lastPrice > 0 ? ` · ${live ? '현재' : '마지막'} ${fmt(lastPrice)}원` : '';
     sub.textContent = `${fmtFlowMinute(startTs)}-${fmtFlowMinute(endTs)} · ${stateLabel} · 틱 ${points.length}개 · ${timeLabel}${priceLabel}`;
   }
 
@@ -1840,12 +1854,14 @@ function connectSSE() {
       if(d.type==='tick') {
         if(_lastStatus) {
           const tickTs = d.ts || new Date().toISOString();
-          const tickTicker = d.ticker || _lastStatus.ticker;
+          const tickTicker = d.ticker || flowTicker(_lastStatus);
           const tickPrice = Number(d.price || 0);
           _lastStatus.current_price = tickPrice;
           if(_lastStatus.entry_price)
             _lastStatus.pnl_pct = +((tickPrice/_lastStatus.entry_price-1)*100).toFixed(2);
-          if(_lastStatus.position_status === 'HOLDING' && tickPrice > 0) {
+          const observedTick = isObservingFlow(_lastStatus)
+            && String(tickTicker) === String(_lastStatus.observe_ticker);
+          if((_lastStatus.position_status === 'HOLDING' || observedTick) && tickPrice > 0) {
             // 배열 복사 없이 공유 버퍼(_priceFlowTicks/_priceFlow)에 tick 하나만 증분 추가.
             // updatePriceFlow의 신선도 가드가 이후 stale payload 덮어쓰기를 막는다.
             appendPriceFlowTick(tickTs, tickPrice, tickTicker);

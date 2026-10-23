@@ -592,9 +592,45 @@ async def _today_trade_marks() -> list[dict]:
         return []
 
 
+_POSITION_VIEW_STATUSES = ("HOLDING", "EXITING", "CLOSED")
+
+
+def _observed_view(s: state.State) -> tuple[str | None, str | None]:
+    """미보유 중 F4가 관측하는 종목과 이름. 보유·청산 중이면 (None, None).
+
+    진입이 실패하면 target_ticker는 지워지지만 F4는 observe_ticker(그날 처음 잠긴
+    1순위)를 15:20까지 계속 찍는다(f4_tracking._observed_ticker). 화면이 이 종목을
+    보여주지 않으면 관측 중인데도 종목·가격 흐름이 비어 보인다(2026-10-23).
+    """
+    if s.position_status in _POSITION_VIEW_STATUSES:
+        return None, None
+    ticker = s.target_ticker or s.observe_ticker
+    if not ticker:
+        return None, None
+    if s.target_ticker == ticker and s.target_name:
+        return ticker, s.target_name
+    _, rows = _read_f1_snapshot()
+    name = next((r.get("name") for r in rows if str(r.get("ticker")) == ticker), None)
+    return ticker, name
+
+
+def _today_start() -> datetime:
+    return datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 @app.get("/api/status")
 async def api_status() -> JSONResponse:
     s = state.get()
+    observe_ticker, observe_name = _observed_view(s)
+    if s.position_status in _POSITION_VIEW_STATUSES:
+        tick_rows = live.tick_history(s.target_ticker, since=s.entry_at)
+        minute_rows = live.minute_price_history(s.target_ticker, since=s.entry_at)
+    elif observe_ticker:
+        # 버퍼는 프로세스가 살아 있는 동안 이어지므로 지난 거래일 틱은 뺀다.
+        tick_rows = live.tick_history(observe_ticker, since=_today_start())
+        minute_rows = live.minute_price_history(observe_ticker, since=_today_start())
+    else:
+        tick_rows, minute_rows = [], []
     logs = _read_today_logs(limit=_STATUS_LOG_LIMIT)
     assets = _asset_snapshot_cached() or await _latest_asset_snapshot_from_db()
     entry = s.entry_price or 0.0
@@ -631,17 +667,13 @@ async def api_status() -> JSONResponse:
             "post_close_tracking_active": f4_tracking.post_close_observation_active(),
             "post_close_tracking_stopped": s.post_close_tracking_stopped,
             "assets": assets,
+            # 미보유 중 F4가 관측하는 종목. 진입 실패 뒤에도 가격 흐름을 보여준다.
+            "observe_ticker": observe_ticker,
+            "observe_name": observe_name,
             # 청산(CLOSED) 후에도 당일 리뷰용으로 tick 이력을 유지해 내려준다.
-            "tick_history": (
-                live.tick_history(s.target_ticker, since=s.entry_at)
-                if s.position_status in ("HOLDING", "EXITING", "CLOSED")
-                else []
-            ),
-            "minute_price_history": (
-                live.minute_price_history(s.target_ticker, since=s.entry_at)
-                if s.position_status in ("HOLDING", "EXITING", "CLOSED")
-                else []
-            ),
+            # 미보유 중에는 관측 종목의 오늘 이력을 내려준다.
+            "tick_history": tick_rows,
+            "minute_price_history": minute_rows,
             "trade_marks": (
                 await _today_trade_marks()
                 if s.position_status in ("HOLDING", "EXITING", "CLOSED")
