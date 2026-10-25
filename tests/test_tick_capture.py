@@ -412,3 +412,149 @@ async def test_soft_limit_warning_logged_without_dropping_data(mem, tmp_path, mo
     assert len(_read_all_rows(tmp_path)) == 1
     m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
     assert m["data_complete"] == 1
+
+
+# ── ws 무수신 기록 (WS_REST_OUTAGE 티켓 8.5절 다 보강) ─────────────────────
+# 단절 기록(mark_ws_disconnect)보다 앞서 이미 조용했던 구간은 max_ws_outage_sec에
+# 잡히지 않는다(2026-10-23 13:10: 실제 18.6초, 기록 2.1초). 완전성 판정은 그대로
+# 두고, ws 표본 사이 최대 간격과 그 사이 놓친 체결량만 마감 로그에 남긴다.
+
+
+def _ws_rec(second, cum, qty, minute="10"):
+    """누계거래량(raw[13])·체결량(raw[12])을 담은 47필드 ws 체결 하나."""
+    t = _tick(0, minute=minute, second=second)
+    raw = ["0"] * 47
+    raw[12] = str(qty)
+    raw[13] = str(cum)
+    t["qty"] = qty
+    t["raw"] = raw
+    return t
+
+
+def _finalized(events):
+    return [kw for event, kw in events if event == "TICK_CAPTURE_FINALIZED"][-1]
+
+
+async def test_ws_silence_before_disconnect_is_logged_with_missed_qty(
+    mem, tmp_path, monkeypatch
+):
+    events = []
+    monkeypatch.setattr(tc, "log", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_ws_rec("09", cum=1_000, qty=5))
+    cap.enqueue(_ws_rec("10", cum=1_010, qty=10))
+    # 16초 조용하다가 서버가 끊고 2초 뒤 붙는다.
+    cap.mark_ws_disconnect(at=_at(second="26"))
+    cap.mark_ws_reconnect(at=_at(second="28"))
+    cap.enqueue(_ws_rec("28", cum=1_500, qty=10))
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+
+    fin = _finalized(events)
+    assert fin["max_ws_outage_sec"] == 2.0  # 기존 지표는 그대로
+    assert fin["max_ws_silence_sec"] == 18.0
+    assert fin["max_ws_silence_from"] == "2026-08-13T09:10:10+09:00"
+    assert fin["max_ws_silence_to"] == "2026-08-13T09:10:28+09:00"
+    assert fin["max_ws_silence_missed_qty"] == 480  # 1500 − 1010 − 10
+    assert fin["ws_silences_over_limit"] == 1
+    assert fin["ws_silence_missed_qty"] == 480
+    # 완전성 판정은 바꾸지 않는다.
+    m = await db.get_price_path_manifest("20260813", "005930", "baseline-x")
+    assert m["data_complete"] == 1
+
+
+async def test_ws_silence_with_continuous_volume_has_no_missed_qty(
+    mem, tmp_path, monkeypatch
+):
+    """VI 단일가처럼 체결 자체가 없던 공백은 길어도 놓친 체결량이 0이다."""
+    events = []
+    monkeypatch.setattr(tc, "log", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_ws_rec("10", cum=1_000, qty=5))
+    cap.enqueue(_ws_rec("40", cum=1_300, qty=300))
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+
+    fin = _finalized(events)
+    assert fin["max_ws_silence_sec"] == 30.0
+    assert fin["max_ws_silence_missed_qty"] == 0
+    assert fin["ws_silences_over_limit"] == 1
+    assert fin["ws_silence_missed_qty"] == 0
+
+
+async def test_short_ws_silences_are_not_counted_over_limit(mem, tmp_path, monkeypatch):
+    """임계값 이하 공백은 최대값에만 남고 건수·누락 합계에는 들어가지 않는다."""
+    events = []
+    monkeypatch.setattr(tc, "log", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_ws_rec("10", cum=1_000, qty=5))
+    cap.enqueue(_ws_rec("13", cum=1_200, qty=10))  # 3초, 190주 불연속(바탕 잡음 수준)
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+
+    fin = _finalized(events)
+    assert fin["max_ws_silence_sec"] == 3.0
+    assert fin["max_ws_silence_missed_qty"] == 190
+    assert fin["ws_silences_over_limit"] == 0
+    assert fin["ws_silence_missed_qty"] == 0
+
+
+async def test_rest_sample_does_not_end_a_ws_silence(mem, tmp_path, monkeypatch):
+    """REST 표본은 가격만 이을 뿐 ws 체결을 대신하지 않는다(티켓 4절 경로)."""
+    events = []
+    monkeypatch.setattr(tc, "log", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_ws_rec("10", cum=1_000, qty=5))
+    rest = _tick(1, second="15")
+    rest["source"] = "rest"
+    rest["source_ts"] = None
+    cap.enqueue(rest)
+    cap.enqueue(_ws_rec("33", cum=1_100, qty=10))
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+
+    fin = _finalized(events)
+    assert fin["max_ws_silence_sec"] == 23.0
+    assert fin["max_ws_silence_missed_qty"] == 90
+
+
+async def test_ws_silence_without_raw_has_unknown_missed_qty(mem, tmp_path, monkeypatch):
+    """원시 필드가 없으면(옛 형식) 공백 길이만 남기고 누락량은 모른다(None)."""
+    events = []
+    monkeypatch.setattr(tc, "log", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap = _new_capture(tmp_path)
+    cap.start()
+    cap.enqueue(_tick(0, second="10"))
+    cap.enqueue(_tick(1, second="25"))
+    await cap.finalize("COMPLETE", reached_expected_close=True)
+
+    fin = _finalized(events)
+    assert fin["max_ws_silence_sec"] == 15.0
+    assert fin["max_ws_silence_missed_qty"] is None
+    assert fin["ws_silences_over_limit"] == 1
+    assert fin["ws_silence_missed_qty"] == 0
+
+
+async def test_ws_silence_spans_a_restart(mem, tmp_path, monkeypatch):
+    """재시작 뒤 이어쓰기에서도 직전 ws 표본을 복원해 재시작 공백을 잰다."""
+    events = []
+    monkeypatch.setattr(tc, "log", lambda event, **kw: events.append((event, kw)))
+    monkeypatch.setattr(tc, "MAX_WS_OUTAGE_SEC", 10.0)
+    cap1 = _new_capture(tmp_path)
+    cap1.start()
+    cap1.enqueue(_ws_rec("10", cum=1_000, qty=5))
+    await cap1.finalize("PROCESS_SHUTDOWN", reached_expected_close=False)
+
+    cap2 = _new_capture(tmp_path)
+    cap2.start()
+    cap2.enqueue(_ws_rec("05", cum=4_000, qty=20, minute="11"))
+    await cap2.finalize("COMPLETE", reached_expected_close=True)
+
+    fin = _finalized(events)
+    assert fin["max_ws_silence_sec"] == 55.0
+    assert fin["max_ws_silence_missed_qty"] == 2_980

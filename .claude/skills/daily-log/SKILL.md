@@ -80,6 +80,12 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 다른 세션 때문이다. `OPSP0000`(성공) 뒤에 끊기면 그 원인은 아니다
 (`docs/OPENING_WINDOW_FOLLOWUP_20261006.md` 1.4절).
 
+15:20 `TICK_CAPTURE_FINALIZED`(2026-10-26 승격분~)의 ws 무수신 필드를 본다. `max_ws_outage_sec`는 단절
+기록부터만 재므로 서버가 끊기 전 이미 조용했던 시간을 놓친다(`docs/WS_REST_OUTAGE_FOLLOWUP_20261021.md` 8.4절).
+- `max_ws_silence_sec`·`_from`·`_to`: ws 체결 사이 최대 간격. `_missed_qty`가 0이면 그 사이 체결이 없었다(VI 등).
+- `ws_silences_over_limit`·`ws_silence_missed_qty`: 10초 넘는 공백 건수와 그 사이 놓친 체결량 합계.
+  **`ws_silence_missed_qty` > 0이면 맨 앞에 쓴다.** `data_complete=1`이어도 실제 체결이 빠진 날이다.
+
 ### 4.1 체결 프레임 점검 — 매일 돌린다
 
 ```bash

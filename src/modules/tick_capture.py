@@ -98,6 +98,18 @@ def _parse_ts(value: str | None) -> datetime | None:
         return None
 
 
+def _cum_and_qty(raw) -> tuple[int, int] | None:
+    """ws 원시 필드에서 (누계거래량, 체결량)을 꺼낸다. 옛 형식(``^`` 문자열)도 받는다.
+
+    다건 프레임을 한 행에 담던 옛 형식은 첫 레코드 값이다. 꺼낼 수 없으면 None.
+    """
+    fields = raw.split("^") if isinstance(raw, str) else raw
+    try:
+        return int(fields[13]), int(fields[12])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
 def _hour_of(received_at: str) -> str:
     try:
         return datetime.fromisoformat(received_at).astimezone(KST).strftime("%H")
@@ -141,6 +153,18 @@ class TickCapture:
         # 재접속 중 먼저 오는 쪽이 닫는다.
         self._ws_outage_since: datetime | None = None
         self._max_ws_outage_sec = 0.0
+        # ws 표본 사이 최대 간격과 그 사이 놓친 체결량. 단절 기록보다 먼저 시작된
+        # 무수신은 위 공백 측정에 잡히지 않는다(2026-10-23 13:10: 실제 18.6초, 기록
+        # 2.1초). 완전성 판정에는 쓰지 않고 마감 로그에만 남긴다.
+        self._last_ws_at: datetime | None = None
+        self._last_ws_received_at: str | None = None
+        self._last_ws_cum: int | None = None
+        self._max_ws_silence_sec = 0.0
+        self._max_ws_silence_from: str | None = None
+        self._max_ws_silence_to: str | None = None
+        self._max_ws_silence_missed_qty: int | None = None
+        self._ws_silences_over_limit = 0
+        self._ws_silence_missed_qty = 0
         self._prior_interruption = False
         self._rest_backfill: list[dict] = []
         self._first_source_ts: str | None = None
@@ -258,6 +282,8 @@ class TickCapture:
                 self._last_order_ts = str(order_ts)
             if row.get("source") == "rest":
                 self._track_rest_backfill(received_at)
+            elif row.get("source") == "ws":
+                self._note_ws_silence(received_at, row.get("raw"))
             self._note_timestamps(source_ts, received_at)
 
     def _iter_chunk_rows(self):
@@ -309,6 +335,35 @@ class TickCapture:
         if gap > self._max_ws_outage_sec:
             self._max_ws_outage_sec = gap
         self._ws_outage_since = None
+
+    def _note_ws_silence(self, received_at: str | None, raw) -> None:
+        """직전 ws 표본과의 간격을 재고, 누계거래량 차로 놓친 체결량을 센다.
+
+        놓친 양 = 이번 누계 − 직전 누계 − 이번 체결량. 0이면 그 사이 체결이 없었다
+        (VI 단일가 등). 임계값(MAX_WS_OUTAGE_SEC)을 넘는 공백만 건수·합계에 넣는다 —
+        짧은 공백의 불연속은 KIS 쪽 바탕 잡음과 구분되지 않는다.
+        """
+        at = _parse_ts(received_at)
+        if at is None:
+            return
+        cum_qty = _cum_and_qty(raw) if raw is not None else None
+        prev_at, prev_cum = self._last_ws_at, self._last_ws_cum
+        if prev_at is not None and at > prev_at:
+            gap = (at - prev_at).total_seconds()
+            missed = None
+            if cum_qty is not None and prev_cum is not None:
+                missed = max(0, cum_qty[0] - prev_cum - cum_qty[1])
+            if gap > self._max_ws_silence_sec:
+                self._max_ws_silence_sec = gap
+                self._max_ws_silence_from = self._last_ws_received_at
+                self._max_ws_silence_to = received_at
+                self._max_ws_silence_missed_qty = missed
+            if gap > MAX_WS_OUTAGE_SEC:
+                self._ws_silences_over_limit += 1
+                self._ws_silence_missed_qty += missed or 0
+        self._last_ws_at = at
+        self._last_ws_received_at = received_at
+        self._last_ws_cum = cum_qty[0] if cum_qty is not None else None
 
     def _ws_loss_before_close(self) -> bool:
         return self._max_ws_outage_sec > MAX_WS_OUTAGE_SEC
@@ -384,6 +439,8 @@ class TickCapture:
             self._track_rest_backfill(received_at)
         elif self._rest_backfill and self._rest_backfill[-1].get("_open"):
             self._rest_backfill[-1]["_open"] = False  # ws 재개 → 백필 구간 종료
+        if source == "ws":
+            self._note_ws_silence(received_at, tick.get("raw"))
         self._close_ws_outage(_parse_ts(received_at))
 
         row = {
@@ -598,6 +655,12 @@ class TickCapture:
             source_ts_reversals=self._source_ts_reversals,
             ws_disconnects=self._ws_disconnects,
             max_ws_outage_sec=round(self._max_ws_outage_sec, 1),
+            max_ws_silence_sec=round(self._max_ws_silence_sec, 1),
+            max_ws_silence_from=self._max_ws_silence_from,
+            max_ws_silence_to=self._max_ws_silence_to,
+            max_ws_silence_missed_qty=self._max_ws_silence_missed_qty,
+            ws_silences_over_limit=self._ws_silences_over_limit,
+            ws_silence_missed_qty=self._ws_silence_missed_qty,
         )
         return manifest
 
