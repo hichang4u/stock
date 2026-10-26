@@ -95,7 +95,37 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 기록부터만 재므로 서버가 끊기 전 이미 조용했던 시간을 놓친다(`docs/WS_REST_OUTAGE_FOLLOWUP_20261021.md` 8.4절).
 - `max_ws_silence_sec`·`_from`·`_to`: ws 체결 사이 최대 간격. `_missed_qty`가 0이면 그 사이 체결이 없었다(VI 등).
 - `ws_silences_over_limit`·`ws_silence_missed_qty`: 10초 넘는 공백 건수와 그 사이 놓친 체결량 합계.
-  **`ws_silence_missed_qty` > 0이면 맨 앞에 쓴다.** `data_complete=1`이어도 실제 체결이 빠진 날이다.
+  `ws_silence_missed_qty` > 0이면 `data_complete=1`이어도 실제 체결이 빠진 날이다. 아래 명령으로 어디서 빠졌는지
+  가른다.
+  - **매시 정각 단절**(`hh:00:00 ~ 03`): 이미 기록된 사안이다(`docs/OPENING_WINDOW_FOLLOWUP_20261006.md`
+    1.6절). 맨 앞에 쓰지 않고 시각별 양만 적는다. 이 지표는 정각 손실을 공백이 10초를 넘을 때만 잡는다.
+    2026-10-26에는 정각 네 번에 4,767주가 빠졌는데, 지표에는 13:00의 1,396주만 잡혔다.
+  - **그 밖의 시각**에서 빠졌으면 **맨 앞에 쓴다.**
+  - 09시대 공백 0초 안팎의 작은 불연속은 KIS 누계거래량 잡음이다(`docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md`
+    7.5절). 같은 날 그런 불연속이 얼마나 잦은지와 비교해서만 판단한다.
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
+import gzip, glob, json
+from datetime import datetime
+rows=[]
+for p in sorted(glob.glob('data/strategy_ticks/<YYYYMMDD>/<티커>.*.jsonl.gz')):
+    try:
+        with gzip.open(p,'rt',encoding='utf-8') as fh:
+            for line in fh:
+                if line.strip():
+                    try: rows.append(json.loads(line))
+                    except ValueError: pass
+    except EOFError: pass
+prev=None
+for r in (r for r in rows if r.get('source')=='ws'):
+    f=r['raw'] if isinstance(r['raw'],list) else str(r['raw']).split('^')
+    t=datetime.fromisoformat(r['received_at']); cum=int(f[13])
+    if prev and cum-prev[1]-int(f[12])>0:
+        print(prev[0].time(),'->',t.time(),round((t-prev[0]).total_seconds(),2),'초 | 빠진',cum-prev[1]-int(f[12]),'주')
+    prev=(t,cum)
+"
+```
 
 ### 4.1 체결 프레임 점검 — 매일 돌린다
 
