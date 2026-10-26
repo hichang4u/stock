@@ -1,5 +1,6 @@
 import asyncio
 import os
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -7,6 +8,14 @@ from src.utils.logger import log, normalize_level
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
 _SEND_INTERVAL = 1.1
+_SEND_ATTEMPTS = 3
+# 전송을 확인하지 못한 알림. 다음 알림이 전송에 성공할 때 끝에 한 줄로 알리고 비운다.
+# 응답 타임아웃이면 메시지는 이미 도착했을 수 있다 — 2026-10-26 매수 체결 알림이 타임아웃 3회
+# 뒤 NOTIFICATION_FAILED로 남았는데 사용자는 3번 받았다
+# (docs/NOTIFICATION_LOSS_FOLLOWUP_20261026.md).
+_unconfirmed: list[str] = []
+_NOTE_MAX_ITEMS = 3
+_UNCONFIRMED_KEEP = 50
 
 
 _ACTIONABLE_ALERT_EVENTS = {
@@ -128,6 +137,101 @@ def _clean_message(message: str) -> str:
     return " ".join(str(message).split())
 
 
+def _alert_head(text: str) -> str:
+    """알림 첫 두 줄(제목·종목)을 한 줄로. 로그와 미확인 안내에 쓴다."""
+    lines = str(text).split("\n")
+    head = lines[0]
+    if len(lines) > 1 and lines[1].startswith("종목 : "):
+        stock = lines[1][len("종목 : "):]
+        if stock and stock != "-":
+            head = f"{head} · {stock}"
+    return head[:80]
+
+
+def _with_unconfirmed_note(text: str) -> str:
+    if not _unconfirmed:
+        return text
+    shown = _unconfirmed[:_NOTE_MAX_ITEMS]
+    rest = len(_unconfirmed) - len(shown)
+    note = f"※ 앞선 알림 {len(_unconfirmed)}건 전송 확인 안 됨: " + ", ".join(shown)
+    if rest:
+        note += f" 외 {rest}건"
+    return f"{text}\n{note}"
+
+
+def _scrub(value: str, token: str) -> str:
+    return value.replace(token, "***") if token else value
+
+
+ClientFactory = Callable[[], httpx.AsyncClient]
+
+
+async def _deliver(
+    client_factory: ClientFactory,
+    url: str,
+    chat_id: str,
+    text: str,
+    *,
+    token: str = "",
+    sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+) -> bool:
+    """알림 하나를 최대 3회 보낸다. 성공하면 True.
+
+    - 429는 retry_after만큼 쉬고 다시 보낸다. 그 밖의 오류 응답은 재시도하지 않는다(기존 동작).
+    - 예외는 다시 보낸다. 응답 타임아웃이면 메시지가 이미 도착했을 수 있어 "확인 못 함"으로 적는다.
+    - 실패하면 어떤 알림인지·시도별 예외·상태 코드를 남기고, 다음 성공 알림 끝에 덧붙인다.
+    """
+    reported = len(_unconfirmed)
+    outgoing = _with_unconfirmed_note(text)
+    errors: list[str] = []
+    last_error = ""
+    status: int | None = None
+    body = ""
+    attempts = 0
+    for attempt in range(1, _SEND_ATTEMPTS + 1):
+        attempts = attempt
+        try:
+            async with client_factory() as client:
+                resp = await client.post(url, json={"chat_id": chat_id, "text": outgoing})
+        except Exception as e:  # noqa: BLE001 — 알림 실패가 호출부를 흔들면 안 된다
+            errors.append(type(e).__name__)
+            last_error = _scrub(repr(e), token)
+            status = None
+            continue
+        status = resp.status_code
+        if 200 <= status < 300:
+            if reported:
+                log("NOTIFICATION_UNCONFIRMED_REPORTED", level="INFO", count=reported)
+                del _unconfirmed[:reported]
+            return True
+        body = _scrub(resp.text[:200], token)
+        if status == 429:
+            try:
+                retry_after = float(resp.json().get("parameters", {}).get("retry_after", 1))
+            except Exception:  # noqa: BLE001
+                retry_after = 1.0
+            await sleep(retry_after)
+            continue
+        break
+
+    rejected = status is not None
+    log(
+        "NOTIFICATION_FAILED",
+        level="WARN",
+        alert=_alert_head(text),
+        attempts=attempts,
+        errors=errors or None,
+        error=last_error or None,
+        status=status,
+        body=body or None,
+        delivery="REJECTED" if rejected else "UNCONFIRMED",
+    )
+    reason = "거부됨" if rejected else "확인 못 함 — 도착·중복 가능"
+    _unconfirmed.append(f"{_alert_head(text)} ({reason})")
+    del _unconfirmed[:-_UNCONFIRMED_KEEP]
+    return False
+
+
 async def worker() -> None:
     """
     Background sender for Telegram API.
@@ -141,21 +245,12 @@ async def worker() -> None:
         text = await _queue.get()
 
         if token and chat_id:
-            for attempt in range(1, 4):
-                try:
-                    async with httpx.AsyncClient(timeout=5) as client:
-                        resp = await client.post(url, json={
-                            "chat_id": chat_id,
-                            "text": text,
-                        })
-                    if resp.status_code == 429:
-                        retry_after = resp.json().get("parameters", {}).get("retry_after", 1)
-                        await asyncio.sleep(float(retry_after))
-                        continue
-                    break
-                except Exception as e:
-                    if attempt == 3:
-                        log("NOTIFICATION_FAILED", level="WARN", error=str(e))
+            try:
+                await _deliver(
+                    lambda: httpx.AsyncClient(timeout=5), url, chat_id, text, token=token
+                )
+            except Exception:  # noqa: BLE001 — 워커는 죽지 않는다
+                pass
 
         _queue.task_done()
         await asyncio.sleep(_SEND_INTERVAL)
