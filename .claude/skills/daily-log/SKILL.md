@@ -60,6 +60,17 @@ print(len(u),'행 |', '<티커>' in [str(c.get('ticker')) for c in u])
 "
 ```
 
+### 3.1 진입 타이밍 — 진입 시도가 있었으면 돌린다
+
+```bash
+cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts/entry_timing_report.py --root D:/Private/stock-prod --date <YYYYMMDD>
+```
+
+첫 체결(시가)과 주문의 앞뒤, 주문별 갈래(창 안 체결 / 늦은 확인 / 취소), 주문 API 통신 시간, 시가 대비
+진입가를 한 줄로 낸다. 그 행을 `docs/ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md` 8절에 옮긴다. 시가 대비 금액은
+추정이다. 누적은 `--since 20261013`으로 본다(맨 아래 요약 줄). 레거시 경로 날은 캡처가 종목 고정 뒤부터라
+첫 체결을 비워 둔다.
+
 ## 4. WS 상태
 
 ```bash
