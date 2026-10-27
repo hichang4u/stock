@@ -846,6 +846,11 @@ async def _handle_price_tick(
         return False
 
     live.push_tick(price, ticker=ticker)
+    # 그날 첫 체결을 남긴다. F3가 개장 직후 주문의 체결 확인 창을 여기서부터 센다.
+    try:
+        live.note_trade(ticker, (tick_meta or {}).get("source_ts"), price)
+    except Exception:  # noqa: BLE001 — 기록 실패가 틱 처리를 막으면 안 된다
+        pass
     # 진입~15:20 durable 가격 경로에 적재한다. 논블로킹·격리 — 캡처 실패가
     # 스탑 추적·주문 경로를 흔들면 안 된다. CLOSED 구간에서도 가격만 기록한다.
     # 거래소 시각(source_ts)·체결량(qty)·출처를 그대로 보존하고, naive/무효

@@ -14,6 +14,10 @@ os.environ["STOCK_SKIP_DOTENV"] = "1"
 # 보내 동작이 달라지지 않게 한다. 체결통보 테스트는 각자 monkeypatch로 켠다.
 os.environ.setdefault("F3_FILL_NOTICE_ENABLED", "0")
 
+# 개장 직후 첫 체결 대기도 기본으로 끈다. 실제 시계로 도는 진입 테스트가 09:00 ~ 09:00:45에
+# 실행되면 첫 체결 신호를 기다리며 멈춘다. 대기 테스트(test_first_trade_wait.py)는 각자 켠다.
+os.environ.setdefault("F3_FIRST_TRADE_WAIT_UNTIL_SEC", "0")
+
 # 테스트 중 stock 로거 stdout/파일 출력 억제
 _stock_log = logging.getLogger("stock")
 _stock_log.handlers = []

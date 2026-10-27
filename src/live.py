@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import deque
-from datetime import datetime
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 from src.utils.logger import event_label, normalize_level
@@ -28,6 +28,60 @@ real_entry_enabled: bool = False
 
 # 당일 VI(변동성완화장치) 이벤트 — UI 차트 구간 표시·사후 분석용
 vi_events: list[dict] = []
+
+# 종목별 그날 첫 체결(거래소 시각 09:00 이후). F3는 개장 직후 주문의 체결 확인 창을 여기서부터
+# 센다(docs/ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md 8.4절 가안). F4 틱 처리가 채운다.
+_MARKET_OPEN = time(9, 0)
+_first_trades: dict[str, dict] = {}
+_first_trade_events: dict[str, asyncio.Event] = {}
+
+
+def _drop_stale_first_trade(ticker: str, day: date) -> None:
+    kept = _first_trades.get(ticker)
+    if kept is not None and kept["at"].date() != day:
+        del _first_trades[ticker]
+        event = _first_trade_events.get(ticker)
+        if event is not None:
+            event.clear()
+
+
+def note_trade(ticker: str | None, source_ts: str | None, price: float) -> None:
+    """체결 틱 하나를 받는다. 그 종목의 그날 09:00 이후 첫 체결만 남긴다.
+
+    거래소 시각이 없거나 오프셋이 없으면 버린다 — 수신 시각으로 대신하면 장전 틱을 첫 체결로
+    볼 수 있다.
+    """
+    if not ticker or not source_ts:
+        return
+    try:
+        at = datetime.fromisoformat(str(source_ts))
+    except ValueError:
+        return
+    if at.tzinfo is None or at.utcoffset() is None:
+        return
+    at = at.astimezone(KST)
+    if at.time() < _MARKET_OPEN:
+        return
+    _drop_stale_first_trade(ticker, at.date())
+    if ticker in _first_trades:
+        return
+    _first_trades[ticker] = {"at": at, "price": price}
+    first_trade_event(ticker, at.date()).set()
+
+
+def first_trade(ticker: str, day: date) -> dict | None:
+    """그날 그 종목의 첫 체결 {"at", "price"}. 아직 없으면 None."""
+    _drop_stale_first_trade(ticker, day)
+    return _first_trades.get(ticker)
+
+
+def first_trade_event(ticker: str, day: date) -> asyncio.Event:
+    """그날 그 종목의 첫 체결이 오면 set되는 이벤트."""
+    _drop_stale_first_trade(ticker, day)
+    event = _first_trade_events.get(ticker)
+    if event is None:
+        event = _first_trade_events[ticker] = asyncio.Event()
+    return event
 
 # NTP 마지막 측정값
 ntp_offset_ms: float = -1.0

@@ -206,3 +206,23 @@ def test_main_prints_a_table_over_a_range(tmp_path, capsys):
     assert "09:00:07.101" in out and "9,470" in out
     assert "+95" in out and "추정" in out
     assert "1차 첫 체결 뒤 · 창 안 체결" in out
+
+
+def test_waited_for_the_first_trade_then_filled_in_window(tmp_path):
+    """2026-10-27 가안 이후: 주문은 첫 체결 전, 창은 첫 체결부터 — 취소 없이 창 안 체결."""
+    _write_log(tmp_path, [
+        _sent("09:00:05.050", "0000001932", 1, ticker="005935"),
+        _ev("09:00:05.060", "ENTRY_FIRST_TRADE_WAIT", ticker="005935", order_id="0000001932"),
+        _ev("09:00:27.200", "ENTRY_FIRST_TRADE_SEEN", ticker="005935", order_id="0000001932",
+            via="FIRST_TRADE", waited_ms=22140),
+        _ev("09:00:28.100", "ENTRY_EXECUTED", ticker="005935", order_id="0000001932",
+            fill_price=170600, fill_qty=40),
+        _timing("09:00:28.100", total_ms=28100),
+    ])
+    _write_ticks(tmp_path, [("09:00:27.179", _rec("090027", 170600, 73517, 73517, "005935"))],
+                 ticker="005935")
+    day = analyze_day(tmp_path, DATE)
+    [o] = day["orders"]
+    assert o["outcome"] == "IN_WINDOW" and o["lead_sec"] == 22.129
+    assert day["vs_open_per_share"] == 0
+    assert branch_label(day) == "1차 첫 체결 전 · 창 안 체결"

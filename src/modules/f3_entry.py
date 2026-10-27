@@ -13,7 +13,7 @@ from decimal import ROUND_FLOOR, Decimal
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-from src import db, notifier, state
+from src import db, live, notifier, state
 from src.api import kis_notice, kis_rest
 from src.modules import f1_selector, paper_fast_probe, tick_capture, vi_watch
 from src.utils.logger import log
@@ -199,10 +199,57 @@ F3_FILL_POLL_INTERVAL_SEC = max(
 # 끄면 기존 조회만 쓴다. F3_ 접두어라 지문에 잡힌다.
 F3_FILL_NOTICE_ENABLED = os.getenv("F3_FILL_NOTICE_ENABLED", "1") == "1"
 _NOTICE_WON = object()
+# 개장 직후 주문은 그 종목의 첫 체결까지 기다린 뒤 체결 확인 창(F3_LIMIT_FILL_TIMEOUT_SEC)을 연다.
+# 첫 체결은 개장 7 ~ 27초 뒤에 와서, 그 전에 닫힌 창이 체결될 수 없는 주문을 취소해 왔다
+# (docs/ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md 8.4절 가안). 09:00:00 + 이 초까지만 기다리고,
+# 그 뒤에 낸 주문(재시도·레거시 경로)은 기다리지 않는다. 0이면 끈다.
+F3_FIRST_TRADE_WAIT_UNTIL_SEC = max(0.0, _env_float("F3_FIRST_TRADE_WAIT_UNTIL_SEC", 45.0))
 
 
 def _notice_fill(order_id: str) -> dict | None:
     return kis_notice.fill(order_id) if F3_FILL_NOTICE_ENABLED else None
+
+
+async def _wait_first_trade(ticker: str, order_id: str, *, now: datetime | None = None) -> None:
+    """개장 직후 주문이면 그 종목의 첫 체결(또는 이 주문의 체결 통보)까지 기다린다.
+
+    첫 체결 신호를 놓쳐도(WS 단절) 상한 시각에 끝난다. 주문은 그동안 걸려 있으므로 체결됐다면 뒤이은
+    체결 확인이 잡는다 — 잃는 것은 확인이 늦어지는 시간뿐이다.
+    """
+    now = now or datetime.now(KST)
+    open_at = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    until = open_at + timedelta(seconds=F3_FIRST_TRADE_WAIT_UNTIL_SEC)
+    if not open_at <= now < until:
+        return
+    if live.first_trade(ticker, now.date()) is not None:
+        return
+    first_trade_event = live.first_trade_event(ticker, now.date())
+    notice_event = kis_notice.event_for(order_id) if F3_FILL_NOTICE_ENABLED else None
+    log("ENTRY_FIRST_TRADE_WAIT", level="INFO", ticker=ticker, order_id=order_id,
+        wait_until=until.strftime("%H:%M:%S"))
+    started = time.perf_counter()
+    waiters = [asyncio.ensure_future(first_trade_event.wait())]
+    if notice_event is not None:
+        waiters.append(asyncio.ensure_future(notice_event.wait()))
+    try:
+        await asyncio.wait(waiters, timeout=(until - now).total_seconds(),
+                           return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for waiter in waiters:
+            waiter.cancel()
+    waited_ms = round((time.perf_counter() - started) * 1000)
+    first = live.first_trade(ticker, now.date())
+    if first is not None:
+        log("ENTRY_FIRST_TRADE_SEEN", level="INFO", ticker=ticker, order_id=order_id,
+            via="FIRST_TRADE", waited_ms=waited_ms,
+            first_trade_at=first["at"].strftime("%H:%M:%S.%f")[:12],
+            first_trade_price=first["price"])
+    elif notice_event is not None and notice_event.is_set():
+        log("ENTRY_FIRST_TRADE_SEEN", level="INFO", ticker=ticker, order_id=order_id,
+            via="FILL_NOTICE", waited_ms=waited_ms)
+    else:
+        log("ENTRY_FIRST_TRADE_WAIT_TIMEOUT", level="WARN", ticker=ticker, order_id=order_id,
+            waited_ms=waited_ms, wait_until=until.strftime("%H:%M:%S"))
 
 
 def _log_notice_confirmed(order_id: str, ticker: str | None, stage: str, fill: dict) -> None:
@@ -2113,6 +2160,7 @@ async def _run_single(
         else:
             _start_entry_attempt_audit(entry_audit)
 
+        await _wait_first_trade(ticker, order_id)
         fill_deadline = _deadline_dt_after_seconds(F3_LIMIT_FILL_TIMEOUT_SEC)
         fill = await _poll_fill(
             order_id,

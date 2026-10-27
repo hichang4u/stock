@@ -6777,3 +6777,47 @@ async def test_run_single_queries_buyable_qty_once_on_first_attempt(monkeypatch)
     await f3.run()
 
     assert buyable.await_count == 1
+
+@pytest.mark.asyncio
+async def test_entry_fill_window_starts_after_the_wait(monkeypatch):
+    """개장 직후 주문은 첫 체결까지 기다린 뒤 2초 창을 연다 (진입 티켓 8.4절 가안).
+
+    대기 자체는 tests/test_first_trade_wait.py가 본다. 여기서는 창이 대기 뒤부터 세지는지만 본다.
+    """
+    _reset_state()
+    _mock_final_quote(monkeypatch, 1_000)
+    calls = []
+
+    async def fake_wait(ticker, order_id, *, now=None):
+        calls.append(("wait", ticker, order_id))
+        await asyncio.sleep(0.3)
+        calls.append(("wait_done", f3.datetime.now(f3.KST)))
+
+    async def fake_poll(order_id, deadline, ticker=None, expected_qty=None):
+        calls.append(("poll", deadline))
+        return {"fill_price": 1000, "fill_qty": expected_qty}
+
+    monkeypatch.setattr(f3, "_wait_first_trade", fake_wait)
+    monkeypatch.setattr(f3, "_poll_fill", fake_poll)
+    monkeypatch.setattr(f3, "_sleep_until", AsyncMock())
+    monkeypatch.setattr(f3, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f3, "_fetch_expected_price", AsyncMock(return_value=(1000.0, 970.0)))
+    monkeypatch.setattr(f3, "_fetch_available_cash", AsyncMock(return_value=10_000.0))
+    monkeypatch.setattr(f3, "_send_buy", AsyncMock(return_value={
+        "rt_cd": "0", "msg_cd": "MCA00000", "msg1": "OK",
+        "output": {"ODNO": "0000000937", "KRX_FWDG_ORD_ORGNO": "001"},
+    }))
+    monkeypatch.setattr(f3, "_fetch_current_price", AsyncMock(return_value=1000))
+    monkeypatch.setattr(f3.notifier, "send", AsyncMock())
+    monkeypatch.setattr(f3.db, "open_trade", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "record_order", AsyncMock(return_value=1))
+    monkeypatch.setattr(f3.db, "update_order_fill", AsyncMock())
+    monkeypatch.setattr(f3.state, "persist", AsyncMock())
+
+    await f3.run()
+
+    assert [c[0] for c in calls] == ["wait", "wait_done", "poll"]
+    assert calls[0][1:] == ("006340", "0000000937")
+    window = (calls[2][1] - calls[1][1]).total_seconds()
+    assert f3.F3_LIMIT_FILL_TIMEOUT_SEC - 0.05 <= window <= f3.F3_LIMIT_FILL_TIMEOUT_SEC + 0.2
+    assert state.get().position_status == "HOLDING"
