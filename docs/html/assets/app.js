@@ -1813,6 +1813,17 @@ function scopeNote(sc) {
   return `${label} · 지문 ${sc.fingerprints_n}개${unversioned} 섞임 — 참고 수치이며 판정하지 않습니다`;
 }
 
+// 같은 파라미터 표본(서버 _param_pools). 청산 카드는 청산 설정이, F1 카드는 F1 설정이 지금과 같았던
+// 거래로 판정한다. 그 사이 진입 조건은 바뀌었으므로 카드에 밝힌다.
+function poolNote(meta, label) {
+  if (!meta) return '';
+  const md = v => v ? `${String(v).slice(4, 6)}/${String(v).slice(6, 8)}` : '—';
+  return `[${label} ${meta.n}건 · ${md(meta.first_date)}~${md(meta.last_date)} · 지문 ${meta.fingerprints_n}개, 진입 조건은 그 사이 바뀜] `;
+}
+function withPool(j, note) {
+  return note ? [j[0], note + j[1], j[2]] : j;
+}
+
 function renderImprove(d) {
   const q = d.data_quality || {};
   const sc = d.scope || {verdict: true};
@@ -1820,17 +1831,26 @@ function renderImprove(d) {
   if (q.excluded_manual_n) notes.push(`수동 거래 ${q.excluded_manual_n}건 제외`);
   notes.push(`MFE 관측 ${q.mfe_observed_n||0}/${q.strategy_trade_n||0}건`);
   notes.push('손익 판정은 보수 비용 기준(성과 보고서와 같음)');
+  if (sc.verdict && (d.exit_pool || d.f1_pool)) notes.push(`청산 카드는 같은 청산 설정 ${d.exit_pool ? d.exit_pool.meta.n : 0}건, F1 카드는 같은 F1 설정 ${d.f1_pool ? d.f1_pool.meta.n : 0}건으로 판정`);
   $('imp-sample-note').textContent = notes.join(' · ');
   const p = d.params;
   const refOnly = j => sc.verdict ? j : ['ref', j[1], '판정은 현재 지문 표본에서만 냅니다. 이 수치는 참고용입니다.'];
+  const ex = sc.verdict ? d.exit_pool : null;
+  const f1 = sc.verdict ? d.f1_pool : null;
+  const dExit = ex ? {...d, hard_stop: ex.hard_stop, step: ex.step, trailing: ex.trailing,
+    trailing_diagnostics: ex.trailing_diagnostics, timeout_exit: ex.timeout_exit,
+    overall: {...d.overall, total: ex.overall_total}} : d;
+  const dF1 = f1 ? {...d, candidate_supply: f1.candidate_supply} : d;
+  const exNote = ex ? poolNote(ex.meta, '같은 청산 설정') : '';
+  const f1Note = f1 ? poolNote(f1.meta, '같은 F1 설정') : '';
   const cards = [
     ['전략 종합',     `${d.overall.total}건`,                          judgeOverall(d)],
-    ['HARD_STOP',    `-${p.hard_stop_pct}%`,                           judgeHardStop(d)],
-    ['STEP_SIZE',    `+${p.step_size_pct}%`,                           judgeStepSize(d)],
-    ['STEP_TRAIL',   `-${p.step_trail_pct}%`,                          judgeStepTrail(d)],
+    ['HARD_STOP',    `-${p.hard_stop_pct}%`,                           withPool(judgeHardStop(dExit), exNote)],
+    ['STEP_SIZE',    `+${p.step_size_pct}%`,                           withPool(judgeStepSize(dExit), exNote)],
+    ['STEP_TRAIL',   `-${p.step_trail_pct}%`,                          withPool(judgeStepTrail(dExit), exNote)],
     ['슬리피지 · 진입가', `${p.gap_max_order_pct}→${p.gap_max_fill_pct}%`, judgeSlipBuffer(d)],
-    ['F5 마감 청산', p.timeout_time,                                   judgeTimeout(d)],
-    ['F1 갭 범위',   `${p.f1_gap_min_pct}~${p.f1_gap_core_max_pct}% / 조건부 ${p.f1_gap_hard_max_pct}%`, judgeGapRange(d)],
+    ['F5 마감 청산', p.timeout_time,                                   withPool(judgeTimeout(dExit), exNote)],
+    ['F1 갭 범위',   `${p.f1_gap_min_pct}~${p.f1_gap_core_max_pct}% / 조건부 ${p.f1_gap_hard_max_pct}%`, withPool(judgeGapRange(dF1), f1Note)],
   ];
   $('imp-cards').innerHTML = cards.map(([t, cur, j]) => impCard(t, cur, refOnly(j))).join('');
   renderMfeTable(d.mfe_rows);

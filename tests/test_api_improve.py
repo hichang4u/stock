@@ -613,3 +613,103 @@ async def test_api_improve_defaults_to_the_current_fingerprint(tmp_path, monkeyp
     assert default["overall"]["total"] == 1
     assert everything["overall"]["total"] == 2
     assert everything["scope"]["verdict"] is False
+
+
+# ---------------------------------------------------------------------------
+# 같은 파라미터 표본(2026-10-28). 지문은 진입 경로·파서 같은 다른 조건으로도 바뀐다. 카드가 보는
+# 파라미터 값이 지금과 같았던 거래는 그 카드의 판정에 쓸 수 있다(설정 기록은 strategy_configs).
+# ---------------------------------------------------------------------------
+
+_EXIT = {"hard_stop_ratio": 0.02, "first_step": 0.025, "step_trail": 0.02,
+         "f5_exec": "15:15", "force_trailing": "15:05"}
+_F1_OLD = {"f1_gap_min": 0.025, "f1_gap_core_max": 0.08, "f1_gap_hard_max": 0.1,
+           "f1_min_expected_amount": 1e8, "f1_high_gap_min_expected_amount": 5e9}
+_F1_NEW = {**_F1_OLD, "f1_high_gap_min_expected_amount": 1e9}
+
+
+def _configs():
+    def cfg(fp, at, config):
+        return {"fingerprint": fp, "created_at": at, "config": config}
+
+    return [
+        cfg("A", "2026-08-14T16:00:00+09:00", {**_EXIT, **_F1_OLD}),
+        cfg("D", "2026-09-01T16:00:00+09:00", {**_EXIT, "step_trail": 0.015, **_F1_OLD}),
+        cfg("B", "2026-09-16T16:00:00+09:00", {**_EXIT, **_F1_NEW}),
+        cfg("C", "2026-10-27T15:52:00+09:00", {**_EXIT, **_F1_NEW}),
+    ]
+
+
+def _pool_trades():
+    return [
+        _trade(id=1, date="20260710", strategy_fingerprint=None),
+        _trade(id=2, date="20260820", strategy_fingerprint="A", close_reason="HARD_STOP"),
+        _trade(id=3, date="20260905", strategy_fingerprint="D"),
+        _trade(id=4, date="20260920", strategy_fingerprint="B"),
+        _trade(id=5, date="20261028", strategy_fingerprint="C"),
+    ]
+
+
+def _pool_skips():
+    return [
+        {"date": "20260815", "reason": "NO_TARGET", "created_at": "2026-08-15T09:00:01+09:00"},
+        {"date": "20260917", "reason": "NO_TARGET", "created_at": "2026-09-17T09:00:01+09:00"},
+        {"date": "20261029", "reason": "ENTRY_FAIL", "created_at": "2026-10-29T09:00:20+09:00"},
+    ]
+
+
+def test_param_pools_keep_trades_whose_card_parameters_match_today():
+    pools = server._param_pools(_pool_trades(), _pool_skips(), _configs(), "C")
+
+    exit_pool, f1_pool = pools["exit"], pools["f1"]
+    assert [t["id"] for t in exit_pool["trades"]] == [2, 4, 5]  # D는 트레일이 다르고 1은 기록 없음
+    assert exit_pool["meta"]["n"] == 3
+    assert exit_pool["meta"]["first_date"] == "20260820"
+    assert exit_pool["meta"]["fingerprints_n"] == 3
+    assert exit_pool["meta"]["params"] == _EXIT
+    assert [t["id"] for t in f1_pool["trades"]] == [4, 5]
+    # 스킵은 그 시각에 돌던 지문의 설정으로 가른다
+    assert [r["date"] for r in f1_pool["skips"]] == ["20260917", "20261029"]
+
+
+def test_no_config_for_the_current_fingerprint_means_no_pools():
+    assert server._param_pools(_pool_trades(), _pool_skips(), _configs(), "Z") == {}
+
+
+def test_pooled_cards_replace_only_their_sections():
+    trades = _pool_trades()
+    pools = server._param_pools(trades, _pool_skips(), _configs(), "C")
+    base = server._improve_from_rows([trades[-1]], [], {})
+
+    payload = server._with_param_pools(base, pools)
+
+    assert payload["exit_pool"]["meta"]["n"] == 3
+    assert payload["exit_pool"]["hard_stop"]["n"] == 1
+    assert payload["exit_pool"]["overall_total"] == 3
+    assert payload["f1_pool"]["candidate_supply"]["trade_days"] == 2
+    assert payload["overall"]["total"] == 1  # 전략 종합은 현재 지문 그대로
+
+
+@pytest.mark.asyncio
+async def test_api_improve_adds_pools_only_for_the_fingerprint_scope(tmp_path, monkeypatch):
+    await db.init(str(tmp_path / "improve.db"))
+    conn = db.get()
+    try:
+        for i, (fp, day, cfg) in enumerate([("old", "20260820", {**_EXIT, **_F1_NEW}),
+                                            ("cur", "20261028", {**_EXIT, **_F1_NEW})]):
+            tid = await db.open_trade(day, f"00000{i}", 10_000.0, 10, name="x")
+            await db.close_trade(tid, 9_800.0, "HARD_STOP", -2.0, 0.0, exit_qty=10,
+                                 high_price=10_000.0)
+            await conn.execute("UPDATE trades SET strategy_fingerprint=? WHERE id=?", (fp, tid))
+            await db.upsert_strategy_config({**cfg, "strategy_fingerprint": fp},
+                                            kind="PRIMARY", code_fingerprint=fp)
+        await conn.commit()
+        monkeypatch.setattr(server, "_current_fingerprint", lambda: "cur")
+
+        scoped = json.loads((await server.api_improve()).body.decode("utf-8"))
+        everything = json.loads((await server.api_improve(scope="all")).body.decode("utf-8"))
+    finally:
+        await db.close()
+
+    assert scoped["overall"]["total"] == 1
+    assert scoped["exit_pool"]["meta"]["n"] == 2
+    assert "exit_pool" not in everything

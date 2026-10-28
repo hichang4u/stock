@@ -1446,6 +1446,95 @@ def _scope_rows(
     return kept, orders_kept, skips_kept, meta
 
 
+# 카드가 보는 파라미터. 지문은 진입 경로·파서 등 다른 조건으로도 바뀐다 — 이 값이 지금과 같았던
+# 거래는 그 카드의 판정에 쓴다(설정 기록 strategy_configs, 2026-08-14~).
+_EXIT_PARAM_KEYS = ("hard_stop_ratio", "first_step", "step_trail", "f5_exec", "force_trailing")
+_F1_PARAM_KEYS = (
+    "f1_gap_min", "f1_gap_core_max", "f1_gap_hard_max",
+    "f1_min_expected_amount", "f1_high_gap_min_expected_amount",
+)
+
+
+def _param_pools(
+    trades: list[dict],
+    skip_rows: list[dict],
+    configs: list[dict],
+    fingerprint: str | None,
+) -> dict:
+    """카드별 '같은 파라미터 표본'. 현재 지문의 설정 기록이 없으면 빈 dict.
+
+    configs: [{"fingerprint", "created_at", "config"}]. 스킵에는 지문이 없어 그 시각에 돌던
+    지문(created_at이 스킵 이전인 마지막 설정)으로 가른다.
+    """
+    by_fp = {c["fingerprint"]: c["config"] for c in configs}
+    current = by_fp.get(fingerprint) if fingerprint else None
+    if current is None:
+        return {}
+    timeline: list[tuple[datetime, dict]] = []
+    for c in configs:
+        created = _parse_ts(c.get("created_at"))
+        if created is not None:
+            timeline.append((created, c["config"]))
+    timeline.sort(key=lambda pair: pair[0])
+
+    def _matches(cfg: dict | None, keys: tuple[str, ...]) -> bool:
+        return cfg is not None and all(cfg.get(k) == current.get(k) for k in keys)
+
+    def _config_at(at: datetime | None) -> dict | None:
+        found = None
+        for created, cfg in timeline:
+            if at is None or created > at:
+                break
+            found = cfg
+        return found
+
+    pools: dict = {}
+    for name, keys in (("exit", _EXIT_PARAM_KEYS), ("f1", _F1_PARAM_KEYS)):
+        kept = [t for t in trades if _matches(by_fp.get(t.get("strategy_fingerprint")), keys)]
+        dates = [str(t.get("date")) for t in kept if t.get("date")]
+        pools[name] = {
+            "trades": kept,
+            "skips": [
+                r for r in skip_rows
+                if _matches(_config_at(_parse_ts(r.get("created_at"))), keys)
+            ],
+            "meta": {
+                "n": len(kept),
+                "first_date": min(dates) if dates else None,
+                "last_date": max(dates) if dates else None,
+                "fingerprints_n": len({t.get("strategy_fingerprint") for t in kept}),
+                "params": {k: current.get(k) for k in keys},
+            },
+        }
+    return pools
+
+
+def _with_param_pools(payload: dict, pools: dict) -> dict:
+    """청산 카드·F1 카드에 쓸 같은 파라미터 표본 집계를 붙인다. 전략 종합은 건드리지 않는다."""
+    if "exit" in pools:
+        ex = pools["exit"]
+        agg = _improve_from_rows(ex["trades"], [], {})
+        payload["exit_pool"] = {
+            "meta": ex["meta"],
+            "overall_total": agg["overall"]["total"],
+            **{k: agg[k] for k in (
+                "hard_stop", "step", "trailing", "trailing_diagnostics", "timeout_exit",
+            )},
+        }
+    if "f1" in pools:
+        f1 = pools["f1"]
+        counts: dict[str, int] = {}
+        for r in f1["skips"]:
+            counts[r["reason"]] = counts.get(r["reason"], 0) + 1
+        agg = _improve_from_rows(f1["trades"], [], counts, skip_rows=f1["skips"])
+        payload["f1_pool"] = {
+            "meta": f1["meta"],
+            "candidate_supply": agg["candidate_supply"],
+            "candidates": agg["candidates"],
+        }
+    return payload
+
+
 def _overall_block(pnls: list[float]) -> dict:
     total = len(pnls)
     win_pnls = [p for p in pnls if p > 0]
@@ -1787,6 +1876,7 @@ async def api_improve(track: str = "A", scope: str = "fingerprint") -> JSONRespo
             ) as cur:
                 registered = await cur.fetchone()
                 fingerprint_since = registered[0] if registered else None
+        all_trades, all_skips = trades, skip_rows
         trades, orders, skip_rows, meta = _scope_rows(
             scope, trades, orders, skip_rows, fingerprint=fingerprint,
             fingerprint_since=fingerprint_since, segment=perf_costs.current_segment(),
@@ -1795,9 +1885,25 @@ async def api_improve(track: str = "A", scope: str = "fingerprint") -> JSONRespo
         for row in skip_rows:
             reason = row["reason"]
             skips[reason] = skips.get(reason, 0) + 1
-        return JSONResponse(
-            _improve_from_rows(trades, orders, skips, skip_rows=skip_rows, scope=meta)
-        )
+        payload = _improve_from_rows(trades, orders, skips, skip_rows=skip_rows, scope=meta)
+        if meta["verdict"]:
+            configs: list[dict] = []
+            async with conn.execute(
+                """SELECT code_fingerprint, config_json, created_at FROM strategy_configs
+                   WHERE kind='PRIMARY' AND code_fingerprint IS NOT NULL
+                   ORDER BY created_at""",
+            ) as cur:
+                for fp, config_json, created_at in await cur.fetchall():
+                    try:
+                        configs.append({"fingerprint": fp, "created_at": created_at,
+                                        "config": json.loads(config_json)})
+                    except (TypeError, ValueError):
+                        continue
+            manual_free = [t for t in all_trades if (t.get("close_reason") or "") != "MANUAL"]
+            payload = _with_param_pools(
+                payload, _param_pools(manual_free, all_skips, configs, fingerprint),
+            )
+        return JSONResponse(payload)
     except Exception as exc:
         log("API_IMPROVE_FAILED", level="WARN", error=repr(exc))
         return JSONResponse(_improve_from_rows([], [], {}))
