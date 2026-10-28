@@ -36,17 +36,8 @@ from scripts.performance import (  # noqa: E402
 KST = ZoneInfo("Asia/Seoul")
 ACCOUNT_CAPITAL_KRW = 500_000_000
 
-# 구간 경계와 그때 바뀐 조건(설명). 실제 복수 변경은 구간 안 지문 개수로 자동 검사한다.
-TRACK_A_SEGMENTS: list[dict] = [
-    {"name": "초기 운영", "start": "20260702", "end": "20260806",
-     "changed": ["(PAPER 표시 전, 지문 기록 없음)"]},
-    {"name": "PAPER 레거시", "start": "20260807", "end": "20260910",
-     "changed": ["실행 모드·지문 기록 시작, 진입 안전장치 강화 묶음"]},
-    {"name": "빠른 경로", "start": "20260911", "end": "20261001",
-     "changed": ["빠른 경로 하이브리드 활성(PAPER_FAST_HYBRID=1). 0914~1001은 WS 파서 결함 기간"]},
-    {"name": "파서 수정 후", "start": "20261002", "end": None,
-     "changed": ["WS 파서 헤더 분할 수정", "상한가 잠김 예외"]},
-]
+# 구간 목록은 대시보드 '개선' 메뉴와 공유한다(src/perf_costs.py).
+from src.perf_costs import TRACK_A_SEGMENTS  # noqa: E402
 
 
 def load_track_a(root: Path, until: str | None = None) -> tuple[list[dict], dict]:

@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from src import bars, db, indicators, live, readiness, state
+from src import bars, db, indicators, live, perf_costs, readiness, release, state
 from src import warmup as warmup_mod
 from src.api import kis_rest
 from src.api.status_logic import (
@@ -1367,6 +1367,111 @@ def _avg(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+# 판정 표본. 같은 지문 안에서만 파라미터가 하나다 — 구간·전체는 수치만 보이고 판정하지 않는다
+# (2026-10-28, docs/IMPROVE_MENU_FOLLOWUP_20261028.md 가).
+_IMPROVE_SCOPES = ("fingerprint", "segment", "all")
+
+
+def _current_fingerprint() -> str | None:
+    try:
+        return release.strategy_fingerprint()
+    except Exception:  # noqa: BLE001 — 화면 집계가 지문 계산 실패로 죽으면 안 된다
+        return None
+
+
+def _parse_ts(value: object) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value)) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _scope_rows(
+    scope: str,
+    trades: list[dict],
+    orders: list[dict],
+    skip_rows: list[dict],
+    *,
+    fingerprint: str | None,
+    fingerprint_since: str | None,
+    segment: dict,
+) -> tuple[list[dict], list[dict], list[dict], dict]:
+    """판정 표본을 고른다. 거래·주문·스킵을 같은 기준으로 거르고 표본 설명을 함께 돌려준다.
+
+    - fingerprint: 현재 지문 거래. 스킵은 그 지문이 시작된 뒤(`fingerprint_since`, 없으면
+      첫 진입) 것.
+    - segment: 성과 보고서의 현재 구간(날짜 범위).
+    - all: 전체.
+    """
+    name = scope if scope in _IMPROVE_SCOPES else "fingerprint"
+    since: str | None = None
+    if name == "fingerprint":
+        kept = [t for t in trades if fingerprint and t.get("strategy_fingerprint") == fingerprint]
+        since = fingerprint_since
+        if since is None:
+            starts = [str(t["entry_at"]) for t in kept if t.get("entry_at")]
+            since = min(starts) if starts else None
+        since_dt = _parse_ts(since)
+        skips_kept = []
+        for r in skip_rows:
+            at = _parse_ts(r.get("created_at"))
+            if since_dt is not None and at is not None and at >= since_dt:
+                skips_kept.append(r)
+    elif name == "segment":
+        start, end = str(segment.get("start") or ""), segment.get("end")
+
+        def _in(day: object) -> bool:
+            d = str(day or "")
+            return d >= start and (end is None or d <= str(end))
+
+        kept = [t for t in trades if _in(t.get("date"))]
+        skips_kept = [r for r in skip_rows if _in(r.get("date"))]
+    else:
+        kept = list(trades)
+        skips_kept = list(skip_rows)
+
+    ids = {t.get("id") for t in kept}
+    orders_kept = orders if name == "all" else [o for o in orders if o.get("trade_id") in ids]
+    meta = {
+        "name": name,
+        "verdict": name == "fingerprint",
+        "fingerprint": fingerprint,
+        "since": since,
+        "segment": segment.get("name"),
+        # 지문 기록 이전(NULL) 거래는 따로 센다
+        "fingerprints_n": len({t["strategy_fingerprint"] for t in kept
+                               if t.get("strategy_fingerprint")}),
+        "unversioned_n": sum(1 for t in kept if not t.get("strategy_fingerprint")),
+    }
+    return kept, orders_kept, skips_kept, meta
+
+
+def _overall_block(pnls: list[float]) -> dict:
+    total = len(pnls)
+    win_pnls = [p for p in pnls if p > 0]
+    loss_pnls = [p for p in pnls if p <= 0]
+    win_rate = len(win_pnls) / total if total else 0.0
+    avg_win = _avg(win_pnls)
+    avg_loss = _avg(loss_pnls)
+    payoff = abs(avg_win / avg_loss) if avg_loss < 0 else 0.0
+    expectancy = win_rate * avg_win + (1 - win_rate) * avg_loss
+    max_streak = run = 0
+    for p in pnls:
+        run = run + 1 if p <= 0 else 0
+        max_streak = max(max_streak, run)
+    return {
+        "total": total,
+        "wins": len(win_pnls),
+        "win_rate": round(win_rate * 100, 1),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "payoff_ratio": round(payoff, 2),
+        "expectancy": round(expectancy, 2),
+        "cur_loss_streak": run,
+        "max_loss_streak": max_streak,
+    }
+
+
 def _minutes_between(start: str | None, end: str | None) -> float | None:
     if not start or not end:
         return None
@@ -1382,26 +1487,26 @@ def _improve_from_rows(
     orders: list[dict],
     skips: dict[str, int],
     skip_rows: list[dict] | None = None,
+    scope: dict | None = None,
 ) -> dict:
-    """개선 화면 집계. 수동 거래는 전략 파라미터 진단에서 제외한다."""
+    """개선 화면 집계. 수동 거래는 전략 파라미터 진단에서 제외한다.
+
+    손익은 체결 그대로(`overall`)와 성과 보고서의 보수 비용(`overall_net`, src/perf_costs.py)을
+    함께 낸다. 화면 판정은 보수 값으로 한다.
+    """
     source_closed_n = len(trades)
     trades = [t for t in trades if (t.get("close_reason") or "") != "MANUAL"]
     excluded_manual_n = source_closed_n - len(trades)
     total = len(trades)
     pnls = [(t.get("pnl_pct") or 0.0) for t in trades]
-    win_pnls = [p for p in pnls if p > 0]
-    loss_pnls = [p for p in pnls if p <= 0]
-    win_rate = len(win_pnls) / total if total else 0.0
-    avg_win = _avg(win_pnls)
-    avg_loss = _avg(loss_pnls)
-    payoff = abs(avg_win / avg_loss) if avg_loss < 0 else 0.0
-    expectancy = win_rate * avg_win + (1 - win_rate) * avg_loss
-
-    max_streak = run = 0
-    for p in pnls:
-        run = run + 1 if p <= 0 else 0
-        max_streak = max(max_streak, run)
-    cur_streak = run
+    costed = [
+        perf_costs.apply_costs(p, str(t.get("close_reason") or ""))
+        for p, t in zip(pnls, trades)
+    ]
+    cost_pnls = [c["net_cost_pct"] for c in costed]
+    net_pnls = [c["net_conservative_pct"] for c in costed]
+    overall = _overall_block(pnls)
+    overall_net = {"basis": "conservative", **_overall_block(net_pnls)}
 
     mfe_rows: list[dict] = []
     near_miss_n = 0
@@ -1413,12 +1518,13 @@ def _improve_from_rows(
     trailing_pnl: list[float] = []
     trailing_stop_slip: list[float] = []
     timeout_pnl: list[float] = []
+    timeout_pnl_net: list[float] = []
     timeout_mfe: list[float] = []
     hs_pnl: list[float] = []
     hs_minutes: list[float] = []
     fast_stop_n = 0
 
-    for t in trades:
+    for t, net in zip(trades, net_pnls):
         entry, high = t.get("entry_price"), t.get("high_price")
         pnl = t.get("pnl_pct")
         reason = t.get("close_reason") or ""
@@ -1462,6 +1568,7 @@ def _improve_from_rows(
         elif reason == "TIMEOUT":
             if pnl is not None:
                 timeout_pnl.append(pnl)
+                timeout_pnl_net.append(net)
             if mfe is not None:
                 timeout_mfe.append(mfe)
         elif reason == "HARD_STOP":
@@ -1504,6 +1611,20 @@ def _improve_from_rows(
         }
 
     by_phase = {ph: _slip_summary(a["pps"], a["lat"]) for ph, a in slip_acc.items()}
+
+    # 주문가 대비 체결가. 위 값은 선정 기준가(trigger_price) 대비라 진입 타이밍까지 섞인다.
+    # 주문가가 없는 시장가 주문(매도 등)은 뺀다.
+    order_buy_pps: list[float] = []
+    order_sell_pps: list[float] = []
+    for o in orders:
+        order_price, fill_price = o.get("order_price") or 0, o.get("fill_price")
+        if not order_price or fill_price is None:
+            continue
+        pp = (fill_price - order_price) / order_price * 100
+        if (o.get("order_phase") or "") in _BUY_PHASES:
+            order_buy_pps.append(pp)
+        else:
+            order_sell_pps.append(-pp)
     buy_pps = [p for ph, a in slip_acc.items() if ph in _BUY_PHASES for p in a["pps"]]
     buy_lat = [v for ph, a in slip_acc.items() if ph in _BUY_PHASES for v in a["lat"]]
     sell_pps = [p for ph, a in slip_acc.items() if ph not in _BUY_PHASES for p in a["pps"]]
@@ -1545,16 +1666,13 @@ def _improve_from_rows(
 
     return {
         "params": _improve_params(),
-        "overall": {
-            "total": total,
-            "wins": len(win_pnls),
-            "win_rate": round(win_rate * 100, 1),
-            "avg_win": round(avg_win, 2),
-            "avg_loss": round(avg_loss, 2),
-            "payoff_ratio": round(payoff, 2),
-            "expectancy": round(expectancy, 2),
-            "cur_loss_streak": cur_streak,
-            "max_loss_streak": max_streak,
+        "scope": scope,
+        "overall": overall,
+        "overall_net": overall_net,
+        "expectancy_by_basis": {
+            "gross": overall["expectancy"],
+            "cost": round(_avg(cost_pnls), 2),
+            "conservative": overall_net["expectancy"],
         },
         "hard_stop": {
             "n": len(hs_pnl),
@@ -1591,10 +1709,16 @@ def _improve_from_rows(
             "sell": _slip_summary(sell_pps, sell_lat),
             "by_phase": by_phase,
             "guard_n": guard_n,
+            "basis": "trigger",
+        },
+        "order_slippage": {
+            "buy": _slip_summary(order_buy_pps, []),
+            "sell": _slip_summary(order_sell_pps, []),
         },
         "timeout_exit": {
             "n": len(timeout_pnl),
             "avg_pnl": round(_avg(timeout_pnl), 2),
+            "avg_pnl_net": round(_avg(timeout_pnl_net), 2),
             "avg_mfe": round(_avg(timeout_mfe), 2),
         },
         "candidates": {
@@ -1617,7 +1741,7 @@ def _improve_from_rows(
             "mfe_observed_n": mfe_observed_n,
             "mfe_coverage_pct": round(mfe_observed_n / total * 100, 1) if total else 0.0,
             "fill_latency_measured_n": fill_latency_measured_n,
-            "params_versioned": False,
+            "params_versioned": bool(scope and scope.get("verdict")),
         },
         "mfe_rows": mfe_rows,
         "hold_time": {
@@ -1628,18 +1752,18 @@ def _improve_from_rows(
 
 
 @app.get("/api/improve")
-async def api_improve(track: str = "A") -> JSONResponse:
+async def api_improve(track: str = "A", scope: str = "fingerprint") -> JSONResponse:
     try:
         conn = db.get()
         async with conn.execute(
-            """SELECT date, ticker, name, entry_price, high_price, highest_step,
-                      pnl_pct, close_reason, entry_at, exit_at
+            """SELECT id, date, ticker, name, entry_price, high_price, highest_step,
+                      pnl_pct, close_reason, entry_at, exit_at, strategy_fingerprint
                FROM trades WHERE status='CLOSED' AND track=? ORDER BY date""",
             (track,),
         ) as cur:
             trades = [dict(r) for r in await cur.fetchall()]
         async with conn.execute(
-            """SELECT o.order_phase, o.order_price, o.trigger_price,
+            """SELECT o.trade_id, o.order_phase, o.order_price, o.trigger_price,
                       o.fill_price, o.fill_latency_ms
                FROM orders o
                JOIN trades t ON t.id = o.trade_id
@@ -1650,15 +1774,30 @@ async def api_improve(track: str = "A") -> JSONResponse:
         ) as cur:
             orders = [dict(r) for r in await cur.fetchall()]
         async with conn.execute(
-            "SELECT date, reason FROM daily_skips WHERE track=? ORDER BY date, id",
+            "SELECT date, reason, created_at FROM daily_skips WHERE track=? ORDER BY date, id",
             (track,),
         ) as cur:
             skip_rows = [dict(r) for r in await cur.fetchall()]
+        fingerprint = _current_fingerprint()
+        fingerprint_since = None
+        if fingerprint:
+            async with conn.execute(
+                "SELECT MIN(created_at) FROM experiment_registry WHERE strategy_fingerprint=?",
+                (fingerprint,),
+            ) as cur:
+                registered = await cur.fetchone()
+                fingerprint_since = registered[0] if registered else None
+        trades, orders, skip_rows, meta = _scope_rows(
+            scope, trades, orders, skip_rows, fingerprint=fingerprint,
+            fingerprint_since=fingerprint_since, segment=perf_costs.current_segment(),
+        )
         skips: dict[str, int] = {}
         for row in skip_rows:
             reason = row["reason"]
             skips[reason] = skips.get(reason, 0) + 1
-        return JSONResponse(_improve_from_rows(trades, orders, skips, skip_rows=skip_rows))
+        return JSONResponse(
+            _improve_from_rows(trades, orders, skips, skip_rows=skip_rows, scope=meta)
+        )
     except Exception as exc:
         log("API_IMPROVE_FAILED", level="WARN", error=repr(exc))
         return JSONResponse(_improve_from_rows([], [], {}))

@@ -1691,9 +1691,19 @@ async function loadStats() {
 }
 
 // ── 개선(파라미터 진단) ──────────────────────────────────────────────────
+// 판정 표본. 같은 지문 안에서만 파라미터가 하나라 판정은 'fingerprint'에서만 낸다
+// (docs/IMPROVE_MENU_FOLLOWUP_20261028.md).
+let _impScope = 'fingerprint';
+function setImproveScope(scope, btn) {
+  _impScope = scope;
+  document.querySelectorAll('[data-imp-scope]').forEach(b=>b.classList.remove('on'));
+  if(btn) btn.classList.add('on');
+  loadImprove();
+}
+
 async function loadImprove() {
   try {
-    const r = await fetch('/api/improve');
+    const r = await fetch(`/api/improve?scope=${encodeURIComponent(_impScope)}`);
     if(!r.ok) return;
     renderImprove(await r.json());
   } catch(e){}
@@ -1704,7 +1714,10 @@ const IMP_BADGE = {
   watch:  {txt:'관찰',      cls:'imp-watch'},
   adjust: {txt:'조정 검토', cls:'imp-adjust'},
   nodata: {txt:'표본 부족', cls:'imp-nodata'},
+  ref:    {txt:'참고',      cls:'imp-nodata'},
 };
+// H1 스펙 6절에서 닫힌 축 — 같은 표본으로 다시 열지 않는다.
+const H1_CLOSED = 'H1 스펙 6절에서 닫힌 축이라 새 표본 없이 바꾸지 않습니다.';
 
 function impCard(title, cur, [level, evidence, guide]) {
   const b = IMP_BADGE[level];
@@ -1718,12 +1731,14 @@ function impCard(title, cur, [level, evidence, guide]) {
 }
 
 function judgeOverall(d) {
-  const o = d.overall;
-  const ev = `기대값 ${fmtPct(o.expectancy)} · 손익비 ${(o.payoff_ratio||0).toFixed(2)} · 승률 ${o.win_rate}% · 연속손실 ${o.cur_loss_streak}건(최대 ${o.max_loss_streak})`;
+  // 판정은 성과 보고서와 같은 보수 비용 손익으로 한다(수수료·세금 + 청산 사유별 슬리피지).
+  const o = d.overall_net || d.overall;
+  const e = d.expectancy_by_basis || {};
+  const ev = `기대값 체결 ${fmtPct(e.gross)} · 비용 ${fmtPct(e.cost)} · 보수 ${fmtPct(o.expectancy)} · 손익비(보수) ${(o.payoff_ratio||0).toFixed(2)} · 승률(보수) ${o.win_rate}% · 연속손실 ${o.cur_loss_streak}건(최대 ${o.max_loss_streak})`;
   if (o.total < 10) return ['nodata', ev, `최소 판단까지 ${10 - o.total}건 더 필요합니다.`];
   if (o.cur_loss_streak >= 3) return ['adjust', ev, `연속 손실 ${o.cur_loss_streak}건입니다(기준 3건). 일시 중단을 검토하세요.`];
   if (o.total < 20) return ['nodata', ev, `전략 조정 판단까지 ${20 - o.total}건 더 필요합니다. 현재 값은 경향만 참고하세요.`];
-  if (o.expectancy < 0) return ['adjust', ev, '기대값이 음수입니다(20건 이상 누적). 파라미터 이전에 전략 자체를 재검토하세요.'];
+  if (o.expectancy < 0) return ['adjust', ev, '보수 비용 기대값이 음수입니다(20건 이상 누적). 파라미터 이전에 전략 자체를 재검토하세요.'];
   if (o.avg_loss < 0 && o.payoff_ratio < 1) return ['watch', ev, '손익비가 1 미만입니다(기준 1.0). 이긴 거래의 크기가 진 거래보다 작습니다.'];
   return ['ok', ev, '기대값·손익비·스트릭 모두 경고 기준 이내입니다.'];
 }
@@ -1731,9 +1746,9 @@ function judgeHardStop(d) {
   const h = d.hard_stop;
   const ev = `손절 ${h.n}건(${h.share_pct}%) · 체결 편차 ${h.avg_slip_pp}%p · 10분 내 손절 ${h.fast_stop_n}건 · 평균 ${h.avg_min_to_stop}분`;
   if (h.n < 3) return ['nodata', ev, `판정까지 손절 표본 ${3 - h.n}건 더 필요합니다.`];
-  if (h.avg_slip_pp > 0.3) return ['adjust', ev, `손절 체결이 설정(-${d.params.hard_stop_pct}%)보다 평균 ${h.avg_slip_pp}%p 밀립니다(기준 0.3%p). 지정가 손절 전환 또는 폭 조정을 검토하세요.`];
-  if (d.overall.total >= 10 && h.share_pct > 50) return ['adjust', ev, `손절 비중이 ${h.share_pct}%로 절반을 넘습니다(기준 50%). 손절 폭보다 진입 품질을 우선 점검하세요.`];
-  if (h.fast_stop_n / h.n >= 0.5) return ['watch', ev, `손절의 ${Math.round(h.fast_stop_n / h.n * 100)}%가 진입 10분 내 발생 — 시초 변동성 구간입니다. 진입 지연을 검토하세요.`];
+  if (h.avg_slip_pp > 0.3) return ['adjust', ev, `손절 체결이 설정(-${d.params.hard_stop_pct}%)보다 평균 ${h.avg_slip_pp}%p 밀립니다(기준 0.3%p). 주문 실행 경로를 점검하세요. 손절 폭은 ${H1_CLOSED}`];
+  if (d.overall.total >= 10 && h.share_pct > 50) return ['watch', ev, `손절 비중이 ${h.share_pct}%로 절반을 넘습니다(기준 50%). 진입 품질은 H1 재평가에서 사전등록한 기준으로만 봅니다.`];
+  if (h.fast_stop_n / h.n >= 0.5) return ['watch', ev, `손절의 ${Math.round(h.fast_stop_n / h.n * 100)}%가 진입 10분 내 발생 — 시초 변동성 구간입니다. 진입 시각은 ${H1_CLOSED}`];
   return ['ok', ev, '체결 편차·손절 비중 모두 기준 이내입니다.'];
 }
 
@@ -1742,7 +1757,7 @@ function judgeStepSize(d) {
   const ev = `관측 ${s.observed_n}/${d.overall.total}건(${s.coverage_pct}%) · 스텝1 ${s.step1_n}건(${s.step1_rate}%) · 근접 이탈 ${s.near_miss_n}건`;
   if (d.overall.total < 5) return ['nodata', ev, `최소 판단까지 ${5 - d.overall.total}건 더 필요합니다.`];
   if (s.observed_n < 5 || s.coverage_pct < 80) return ['nodata', ev, '고점 또는 스텝 데이터가 전체의 80% 미만입니다. 누락 데이터가 더 쌓인 뒤 판단하세요.'];
-  if (s.near_miss_n >= 3 && s.near_miss_n > s.step1_n) return ['adjust', ev, `고점 +1.5~${d.params.step_size_pct}%에서 손실로 끝난 거래(${s.near_miss_n}건)가 스텝1 도달(${s.step1_n}건)보다 많습니다. 간격 2.0% 축소를 검토하세요.`];
+  if (s.near_miss_n >= 3 && s.near_miss_n > s.step1_n) return ['watch', ev, `고점 +1.5~${d.params.step_size_pct}%에서 손실로 끝난 거래(${s.near_miss_n}건)가 스텝1 도달(${s.step1_n}건)보다 많습니다. 스텝·트레일 간격은 ${H1_CLOSED}`];
   if (s.near_miss_n >= 2) return ['watch', ev, `근접 이탈이 ${s.near_miss_n}건 누적됐습니다(조정 기준 3건). 추이를 관찰하세요.`];
   return ['ok', ev, '관측된 근접 이탈이 없어 현재 간격을 유지합니다.'];
 }
@@ -1755,20 +1770,25 @@ function judgeStepTrail(d) {
   return ['ok', ev, `활성 스탑대로 청산되고 있습니다. 고점 반납 ${x.structural_giveback_min_pp}~${x.structural_giveback_max_pp}%p는 STEP_SIZE가 포함된 정상 구조 범위입니다.`];
 }
 function judgeSlipBuffer(d) {
-  const sl = d.slippage;
-  const buf = (d.params.gap_max_fill_pct - d.params.gap_max_order_pct).toFixed(1);
-  const ev = `매수 슬리피지 평균 ${sl.buy.avg_pp}%p·최대 ${sl.buy.max_pp}%p (${sl.buy.n}건) · GUARD ${sl.guard_n}건`;
-  if (sl.buy.n < 3) return ['nodata', ev, `판정까지 매수 체결 ${3 - sl.buy.n}건 더 필요합니다.`];
-  if (sl.guard_n >= 2 || sl.buy.max_pp > 0.5) return ['adjust', ev, `슬리피지가 버퍼(${buf}%p)를 반복적으로 위협합니다(GUARD ${sl.guard_n}건, 최대 ${sl.buy.max_pp}%p). GAP_MAX_ORDER 하향을 우선 검토하세요.`];
-  if (sl.guard_n === 1) return ['watch', ev, `급격한 갭 확대 1건을 안전장치가 차단했습니다. 버퍼(${buf}%p)는 유지하고 재발 여부를 관찰하세요.`];
-  if (sl.buy.avg_pp > 0.25) return ['watch', ev, '평균 매수 슬리피지가 0.25%p를 넘었습니다. 버퍼 소진 추이를 관찰하세요.'];
-  return ['ok', ev, `슬리피지가 버퍼(${buf}%p) 대비 여유 있습니다.`];
+  // 주문가 대비 체결가로 판정한다. 선정 기준가 대비 값은 진입 타이밍까지 섞여 참고로만 보인다.
+  const ob = (d.order_slippage || {}).buy || {n:0, avg_pp:0, max_pp:0};
+  const tb = d.slippage.buy;
+  const bufPp = d.params.gap_max_fill_pct - d.params.gap_max_order_pct;
+  const buf = bufPp.toFixed(1);
+  const ev = `주문가 대비 매수 평균 ${ob.avg_pp}%p·최대 ${ob.max_pp}%p (${ob.n}건) · 기준가 대비 진입 평균 ${tb.avg_pp}%p·최대 ${tb.max_pp}%p · GUARD ${d.slippage.guard_n}건`;
+  if (bufPp <= 0) return ['ref', ev, `주문 상한과 체결 상한이 같아(${d.params.gap_max_order_pct}%) 버퍼가 없습니다 — 버퍼 판정을 하지 않습니다. 기준가 대비 값은 진입 타이밍 지표입니다.`];
+  if (ob.n < 3) return ['nodata', ev, `판정까지 매수 체결 ${3 - ob.n}건 더 필요합니다.`];
+  if (d.slippage.guard_n >= 2 || ob.max_pp > 0.5) return ['adjust', ev, `주문가 대비 슬리피지가 버퍼(${buf}%p)를 위협합니다(GUARD ${d.slippage.guard_n}건, 최대 ${ob.max_pp}%p). GAP_MAX_ORDER 하향을 검토하세요.`];
+  if (d.slippage.guard_n === 1) return ['watch', ev, `급격한 갭 확대 1건을 안전장치가 차단했습니다. 버퍼(${buf}%p)는 유지하고 재발 여부를 관찰하세요.`];
+  if (ob.avg_pp > 0.25) return ['watch', ev, '주문가 대비 평균 매수 슬리피지가 0.25%p를 넘었습니다. 버퍼 소진 추이를 관찰하세요.'];
+  return ['ok', ev, `주문가 대비 슬리피지가 버퍼(${buf}%p) 대비 여유 있습니다.`];
 }
 function judgeTimeout(d) {
   const to = d.timeout_exit;
-  const ev = `시간 청산 ${to.n}건 · 평균 손익 ${fmtPct(to.avg_pnl)} · 평균 고점 ${fmtPct(to.avg_mfe)}`;
+  const net = to.avg_pnl_net == null ? to.avg_pnl : to.avg_pnl_net;
+  const ev = `시간 청산 ${to.n}건 · 평균 손익 체결 ${fmtPct(to.avg_pnl)} / 보수 ${fmtPct(net)} · 평균 고점 ${fmtPct(to.avg_mfe)}`;
   if (to.n < 5) return ['nodata', ev, `판정까지 시간 청산 ${5 - to.n}건 더 필요합니다.`];
-  if (to.avg_pnl < 0) return ['adjust', ev, `시간 청산 평균이 음수입니다 — 보유시간 내 회복에 실패하고 있습니다. 청산 시각(${d.params.timeout_time}) 단축을 검토하세요.`];
+  if (net < 0) return ['adjust', ev, `시간 청산 보수 평균이 음수입니다 — 보유시간 내 회복에 실패하고 있습니다. 청산 시각(${d.params.timeout_time}) 단축을 검토하세요.`];
   if (to.avg_mfe >= 1.5) return ['watch', ev, `시간 청산 전 고점이 평균 +${to.avg_mfe}%였습니다(기준 1.5%). 강제 트레일링(${d.params.force_trailing_time}) 앞당김을 검토하세요.`];
   return ['ok', ev, '시간 청산 성과에 경고 신호가 없습니다.'];
 }
@@ -1782,24 +1802,37 @@ function judgeGapRange(d) {
   if ((c.no_target_days||0) > (c.trade_days||0)) return ['watch', ev, `실제 후보 없음이 거래일보다 많습니다. 현재 범위(${range}) 확대 여부를 신중히 검토하세요.` + note];
   return ['ok', ev, `실제 후보 공급은 정상입니다. 현재 범위(${range})를 유지하세요.` + note];
 }
+function scopeNote(sc) {
+  if (!sc) return '';
+  if (sc.name === 'fingerprint') {
+    const since = sc.since ? ` · ${String(sc.since).slice(0, 16).replace('T', ' ')} 이후` : '';
+    return `판정 표본: 현재 지문 ${sc.fingerprint || '—'}${since}`;
+  }
+  const label = sc.name === 'segment' ? `현재 구간 '${sc.segment}'` : '전체 기간';
+  const unversioned = sc.unversioned_n ? ` + 지문 기록 전 ${sc.unversioned_n}건` : '';
+  return `${label} · 지문 ${sc.fingerprints_n}개${unversioned} 섞임 — 참고 수치이며 판정하지 않습니다`;
+}
+
 function renderImprove(d) {
   const q = d.data_quality || {};
-  const notes = [sampleNote(d.overall.total || 0)];
+  const sc = d.scope || {verdict: true};
+  const notes = [scopeNote(d.scope), sampleNote(d.overall.total || 0)].filter(Boolean);
   if (q.excluded_manual_n) notes.push(`수동 거래 ${q.excluded_manual_n}건 제외`);
   notes.push(`MFE 관측 ${q.mfe_observed_n||0}/${q.strategy_trade_n||0}건`);
-  if (!q.params_versioned) notes.push('파라미터 변경 전·후 성과는 아직 구분되지 않음');
+  notes.push('손익 판정은 보수 비용 기준(성과 보고서와 같음)');
   $('imp-sample-note').textContent = notes.join(' · ');
   const p = d.params;
+  const refOnly = j => sc.verdict ? j : ['ref', j[1], '판정은 현재 지문 표본에서만 냅니다. 이 수치는 참고용입니다.'];
   const cards = [
     ['전략 종합',     `${d.overall.total}건`,                          judgeOverall(d)],
     ['HARD_STOP',    `-${p.hard_stop_pct}%`,                           judgeHardStop(d)],
     ['STEP_SIZE',    `+${p.step_size_pct}%`,                           judgeStepSize(d)],
     ['STEP_TRAIL',   `-${p.step_trail_pct}%`,                          judgeStepTrail(d)],
-    ['슬리피지 버퍼', `${p.gap_max_order_pct}→${p.gap_max_fill_pct}%`, judgeSlipBuffer(d)],
+    ['슬리피지 · 진입가', `${p.gap_max_order_pct}→${p.gap_max_fill_pct}%`, judgeSlipBuffer(d)],
     ['F5 마감 청산', p.timeout_time,                                   judgeTimeout(d)],
     ['F1 갭 범위',   `${p.f1_gap_min_pct}~${p.f1_gap_core_max_pct}% / 조건부 ${p.f1_gap_hard_max_pct}%`, judgeGapRange(d)],
   ];
-  $('imp-cards').innerHTML = cards.map(([t, cur, j]) => impCard(t, cur, j)).join('');
+  $('imp-cards').innerHTML = cards.map(([t, cur, j]) => impCard(t, cur, refOnly(j))).join('');
   renderMfeTable(d.mfe_rows);
   renderSlipTable(d.slippage, q);
   renderSkipHold(d);

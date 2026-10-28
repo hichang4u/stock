@@ -356,6 +356,11 @@
       <div class="stats-inner">
         <div class="scard full">
           <div class="card-ttl">파라미터 진단</div>
+          <div class="frow" id="imp-scope" aria-label="판정 표본">
+            <button class="fp on" data-imp-scope="fingerprint" onclick="setImproveScope('fingerprint',this)">현재 지문 (판정)</button>
+            <button class="fp" data-imp-scope="segment" onclick="setImproveScope('segment',this)">현재 구간 (참고)</button>
+            <button class="fp" data-imp-scope="all" onclick="setImproveScope('all',this)">전체 (참고)</button>
+          </div>
           <div class="stats-note" id="imp-sample-note">표본 대기</div>
           <div class="imp-grid" id="imp-cards"><div class="empty">로딩 중...</div></div>
         </div>
@@ -369,7 +374,7 @@
           </div>
         </div>
         <div class="scard full">
-          <div class="card-ttl">슬리피지 상세</div>
+          <div class="card-ttl">선정 기준가 대비 체결가 (진입 타이밍 포함)</div>
           <div class="tbl-wrap">
             <table>
               <thead><tr><th>구간</th><th>건수</th><th>평균 슬리피지</th><th>최대</th><th>평균 체결지연</th></tr></thead>

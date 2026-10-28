@@ -5,7 +5,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 import src.api.server as server  # noqa: E402 — fastapi 미설치 시 모듈 스킵 이후 임포트
-from src import db  # noqa: E402
+from src import db, perf_costs  # noqa: E402
 from src.modules.f4_tracking import (  # noqa: E402
     FORCE_TRAILING_HOUR,
     FORCE_TRAILING_MINUTE,
@@ -178,7 +178,10 @@ def test_improve_trailing_and_timeout_sections():
     payload = server._improve_from_rows(trades, [], {})
 
     assert payload["trailing"] == {"n": 1, "avg_giveback_pp": 3.0, "avg_pnl": 1.0}
-    assert payload["timeout_exit"] == {"n": 1, "avg_pnl": -0.5, "avg_mfe": 1.5}
+    assert payload["timeout_exit"] == {
+        "n": 1, "avg_pnl": -0.5, "avg_mfe": 1.5,
+        "avg_pnl_net": round(perf_costs.apply_costs(-0.5, "TIMEOUT")["net_conservative_pct"], 2),
+    }
 
 
 def test_improve_hold_time_grouped_by_reason():
@@ -418,3 +421,195 @@ async def test_api_improve_aggregates_seeded_trades_orders_skips(tmp_path):
     assert payload["candidates"]["skips"] == {"NO_TARGET": 1, "SLIPPAGE_GUARD": 1}
     assert payload["candidates"]["trade_days"] == 2
     await db.close()
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-28: 판정이 지문 21개에 걸친 62건을 현재 파라미터로 섞어 계산하고 비용을 빼지 않았다
+# (docs/IMPROVE_MENU_FOLLOWUP_20261028.md 가 ~ 다).
+# ---------------------------------------------------------------------------
+
+_SEG = {"name": "파서 수정 후", "start": "20261002", "end": None}
+
+
+def _scoped_inputs():
+    trades = [
+        _trade(id=1, date="20260915", strategy_fingerprint="old", pnl_pct=1.0),
+        _trade(id=2, date="20261020", strategy_fingerprint="prev", pnl_pct=-2.0,
+               close_reason="HARD_STOP"),
+        _trade(id=3, date="20261028", strategy_fingerprint="cur", pnl_pct=0.23),
+    ]
+    orders = [
+        {**_order("FIRST_BUY", 100.0, 101.0), "trade_id": 1},
+        {**_order("FIRST_BUY", 100.0, 100.5), "trade_id": 2},
+        {**_order("FIRST_BUY", 100.0, 100.0), "trade_id": 3},
+    ]
+    skips = [
+        {"date": "20260916", "reason": "NO_TARGET", "created_at": "2026-09-16T09:00:01+09:00"},
+        {"date": "20261027", "reason": "ENTRY_FAIL", "created_at": "2026-10-27T09:00:19+09:00"},
+        {"date": "20261029", "reason": "NO_TARGET", "created_at": "2026-10-29T09:00:01+09:00"},
+    ]
+    return trades, orders, skips
+
+
+def test_fingerprint_scope_keeps_only_the_current_fingerprint():
+    trades, orders, skips = _scoped_inputs()
+
+    t, o, s, meta = server._scope_rows(
+        "fingerprint", trades, orders, skips, fingerprint="cur",
+        fingerprint_since="2026-10-27T15:52:34+09:00", segment=_SEG,
+    )
+
+    assert [r["id"] for r in t] == [3]
+    assert [r["trade_id"] for r in o] == [3]
+    # 승격(15:52) 전 같은 날 진입 무산은 이전 지문의 일이다
+    assert [r["date"] for r in s] == ["20261029"]
+    assert meta["verdict"] is True
+    assert meta["fingerprint"] == "cur"
+    assert meta["fingerprints_n"] == 1
+
+
+def test_segment_scope_uses_the_performance_report_segment():
+    trades, orders, skips = _scoped_inputs()
+
+    t, o, s, meta = server._scope_rows(
+        "segment", trades, orders, skips, fingerprint="cur",
+        fingerprint_since="2026-10-27T15:52:34+09:00", segment=_SEG,
+    )
+
+    assert [r["id"] for r in t] == [2, 3]
+    assert [r["trade_id"] for r in o] == [2, 3]
+    assert [r["date"] for r in s] == ["20261027", "20261029"]
+    assert meta["verdict"] is False  # 구간 안에도 지문이 여럿이다
+    assert meta["segment"] == "파서 수정 후"
+    assert meta["fingerprints_n"] == 2
+
+
+def test_all_scope_keeps_everything_without_verdict():
+    trades, orders, skips = _scoped_inputs()
+
+    t, o, s, meta = server._scope_rows(
+        "all", trades, orders, skips, fingerprint="cur", fingerprint_since=None, segment=_SEG,
+    )
+
+    assert len(t) == 3 and len(o) == 3 and len(s) == 3
+    assert meta["verdict"] is False
+    assert meta["fingerprints_n"] == 3
+    assert meta["unversioned_n"] == 0
+
+
+def test_trades_before_fingerprints_are_counted_separately():
+    trades, orders, skips = _scoped_inputs()
+    trades.append(_trade(id=4, date="20260710", strategy_fingerprint=None))
+
+    *_, meta = server._scope_rows(
+        "all", trades, orders, skips, fingerprint="cur", fingerprint_since=None, segment=_SEG,
+    )
+
+    assert meta["fingerprints_n"] == 3
+    assert meta["unversioned_n"] == 1
+
+
+def test_fingerprint_scope_without_registry_starts_at_the_first_trade():
+    trades, orders, skips = _scoped_inputs()
+
+    _, _, s, _ = server._scope_rows(
+        "fingerprint", trades, orders, skips, fingerprint="cur",
+        fingerprint_since=None, segment=_SEG,
+    )
+
+    # 현재 지문의 첫 진입(2026-07-01T09:12 — _trade 기본값) 뒤 스킵
+    assert [r["date"] for r in s] == ["20260916", "20261027", "20261029"]
+
+
+def test_unknown_scope_falls_back_to_fingerprint():
+    trades, orders, skips = _scoped_inputs()
+
+    _, _, _, meta = server._scope_rows(
+        "weird", trades, orders, skips, fingerprint="cur", fingerprint_since=None, segment=_SEG,
+    )
+
+    assert meta["name"] == "fingerprint"
+
+
+def test_overall_net_uses_the_performance_report_cost_model():
+    trades = [
+        _trade(date="20261020", pnl_pct=2.0, close_reason="TRAILING"),
+        _trade(date="20261021", pnl_pct=-2.0, close_reason="HARD_STOP"),
+    ]
+
+    payload = server._improve_from_rows(trades, [], {})
+
+    win = perf_costs.apply_costs(2.0, "TRAILING")["net_conservative_pct"]
+    loss = perf_costs.apply_costs(-2.0, "HARD_STOP")["net_conservative_pct"]
+    assert payload["overall"]["expectancy"] == 0.0  # 체결 그대로는 이전과 같다
+    assert payload["overall_net"]["basis"] == "conservative"
+    assert payload["overall_net"]["expectancy"] == round((win + loss) / 2, 2)
+    assert payload["overall_net"]["avg_loss"] == round(loss, 2)
+    by_basis = payload["expectancy_by_basis"]
+    assert by_basis["gross"] == 0.0
+    assert by_basis["cost"] == round(-perf_costs.BASE_ROUND_TRIP_COST_PCT, 2)
+    assert by_basis["conservative"] == payload["overall_net"]["expectancy"]
+
+
+def test_timeout_exit_reports_the_conservative_average():
+    trades = [_trade(date="20261028", pnl_pct=0.23, close_reason="TIMEOUT")]
+
+    to = server._improve_from_rows(trades, [], {})["timeout_exit"]
+
+    assert to["avg_pnl"] == 0.23
+    assert to["avg_pnl_net"] == round(
+        perf_costs.apply_costs(0.23, "TIMEOUT")["net_conservative_pct"], 2)
+
+
+def test_order_slippage_compares_with_the_order_price_and_skips_market_orders():
+    orders = [
+        # 0828 043200: 기준가 1,384 · 주문 1,437 · 체결 1,420 → 기준가 대비 +2.6, 주문가 대비 −1.18
+        _order("FIRST_BUY", 1437.0, 1420.0, trigger_price=1384.0),
+        _order("FIRST_BUY", 10_000.0, 10_017.0, trigger_price=9_990.0),
+        _order("CLOSE_SELL", 0.0, 9_980.0, trigger_price=10_000.0),  # 시장가 매도
+    ]
+
+    payload = server._improve_from_rows([], orders, {})
+
+    assert payload["slippage"]["basis"] == "trigger"
+    assert payload["slippage"]["buy"]["max_pp"] == 2.601
+    osl = payload["order_slippage"]["buy"]
+    assert osl["n"] == 2
+    assert osl["max_pp"] == 0.17
+    assert payload["order_slippage"]["sell"]["n"] == 0
+
+
+def test_payload_carries_scope_and_marks_params_versioned():
+    meta = {"name": "fingerprint", "verdict": True, "fingerprint": "cur",
+            "since": None, "segment": "파서 수정 후", "fingerprints_n": 1, "unversioned_n": 0}
+
+    payload = server._improve_from_rows([], [], {}, scope=meta)
+
+    assert payload["scope"] == meta
+    assert payload["data_quality"]["params_versioned"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_improve_defaults_to_the_current_fingerprint(tmp_path, monkeypatch):
+    await db.init(str(tmp_path / "improve.db"))
+    conn = db.get()
+    t1 = await db.open_trade("20261020", "005930", 10_000.0, 10, name="삼성전자")
+    await db.close_trade(t1, 9_800.0, "HARD_STOP", -2.0, 0.0, exit_qty=10, high_price=10_000.0)
+    t2 = await db.open_trade("20261028", "009830", 26_650.0, 260, name="한화솔루션")
+    await db.close_trade(t2, 26_710.0, "TIMEOUT", 0.23, 0.0, exit_qty=260,
+                         high_price=27_175.0)
+    await conn.execute("UPDATE trades SET strategy_fingerprint='prev' WHERE id=?", (t1,))
+    await conn.execute("UPDATE trades SET strategy_fingerprint='cur' WHERE id=?", (t2,))
+    await conn.commit()
+    monkeypatch.setattr(server, "_current_fingerprint", lambda: "cur")
+
+    try:
+        default = json.loads((await server.api_improve()).body.decode("utf-8"))
+        everything = json.loads((await server.api_improve(scope="all")).body.decode("utf-8"))
+    finally:
+        await db.close()  # 실패해도 닫는다 — 열린 연결은 pytest 종료를 막는다
+
+    assert default["scope"]["name"] == "fingerprint"
+    assert default["overall"]["total"] == 1
+    assert everything["overall"]["total"] == 2
+    assert everything["scope"]["verdict"] is False

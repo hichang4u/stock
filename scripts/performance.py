@@ -17,18 +17,15 @@ from datetime import date, datetime
 from pathlib import Path
 from statistics import mean, median
 
-# 개선 계획 §2 초기 PAPER 비용·체결 가정. 연구 상수이며 요율의 단정이 아니다.
-BASE_ROUND_TRIP_COST_PCT = 0.18
-HARD_STOP_SLIPPAGE_PCT = 0.30
-TRAILING_SLIPPAGE_PCT = 0.15
-TIMEOUT_SLIPPAGE_PCT = 0.20
-SLIPPAGE_BY_REASON = {
-    "GAP_HARD_STOP": HARD_STOP_SLIPPAGE_PCT,
-    "HARD_STOP": HARD_STOP_SLIPPAGE_PCT,
-    "TRAILING": TRAILING_SLIPPAGE_PCT,
-    "TIMEOUT": TIMEOUT_SLIPPAGE_PCT,
-    "DATA_END": TIMEOUT_SLIPPAGE_PCT,
-}
+# 비용 모델은 대시보드 '개선' 메뉴와 공유한다(src/perf_costs.py). 여기서 다시 내보낸다.
+from src.perf_costs import (  # noqa: E402, F401
+    BASE_ROUND_TRIP_COST_PCT,
+    HARD_STOP_SLIPPAGE_PCT,
+    SLIPPAGE_BY_REASON,
+    TIMEOUT_SLIPPAGE_PCT,
+    TRAILING_SLIPPAGE_PCT,
+    apply_costs,
+)
 
 CAGR_MIN_DAYS = 365        # 이보다 짧으면 CAGR은 참고 표시
 CAGR_DISPLAY_MIN_DAYS = 30  # 이보다 짧으면 CAGR을 내지 않는다(연환산이 무의미) — 2026-10-05
@@ -39,12 +36,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class OverlapError(ValueError):
     """한 번에 한 포지션 가정이 깨졌다 — 동시 보유 전략은 이 모듈을 쓰지 않는다."""
-
-
-def apply_costs(gross_pct: float, exit_reason: str) -> dict:
-    net_cost = gross_pct - BASE_ROUND_TRIP_COST_PCT
-    slip = SLIPPAGE_BY_REASON.get(exit_reason, TIMEOUT_SLIPPAGE_PCT)
-    return {"net_cost_pct": net_cost, "net_conservative_pct": net_cost - slip}
 
 
 def _ts(value: str) -> datetime:
