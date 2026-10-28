@@ -590,3 +590,38 @@ async def test_no_ws_trade_yet_counts_as_quiet_while_holding(monkeypatch):
 
     assert await bars.correct_once("20261028", "009830", now=_NOW) == 0
     assert calls == []
+
+
+# 진입·청산 주문이 오가는 동안(ENTERING·EXITING)은 주문·체결 조회가 초당 예산을 쓴다. 정정이 겹치면
+# 한도 초과가 주문 경로에 날 수 있다 — 조건 없이 건너뛴다
+# (10/28 마감 청산 확인 3초 뒤에 정정이 돌았다).
+
+
+@pytest.mark.parametrize("status", ["ENTERING", "EXITING"])
+async def test_no_correction_while_a_has_an_order_in_flight(monkeypatch, status):
+    seen = _capture_logs(monkeypatch)
+    _holding(monkeypatch, status=status)
+    calls = _counting_fetch(monkeypatch)
+    _feed(0.1)  # ws 체결이 막 들어왔어도 막는다
+
+    assert await bars.correct_once("20261028", "009830", now=_NOW) == 0
+    assert calls == []
+    blocked = [kw for ev, kw in seen if ev == "TRACK_B_CORRECTION_BLOCKED"]
+    assert blocked and blocked[0]["reason"] == "A_ORDER_IN_FLIGHT"
+
+
+async def test_correction_resumes_after_a_closes(monkeypatch):
+    _holding(monkeypatch, status="CLOSED")
+    calls = _counting_fetch(monkeypatch)
+    _feed(30.0)
+
+    await bars.correct_once("20261028", "009830", now=_NOW)
+    assert calls == ["009830"]
+
+
+def test_block_reason_order_in_flight_comes_after_the_entry_window():
+    inside = datetime(2026, 10, 28, 9, 5, tzinfo=KST)
+    assert bars.correction_block_reason(
+        inside, a_holding=False, ws_stale=False, a_order_in_flight=True) == "ENTRY_WINDOW"
+    assert bars.correction_block_reason(
+        _NOW, a_holding=False, ws_stale=True, a_order_in_flight=True) == "A_ORDER_IN_FLIGHT"

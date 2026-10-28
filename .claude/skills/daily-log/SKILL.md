@@ -165,7 +165,8 @@ print(dict(c)); print('한도 초과 경로', dict(paths))
 - `TRACK_B_CORRECTION_FAILED`는 다음 분 보정이 최근 봉을 다시 고치므로 그 자체로는 가볍다. 마지막
   `TRACK_B_BARS_CORRECTED`가 15:20 이후에 있는지만 본다.
 - `release/20261028-2`부터 A 보유 중 REST 백업이 돌면 분봉 정정을 건너뛴다
-  (`TRACK_B_CORRECTION_BLOCKED` `reason=A_HOLDING_REST_BACKUP`, 티켓 6절). 그 뒤에도 분봉 조회가 한도에 걸리면
+  (`TRACK_B_CORRECTION_BLOCKED` `reason=A_HOLDING_REST_BACKUP`, 티켓 6절). `release/20261028-3`부터 진입·청산
+  주문 중에도 건너뛴다(`reason=A_ORDER_IN_FLIGHT`). 그 뒤에도 분봉 조회가 한도에 걸리면
   적는다. 건너뛴 횟수는 위 명령의 `TRACK_B_CORRECTION_BLOCKED` 수로 본다.
 
 ### 4.1 체결 프레임 점검 — 매일 돌린다

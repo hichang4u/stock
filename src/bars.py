@@ -394,19 +394,28 @@ def _is_complete_session(rows: list[dict]) -> bool:
 
 
 def correction_block_reason(
-    now: datetime, *, a_holding: bool, ws_stale: bool, rest_backup: bool = False
+    now: datetime,
+    *,
+    a_holding: bool,
+    ws_stale: bool,
+    rest_backup: bool = False,
+    a_order_in_flight: bool = False,
 ) -> str | None:
     """분봉 API 호출을 막는 이유. 막지 않으면 None.
 
-    세 경우에 막는다. 09:00~09:11은 A의 진입 창이다. A가 보유 중인데 WS가
-    끊겼거나(``ws_stale``), 연결은 됐어도 A의 REST 백업이 돌고 있으면
-    (``rest_backup``, `rest_backup_active`) 백업이 PAPER 초당 1건 예산을 쓰고 있는
-    때다(2026-10-28 EGW00201, docs/RATE_LIMIT_FOLLOWUP_20261028.md).
+    네 경우에 막는다. 09:00~09:11은 A의 진입 창이다. A의 진입·청산 주문이
+    오가는 동안(``a_order_in_flight``, ENTERING·EXITING)은 주문·체결 조회가 초당
+    예산을 쓴다. A가 보유 중인데 WS가 끊겼거나(``ws_stale``), 연결은 됐어도 A의
+    REST 백업이 돌고 있으면(``rest_backup``, `rest_backup_active`) 백업이 PAPER
+    초당 1건 예산을 쓰고 있는 때다(2026-10-28 EGW00201,
+    docs/RATE_LIMIT_FOLLOWUP_20261028.md).
 
-    겹치면 금지창, 끊김, REST 백업 순서로 답한다.
+    겹치면 금지창, 주문 진행, 끊김, REST 백업 순서로 답한다.
     """
     if kis_minute_bars.in_forbidden_window(now):
         return "ENTRY_WINDOW"
+    if a_order_in_flight:
+        return "A_ORDER_IN_FLIGHT"
     if a_holding and ws_stale:
         return "A_HOLDING_WS_DOWN"
     if a_holding and rest_backup:
@@ -544,10 +553,11 @@ async def correct_once(
 ) -> int:
     """공식 분봉 한 페이지로 당일 봉을 정정한다. 정정한 봉 수를 돌려준다."""
     when = now or datetime.now(KST)
-    a_holding = state.get().position_status == "HOLDING"
+    status = state.get().position_status
     blocked = correction_block_reason(
-        when, a_holding=a_holding, ws_stale=not live.ws_connected,
+        when, a_holding=status == "HOLDING", ws_stale=not live.ws_connected,
         rest_backup=rest_backup_active(ticker, when),
+        a_order_in_flight=status in ("ENTERING", "EXITING"),
     )
     if blocked:
         _note_correction_block((date, ticker), blocked)
