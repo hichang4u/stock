@@ -279,3 +279,67 @@ async def test_success_logs_nothing(events):
 
     assert await _deliver(ok) is True
     assert events == []
+
+
+# 2026-10-28: 마감 청산 알림이 2번 왔는데 로그에 아무것도 없었다. 1회차가 응답 타임아웃
+# (메시지는 도착)이고 2회차가 성공하면 지금까지는 흔적이 남지 않았다
+# (docs/NOTIFICATION_LOSS_FOLLOWUP_20261026.md 8절 아).
+
+
+def _fail_then_ok(exc_type, fails=1):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) <= fails:
+            raise exc_type("", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    return handler, calls
+
+
+async def test_success_after_a_read_timeout_is_logged_as_possible_duplicate(events):
+    handler, calls = _fail_then_ok(httpx.ReadTimeout)
+    assert await _deliver(handler) is True
+    assert len(calls) == 2
+    [(event, kw)] = events
+    assert event == "NOTIFICATION_RETRIED"
+    assert kw["alert"] == "[알림] 매수 체결 · 396300 HT로보틱스"
+    assert kw["attempts"] == 2
+    assert kw["errors"] == ["ReadTimeout"]
+    assert kw["possible_duplicate"] is True
+    assert notifier._unconfirmed == []  # 성공했으니 미확인 목록에는 넣지 않는다
+
+
+async def test_success_after_connect_errors_is_not_a_duplicate(events):
+    """연결 자체가 안 됐으면 메시지는 닿지 않았다."""
+    handler, _ = _fail_then_ok(httpx.ConnectError, fails=2)
+    assert await _deliver(handler) is True
+    [(event, kw)] = events
+    assert event == "NOTIFICATION_RETRIED"
+    assert kw["attempts"] == 3
+    assert kw["errors"] == ["ConnectError", "ConnectError"]
+    assert kw["possible_duplicate"] is False
+
+
+async def test_success_after_rate_limit_is_not_a_duplicate(events):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"ok": False, "parameters": {"retry_after": 1}})
+        return httpx.Response(200, json={"ok": True})
+
+    assert await _deliver(handler) is True
+    [(event, kw)] = events
+    assert event == "NOTIFICATION_RETRIED"
+    assert kw["attempts"] == 2
+    assert kw["status"] == 429
+    assert kw["possible_duplicate"] is False
+
+
+def test_retried_event_has_a_label():
+    from src.utils.logger import event_label
+
+    assert event_label("NOTIFICATION_RETRIED") != "NOTIFICATION_RETRIED(NOTIFICATION_RETRIED)"

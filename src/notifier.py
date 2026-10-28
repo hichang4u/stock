@@ -165,6 +165,24 @@ def _scrub(value: str, token: str) -> str:
 
 ClientFactory = Callable[[], httpx.AsyncClient]
 
+# 요청이 서버에 닿지 않았다고 확실한 예외. 그 밖의 예외(응답 타임아웃 등)는 메시지가
+# 이미 도착했을 수 있다.
+_NOT_DELIVERED_ERRORS = {"ConnectError", "ConnectTimeout"}
+
+
+def _log_retried(text: str, attempts: int, errors: list[str], status: int | None) -> None:
+    """재시도 끝에 성공한 전송. 앞선 시도가 도착했으면 같은 알림이 중복으로 간 것이다
+    (2026-10-28 마감 청산 알림 2번, docs/NOTIFICATION_LOSS_FOLLOWUP_20261026.md 8절)."""
+    log(
+        "NOTIFICATION_RETRIED",
+        level="INFO",
+        alert=_alert_head(text),
+        attempts=attempts,
+        errors=list(errors) or None,
+        status=status,
+        possible_duplicate=any(e not in _NOT_DELIVERED_ERRORS for e in errors),
+    )
+
 
 async def _deliver(
     client_factory: ClientFactory,
@@ -180,6 +198,7 @@ async def _deliver(
     - 429는 retry_after만큼 쉬고 다시 보낸다. 그 밖의 오류 응답은 재시도하지 않는다(기존 동작).
     - 예외는 다시 보낸다. 응답 타임아웃이면 메시지가 이미 도착했을 수 있어 "확인 못 함"으로 적는다.
     - 실패하면 어떤 알림인지·시도별 예외·상태 코드를 남기고, 다음 성공 알림 끝에 덧붙인다.
+    - 재시도 끝에 성공하면 `NOTIFICATION_RETRIED`를 남긴다(중복 가능 여부 포함).
     """
     reported = len(_unconfirmed)
     outgoing = _with_unconfirmed_note(text)
@@ -187,6 +206,7 @@ async def _deliver(
     last_error = ""
     status: int | None = None
     body = ""
+    retried_status: int | None = None
     attempts = 0
     for attempt in range(1, _SEND_ATTEMPTS + 1):
         attempts = attempt
@@ -200,11 +220,14 @@ async def _deliver(
             continue
         status = resp.status_code
         if 200 <= status < 300:
+            if attempt > 1:
+                _log_retried(text, attempt, errors, retried_status)
             if reported:
                 log("NOTIFICATION_UNCONFIRMED_REPORTED", level="INFO", count=reported)
                 del _unconfirmed[:reported]
             return True
         body = _scrub(resp.text[:200], token)
+        retried_status = status
         if status == 429:
             try:
                 retry_after = float(resp.json().get("parameters", {}).get("retry_after", 1))

@@ -315,6 +315,7 @@ EVENT_LABELS = {
     ),
     "REAL_READINESS_FAILED": "실전 준비도 계산 실패(Real Readiness Failed)",
     "NOTIFICATION_FAILED": "알림 전송 실패(Notification Failed)",
+    "NOTIFICATION_RETRIED": "알림 재전송 후 성공(Notification Retried)",
     "ORDER_SMOKE_BUY_START": "주문 테스트 매수 시작(Order Smoke Buy Start)",
     "ORDER_SMOKE_BUY_FILLED": "주문 테스트 매수 체결(Order Smoke Buy Filled)",
     "ORDER_SMOKE_SELL_START": "주문 테스트 매도 시작(Order Smoke Sell Start)",
