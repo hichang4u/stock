@@ -464,8 +464,129 @@ async def test_recovery_is_logged_so_the_episode_can_be_measured(monkeypatch):
 
     monkeypatch.setattr(bars.kis_minute_bars, "fetch_minute_bars", fake_fetch)
     monkeypatch.setattr(bars.live, "ws_connected", True)
+    # 재접속 뒤 ws 체결이 다시 들어온다 — 연결만 되고 조용하면 공백 가드가 막는다.
+    bars.on_tick({"received_at": now.isoformat(), "source_ts": now.isoformat(),
+                  "price": 70000.0, "qty": 1, "source": "ws", "valid": True,
+                  "ticker": "005930", "raw": None})
+    bars.drain()
     await bars.correct_once("20260910", "005930", now=now)
 
     events = [ev for ev, _ in seen]
     assert "TRACK_B_CORRECTION_BLOCKED" in events
     assert "TRACK_B_CORRECTION_RESUMED" in events
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-28: 연결은 돼 있는데 체결이 2초 없으면(WS_STALE) A의 REST 백업이 1초마다 돈다. 위 가드는
+# 연결이 끊겼을 때만 막아서, 얇은 종목 보유일에 분봉 보정이 백업과 겹쳐 초당 한도를 넘었다
+# (EGW00201 11건 중 8건이 분봉 조회, docs/RATE_LIMIT_FOLLOWUP_20261028.md 나안).
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 10, 28, 12, 30, 59, tzinfo=KST)
+
+
+def _feed(seconds_ago, source="ws", ticker="009830"):
+    at = (_NOW.timestamp() - seconds_ago)
+    received = datetime.fromtimestamp(at, tz=KST).isoformat()
+    bars.on_tick({
+        "source_ts": None if source == "rest" else received, "received_at": received,
+        "price": 26600.0, "qty": 10, "source": source, "valid": source == "ws",
+        "ticker": ticker, "raw": None,
+    })
+    bars.drain()
+
+
+def _holding(monkeypatch, status="HOLDING"):
+    monkeypatch.setattr(bars.state, "get", lambda: type("S", (), {"position_status": status})())
+    monkeypatch.setattr(bars.live, "ws_connected", True)
+
+
+def _counting_fetch(monkeypatch):
+    calls = []
+
+    async def fake_fetch(ticker, **kwargs):
+        calls.append(ticker)
+        return {"output2": []}
+
+    monkeypatch.setattr(bars.kis_minute_bars, "fetch_minute_bars", fake_fetch)
+    return calls
+
+
+def test_block_reason_names_the_rest_backup():
+    assert bars.correction_block_reason(
+        _NOW, a_holding=True, ws_stale=False, rest_backup=True) == "A_HOLDING_REST_BACKUP"
+    assert bars.correction_block_reason(
+        _NOW, a_holding=True, ws_stale=True, rest_backup=True) == "A_HOLDING_WS_DOWN"
+    assert bars.correction_block_reason(
+        _NOW, a_holding=False, ws_stale=False, rest_backup=True) is None
+
+
+async def test_no_correction_while_a_holds_and_the_socket_is_quiet(monkeypatch):
+    seen = _capture_logs(monkeypatch)
+    _holding(monkeypatch)
+    calls = _counting_fetch(monkeypatch)
+    _feed(3.0)
+
+    assert await bars.correct_once("20261028", "009830", now=_NOW) == 0
+    assert calls == []
+    blocked = [kw for ev, kw in seen if ev == "TRACK_B_CORRECTION_BLOCKED"]
+    assert blocked and blocked[0]["reason"] == "A_HOLDING_REST_BACKUP"
+
+
+async def test_correction_runs_when_a_ws_trade_just_arrived(monkeypatch):
+    _holding(monkeypatch)
+    calls = _counting_fetch(monkeypatch)
+    _feed(0.5)
+
+    await bars.correct_once("20261028", "009830", now=_NOW)
+    assert calls == ["009830"]
+
+
+async def test_quiet_socket_does_not_block_when_a_is_not_holding(monkeypatch):
+    _holding(monkeypatch, status="IDLE")
+    calls = _counting_fetch(monkeypatch)
+    _feed(30.0)
+
+    await bars.correct_once("20261028", "009830", now=_NOW)
+    assert calls == ["009830"]
+
+
+async def test_rest_backup_ticks_do_not_count_as_ws_trades(monkeypatch):
+    _holding(monkeypatch)
+    calls = _counting_fetch(monkeypatch)
+    _feed(5.0)
+    _feed(0.2, source="rest")
+
+    assert await bars.correct_once("20261028", "009830", now=_NOW) == 0
+    assert calls == []
+
+
+async def test_a_rest_poll_right_as_ws_resumes_still_blocks(monkeypatch):
+    """10/28 실패 8건 중 5건: ws가 막 돌아왔는데(0.2 ~ 1.3초 전) REST 백업의 마지막 폴링이
+    0.4초 전이었다."""
+    _holding(monkeypatch)
+    calls = _counting_fetch(monkeypatch)
+    _feed(0.8)
+    _feed(0.4, source="rest")
+
+    assert await bars.correct_once("20261028", "009830", now=_NOW) == 0
+    assert calls == []
+
+
+async def test_an_old_rest_poll_does_not_block(monkeypatch):
+    _holding(monkeypatch)
+    calls = _counting_fetch(monkeypatch)
+    _feed(10.0, source="rest")
+    _feed(0.5)
+
+    await bars.correct_once("20261028", "009830", now=_NOW)
+    assert calls == ["009830"]
+
+
+async def test_no_ws_trade_yet_counts_as_quiet_while_holding(monkeypatch):
+    """F4도 첫 ws 틱 전에는 공백으로 보고 REST 백업을 돌린다."""
+    _holding(monkeypatch)
+    calls = _counting_fetch(monkeypatch)
+
+    assert await bars.correct_once("20261028", "009830", now=_NOW) == 0
+    assert calls == []

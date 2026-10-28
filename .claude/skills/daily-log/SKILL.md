@@ -150,7 +150,7 @@ from collections import Counter
 c=Counter(); paths=Counter()
 for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
     d=json.loads(l); e=d.get('event','')
-    if e in ('RATE_LIMIT_HIT','TRANSIENT_ERROR_RETRY','TRACK_B_CORRECTION_FAILED','WS_STALE','LATENCY_HIGH'):
+    if e in ('RATE_LIMIT_HIT','TRANSIENT_ERROR_RETRY','TRACK_B_CORRECTION_FAILED','TRACK_B_CORRECTION_BLOCKED','WS_STALE','LATENCY_HIGH'):
         c[e]+=1
         if e=='RATE_LIMIT_HIT': paths[str(d.get('path','')).rsplit('/',1)[-1]]+=1
 print(dict(c)); print('한도 초과 경로', dict(paths))
@@ -164,6 +164,9 @@ print(dict(c)); print('한도 초과 경로', dict(paths))
   있으면 맨 앞에 쓴다.** 청산 지연으로 이어질 수 있다.
 - `TRACK_B_CORRECTION_FAILED`는 다음 분 보정이 최근 봉을 다시 고치므로 그 자체로는 가볍다. 마지막
   `TRACK_B_BARS_CORRECTED`가 15:20 이후에 있는지만 본다.
+- `release/20261028-2`부터 A 보유 중 REST 백업이 돌면 분봉 정정을 건너뛴다
+  (`TRACK_B_CORRECTION_BLOCKED` `reason=A_HOLDING_REST_BACKUP`, 티켓 6절). 그 뒤에도 분봉 조회가 한도에 걸리면
+  적는다. 건너뛴 횟수는 위 명령의 `TRACK_B_CORRECTION_BLOCKED` 수로 본다.
 
 ### 4.1 체결 프레임 점검 — 매일 돌린다
 

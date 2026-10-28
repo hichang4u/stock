@@ -55,6 +55,23 @@ _pending_spikes: dict[tuple[str, str, str], int] = {}
 _correction_blocked: dict[tuple[str, str], str] = {}
 # 지금 틱이 들어오고 있는 (날짜, 종목). 바뀌면 이전 계열을 마감한다.
 _active: tuple[str, str] | None = None
+# 종목별 마지막 ws 틱·REST 백업 틱 수신 시각. A가 보유 중에 ws 체결이 F4의 공백 임계 이상 없거나
+# REST 백업 틱이 방금 들어왔으면 F4의 REST 백업이 돌고 있다 — 정정 호출을 겹치지 않는다.
+# 2026-10-28 실패 8건은 모두 REST 폴링 0.4 ~ 0.7초 뒤였고, 그중 5건은 ws가 막 돌아온 직후였다(공백만
+# 보면 놓친다). 임계는 F4와 같은 설정을 읽는다(읽기만, 지문 무관).
+_last_ws_at: dict[str, datetime] = {}
+_last_rest_at: dict[str, datetime] = {}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+_WS_QUIET_SEC = max(0.0, _env_float("F4_WS_STALE_SEC", 2.0))
+_REST_RECENT_SEC = max(0.0, _env_float("F4_REST_POLL_INTERVAL_SEC", 1.0)) + 0.5
 
 
 def bars_path(date: str, ticker: str) -> Path:
@@ -73,6 +90,8 @@ def reset() -> None:
     _filters.clear()
     _dirty.clear()
     _pending_spikes.clear()
+    _last_ws_at.clear()
+    _last_rest_at.clear()
     _correction_blocked.clear()
     _active = None
 
@@ -232,10 +251,40 @@ def drain() -> None:
     _flush()
 
 
+def _note_source_tick(tick: dict) -> None:
+    source = tick.get("source")
+    seen = _last_ws_at if source == "ws" else _last_rest_at if source == "rest" else None
+    if seen is None:
+        return
+    try:
+        at = datetime.fromisoformat(str(tick.get("received_at"))).astimezone(KST)
+    except (TypeError, ValueError):
+        return
+    ticker = str(tick.get("ticker"))
+    prev = seen.get(ticker)
+    if prev is None or at > prev:
+        seen[ticker] = at
+
+
+def rest_backup_active(ticker: str, now: datetime) -> bool:
+    """F4의 REST 백업이 지금 돌고 있다고 볼 수 있는가.
+
+    ws 체결이 F4의 공백 임계 이상 없었거나(아직 한 번도 없었으면 F4처럼 공백으로 본다),
+    REST 백업 틱이 폴링 간격 + 0.5초 안에 들어왔으면 True.
+    """
+    key = str(ticker)
+    last_ws = _last_ws_at.get(key)
+    if last_ws is None or (now - last_ws).total_seconds() >= _WS_QUIET_SEC:
+        return True
+    last_rest = _last_rest_at.get(key)
+    return last_rest is not None and (now - last_rest).total_seconds() <= _REST_RECENT_SEC
+
+
 def _consume(tick: dict) -> None:
     ticker = tick.get("ticker")
     if not ticker:
         return
+    _note_source_tick(tick)
     when = _minute_of(tick)
     if when is None:
         return
@@ -345,19 +394,23 @@ def _is_complete_session(rows: list[dict]) -> bool:
 
 
 def correction_block_reason(
-    now: datetime, *, a_holding: bool, ws_stale: bool
+    now: datetime, *, a_holding: bool, ws_stale: bool, rest_backup: bool = False
 ) -> str | None:
     """분봉 API 호출을 막는 이유. 막지 않으면 None.
 
-    두 창에서 막는다. 09:00~09:11은 A의 진입 창이고, A가 보유 중인데 WS가
-    끊긴 구간은 A의 REST 백업이 PAPER 초당 1건 예산을 쓰고 있는 때다.
+    세 경우에 막는다. 09:00~09:11은 A의 진입 창이다. A가 보유 중인데 WS가
+    끊겼거나(``ws_stale``), 연결은 됐어도 A의 REST 백업이 돌고 있으면
+    (``rest_backup``, `rest_backup_active`) 백업이 PAPER 초당 1건 예산을 쓰고 있는
+    때다(2026-10-28 EGW00201, docs/RATE_LIMIT_FOLLOWUP_20261028.md).
 
-    둘이 겹치면 금지창을 먼저 답한다 — 그쪽이 먼저 막는다.
+    겹치면 금지창, 끊김, REST 백업 순서로 답한다.
     """
     if kis_minute_bars.in_forbidden_window(now):
         return "ENTRY_WINDOW"
     if a_holding and ws_stale:
         return "A_HOLDING_WS_DOWN"
+    if a_holding and rest_backup:
+        return "A_HOLDING_REST_BACKUP"
     return None
 
 
@@ -493,7 +546,8 @@ async def correct_once(
     when = now or datetime.now(KST)
     a_holding = state.get().position_status == "HOLDING"
     blocked = correction_block_reason(
-        when, a_holding=a_holding, ws_stale=not live.ws_connected
+        when, a_holding=a_holding, ws_stale=not live.ws_connected,
+        rest_backup=rest_backup_active(ticker, when),
     )
     if blocked:
         _note_correction_block((date, ticker), blocked)
