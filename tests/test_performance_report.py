@@ -83,6 +83,22 @@ def test_segments_cover_from_the_first_trade_with_an_open_end():
         assert a["end"] < b["start"]
 
 
+def test_first_trade_wait_opens_its_own_segment():
+    """2026-10-27 승격(10/28 적용): 체결 확인 창을 첫 체결부터 센다.
+
+    조건 하나가 바뀌었으니 구간을 연다(docs/ENTRY_FILL_TIMEOUT_FOLLOWUP_20260903.md 8.12절).
+    """
+    from src.perf_costs import current_segment
+
+    names = [s["name"] for s in TRACK_A_SEGMENTS]
+    parser, wait = TRACK_A_SEGMENTS[names.index("파서 수정 후")], TRACK_A_SEGMENTS[-1]
+    assert parser["end"] == "20261027"
+    assert wait["name"] == "첫 체결 대기"
+    assert wait["start"] == "20261028" and wait["end"] is None
+    assert len(wait["changed"]) == 1 and "F3_FIRST_TRADE_WAIT_UNTIL_SEC" in wait["changed"][0]
+    assert current_segment() is wait
+
+
 def test_main_writes_a_run_and_returns_zero(tmp_path, capsys):
     _db(tmp_path, [_row(1, "20260702", 2.0), _row(2, "20261002", -1.0, reason="HARD_STOP")])
     out = tmp_path / "out"

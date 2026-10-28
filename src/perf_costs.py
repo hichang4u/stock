@@ -34,8 +34,12 @@ TRACK_A_SEGMENTS: list[dict] = [
      "changed": ["실행 모드·지문 기록 시작, 진입 안전장치 강화 묶음"]},
     {"name": "빠른 경로", "start": "20260911", "end": "20261001",
      "changed": ["빠른 경로 하이브리드 활성(PAPER_FAST_HYBRID=1). 0914~1001은 WS 파서 결함 기간"]},
-    {"name": "파서 수정 후", "start": "20261002", "end": None,
+    {"name": "파서 수정 후", "start": "20261002", "end": "20261027",
      "changed": ["WS 파서 헤더 분할 수정", "상한가 잠김 예외"]},
+    # release/20261027-1(10/27 장 마감 후 승격). 진입 티켓 8.12절.
+    {"name": "첫 체결 대기", "start": "20261028", "end": None,
+     "changed": ["개장 직후 주문의 2초 체결 확인 창을 그 종목의 첫 체결부터 센다"
+                 "(F3_FIRST_TRADE_WAIT_UNTIL_SEC=45)"]},
 ]
 
 
