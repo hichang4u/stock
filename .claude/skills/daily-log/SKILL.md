@@ -71,6 +71,17 @@ cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts
 추정이다. 누적은 `--since 20261013`으로 본다(맨 아래 요약 줄). 레거시 경로 날은 캡처가 종목 고정 뒤부터라
 첫 체결을 비워 둔다.
 
+`release/20261027-1`부터 09:00:00 ~ 09:00:45에 낸 주문은 그 종목의 첫 체결까지 기다렸다가 2초 확인 창을 연다
+(진입 티켓 8.12절). 빠른 경로 날마다 1절 출력에서 다음을 본다.
+- `ENTRY_FIRST_TRADE_WAIT` → `ENTRY_FIRST_TRADE_SEEN`: `waited_ms`, `via`(`FIRST_TRADE`/`FILL_NOTICE`),
+  `first_trade_at`. 모의에서는 통보가 장부에 오르지 않아 `via`는 늘 `FIRST_TRADE`다.
+- **`ENTRY_FIRST_TRADE_WAIT_TIMEOUT`(WARN)이 있으면 맨 앞에 쓴다.** 첫 체결 신호를 09:00:45까지 못 받았다는
+  뜻이다. 그 무렵 WS 단절과 틱 캡처의 첫 ws 행 `source_ts`를 대조한다.
+- 09시 정각 단절(09:00:02 ~ 04 무렵)과 첫 체결이 겹친 날은 `first_trade_at`과 `ENTRY_FIRST_TRADE_SEEN` 로그
+  시각의 차이를 적는다(재접속 뒤 첫 틱으로 늦게 잡힌다).
+- `entry_timing_report.py`에서는 "1차 첫 체결 전 · 창 안 체결" 갈래로 나온다. "1차 첫 체결 전 · 취소"가 다시
+  나오면 맨 앞에 쓴다.
+
 ## 4. WS 상태
 
 ```bash
@@ -103,6 +114,9 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
   - **그 밖의 시각**에서 빠졌으면 **맨 앞에 쓴다.**
   - 09시대 공백 0초 안팎의 작은 불연속은 KIS 누계거래량 잡음이다(`docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md`
     7.5절). 같은 날 그런 불연속이 얼마나 잦은지와 비교해서만 판단한다.
+- `source_ts_reversals`는 실제 체결 시각 역전이 아니다. ws 행은 거래소 시각(초 단위), REST 행은 수신 시각(ms
+  단위)으로 비교하므로 REST 백업 틱이 끼면 그만큼 는다. 2026-10-28에는 1,325건이었지만 ws 행끼리는 0건이었다.
+  REST 백업이 많은 날(WS_STALE이 잦은 보유일) 크게 나오면 정상이다.
 
 ```bash
 cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
@@ -126,6 +140,30 @@ for r in (r for r in rows if r.get('source')=='ws'):
     prev=(t,cum)
 "
 ```
+
+### 4.0 KIS 호출 한도 — 매일 센다
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import json
+from collections import Counter
+c=Counter(); paths=Counter()
+for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
+    d=json.loads(l); e=d.get('event','')
+    if e in ('RATE_LIMIT_HIT','TRANSIENT_ERROR_RETRY','TRACK_B_CORRECTION_FAILED','WS_STALE','LATENCY_HIGH'):
+        c[e]+=1
+        if e=='RATE_LIMIT_HIT': paths[str(d.get('path','')).rsplit('/',1)[-1]]+=1
+print(dict(c)); print('한도 초과 경로', dict(paths))
+"
+```
+
+- 평소(2026-10-22 ~ 27) `RATE_LIMIT_HIT`은 0 ~ 2건이다. 2026-10-28에는 11건이었다. 거래가 얇은 종목을 보유한 날
+  WS_STALE이 잦아 REST 시세 백업(`inquire-price`, 1초 간격)과 매분 분봉 보정(`inquire-time-itemchartprice`)이
+  겹친 것으로 본다(`docs/RATE_LIMIT_FOLLOWUP_20261028.md`).
+- **한도 초과 경로에 주문·체결 조회(`order-cash`, `order-rvsecncl`, `inquire-daily-ccld`, `inquire-balance`)가
+  있으면 맨 앞에 쓴다.** 청산 지연으로 이어질 수 있다.
+- `TRACK_B_CORRECTION_FAILED`는 다음 분 보정이 최근 봉을 다시 고치므로 그 자체로는 가볍다. 마지막
+  `TRACK_B_BARS_CORRECTED`가 15:20 이후에 있는지만 본다.
 
 ### 4.1 체결 프레임 점검 — 매일 돌린다
 
@@ -186,6 +224,24 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
   오고 있다는 뜻이다(`docs/FILL_NOTICE_FOLLOWUP_20261007.md` 6.2절).
 - 주문이 있었는데 `FILL_NOTICE_FRAME`도 `WS_FRAME_UNKNOWN_TR`도 없으면, 그 세션으로는 통보가 오지 않은 것이다.
 - 설계: `docs/superpowers/specs/2026-10-06-fill-notice-design.md`(B안 — F4 시세 세션에 얹음).
+
+### 4.3 알림 (텔레그램)
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import json
+for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
+    d=json.loads(l); e=d.get('event','')
+    if e.startswith('NOTIFICATION'):
+        print(d['ts'][11:23], e, {k:v for k,v in d.items() if k in ('alert','attempts','errors','error','status','delivery','possible_duplicate','count')})
+"
+```
+
+- `NOTIFICATION_FAILED`: 세 번 다 실패. `delivery=UNCONFIRMED`면 도착했을 수도 있다(중복 가능).
+- `NOTIFICATION_RETRIED`(`release/20261028-1`~): 재시도 끝에 성공. `possible_duplicate=true`면 사용자가 같은 알림을
+  두 번 이상 받았을 수 있다. 건수를 `docs/NOTIFICATION_LOSS_FOLLOWUP_20261026.md` 8절 아래에 날짜별로 적는다.
+- 로그에 아무것도 없는데 사용자가 중복을 보고하면, 그 알림 이벤트(`TIMEOUT_CLOSE` 등)가 한 번뿐인지와 운영
+  `main.py`가 하나뿐인지부터 본다(2026-10-28 8절).
 
 ## 5. 청산이 있었으면 — F4 틱 공백 재측정
 
