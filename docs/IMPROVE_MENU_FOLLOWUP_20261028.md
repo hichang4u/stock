@@ -155,3 +155,4 @@
 
 STEP_TRAIL 판정은 청산 실행(트레일 발동 → 체결) 쪽이라 H1의 닫힌 축이 아니다. 같은 세 건이 F4 청산 틱 공백
 티켓(`docs/F4_CLOSE_TICK_FREEZE_FOLLOWUP_20260917.md`)과 겹치는지는 대조하지 않았다.
+→ 대조함(2026-10-29): 그 결함이 아니라 장 초반 급락 관통이다. `docs/STEP_TRAIL_SLIPPAGE_FOLLOWUP_20261029.md`.
