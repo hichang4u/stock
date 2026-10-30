@@ -5,6 +5,9 @@
 정의 1의 값(09:01 1분봉 시가 ÷ 전일종가 − 1)이 "7% 이상 / 미만"으로 얼마나 일치하는지 센다.
 90% 이상이면 정의 1을 판정에 쓴다. 손익은 계산하지 않는다.
 
+비교 표본은 종목별로 로그 시각이 09:01:00 ~ 09:01:59인 첫 `F3_RECHECK`다(§4.1 결정 가, 2026-10-30).
+`--any-time`은 시각을 가리지 않는 첫 기록으로 비교한다(첫 판정 85.7% 재현용).
+
     python scripts/h1_gap_concordance.py \\
         --log-dir data/logs.migrated --log-dir D:/Private/stock-prod/data/logs
 """
@@ -22,8 +25,10 @@ GATE_PCT = 90.0
 START, END = "20260701", "20260910"
 
 
-def first_rechecks(log_dirs: list[Path], day: str) -> dict[str, dict]:
-    """그날 종목별 첫 `F3_RECHECK`(gap_pct·prev_close가 있는 것)."""
+def first_rechecks(
+    log_dirs: list[Path], day: str, minute: str | None = "09:01"
+) -> dict[str, dict]:
+    """그날 종목별 첫 `F3_RECHECK`(gap_pct·prev_close가 있는 것). minute이면 그 분에 찍힌 것만."""
     found: dict[str, dict] = {}
     for d in log_dirs:
         path = d / f"{day}.jsonl"
@@ -41,7 +46,8 @@ def first_rechecks(log_dirs: list[Path], day: str) -> dict[str, dict]:
                     continue
                 tk = str(ev.get("ticker") or "")
                 has_gap = ev.get("gap_pct") is not None and ev.get("prev_close")
-                if tk and tk not in found and has_gap:
+                in_minute = minute is None or str(ev.get("ts", ""))[11:16] == minute
+                if tk and tk not in found and has_gap and in_minute:
                     found[tk] = ev
         if found:
             break
@@ -63,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--universes", type=Path, default=ROOT / "data/replay/universes.json")
     ap.add_argument("--bars-dir", type=Path, default=ROOT / "data/backtest_bars")
     ap.add_argument("--log-dir", type=Path, action="append", required=True)
+    ap.add_argument("--any-time", action="store_true", help="기록 시각을 가리지 않는다")
     args = ap.parse_args(argv)
 
     days = json.loads(args.universes.read_text(encoding="utf-8"))["days"]
@@ -71,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     for day in sorted(days):
         if not (START <= day <= END):
             continue
-        rechecks = first_rechecks(args.log_dir, day)
+        rechecks = first_rechecks(args.log_dir, day, None if args.any_time else "09:01")
         for cand in days[day]:
             tk = str(cand["ticker"])
             ev = rechecks.get(tk)
