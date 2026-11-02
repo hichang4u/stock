@@ -97,6 +97,30 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 `keepalive ping timeout` 단절은 큐 포화 계열이라 무겁게 본다. 다른 사유의 단절은
 서버·네트워크 쪽일 수 있다.
 
+**정각이 아닌 단절을 매일 센다**(`docs/WS_REST_OUTAGE_FOLLOWUP_20261021.md` 10절, 2026-11-03 결정 사).
+매시 정각(`hh:00:00 ~ 04`) 밖의 `WS_DISCONNECTED`와 `keepalive ping timeout` 건수를 보고에 한 줄로 적는다.
+0건이어도 적는다. 그날 보유 중(진입 ~ 청산)이었던 단절은 따로 표시한다.
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import json
+off=[]; ka=0
+for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
+    try: d=json.loads(l)
+    except ValueError: continue
+    if d.get('event')!='WS_DISCONNECTED': continue
+    t=d['ts'][11:19]; err=str(d.get('error',''))
+    ka+='keepalive' in err
+    if not (t[3:5]=='00' and t[6:8]<'05'): off.append(t+(' KA' if 'keepalive' in err else ''))
+print('정각 밖 단절', len(off), off, '| keepalive', ka)
+"
+```
+
+- 정각 밖 단절이 **보유 중**에 났으면 맨 앞에 쓴다. 그 무수신 구간 가격과 스탑선 거리를 함께 적는다. 스탑선
+  근처였으면 티켓 10절의 재검토 조건(선택지 라)에 닿은 것이다.
+- 보유가 끝난 뒤에 났으면 시각·사유·놓친 체결량만 티켓 아래에 날짜별로 적는다.
+- 10/14 ~ 11/02 기준값: 14거래일 중 5일(10/14, 21, 22, 23, 29), 보유 중은 2일(10/21, 10/22의 09:07).
+
 `WS_SUBSCRIBE_RESPONSE`(2026-10-07~)는 시세 구독 응답이다. 위 검색에 걸리지만 `error`만 찍히므로
 `rt_cd`·`msg_cd`·`msg1`을 따로 본다. 09:00:01 직후 단절 앞에 `msg_cd=OPSP8996`(WARN)이 있으면 같은 앱키의
 다른 세션 때문이다. `OPSP0000`(성공) 뒤에 끊기면 그 원인은 아니다
