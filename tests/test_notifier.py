@@ -339,6 +339,53 @@ async def test_success_after_rate_limit_is_not_a_duplicate(events):
     assert kw["possible_duplicate"] is False
 
 
+# 2026-11-02: 중복 자체는 그대로 두고(6절 사), 중복일 수 있는 재전송에는 본문에 표시를 붙인다
+# (docs/NOTIFICATION_LOSS_FOLLOWUP_20261026.md 8.5절 자).
+
+
+def _texts_sent(fail):
+    """첫 시도는 fail(request)로 실패시키고, 이후 성공. 시도별 본문(text)을 돌려준다."""
+    texts = []
+
+    def handler(request):
+        import json
+
+        texts.append(json.loads(request.read())["text"])
+        if len(texts) == 1:
+            return fail(request)
+        return httpx.Response(200, json={"ok": True})
+
+    return handler, texts
+
+
+def _raise(exc_type):
+    def fail(request):
+        raise exc_type("", request=request)
+
+    return fail
+
+
+async def test_resend_after_a_read_timeout_is_marked_as_possible_duplicate(events):
+    handler, texts = _texts_sent(_raise(httpx.ReadTimeout))
+    assert await _deliver(handler) is True
+    assert texts[0] == ALERT
+    assert texts[1] == ALERT + "\n" + notifier.RESEND_MARK
+
+
+async def test_resend_after_a_connect_error_is_not_marked(events):
+    handler, texts = _texts_sent(_raise(httpx.ConnectError))
+    assert await _deliver(handler) is True
+    assert texts == [ALERT, ALERT]
+
+
+async def test_resend_after_rate_limit_is_not_marked(events):
+    handler, texts = _texts_sent(
+        lambda request: httpx.Response(429, json={"ok": False, "parameters": {"retry_after": 1}})
+    )
+    assert await _deliver(handler) is True
+    assert texts == [ALERT, ALERT]
+
+
 def test_retried_event_has_a_label():
     from src.utils.logger import event_label
 

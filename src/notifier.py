@@ -169,6 +169,10 @@ ClientFactory = Callable[[], httpx.AsyncClient]
 # 이미 도착했을 수 있다.
 _NOT_DELIVERED_ERRORS = {"ConnectError", "ConnectTimeout"}
 
+# 앞선 시도가 도착했을 수 있는 재전송의 본문 끝에 붙인다. 중복은 막지 않고(재시도는 그대로),
+# 받는 쪽이 중복인지 알게 한다(docs/NOTIFICATION_LOSS_FOLLOWUP_20261026.md 8.5절 자, 2026-11-02).
+RESEND_MARK = "(재전송 — 앞 메시지와 중복일 수 있음)"
+
 
 def _log_retried(text: str, attempts: int, errors: list[str], status: int | None) -> None:
     """재시도 끝에 성공한 전송. 앞선 시도가 도착했으면 같은 알림이 중복으로 간 것이다
@@ -199,6 +203,8 @@ async def _deliver(
     - 예외는 다시 보낸다. 응답 타임아웃이면 메시지가 이미 도착했을 수 있어 "확인 못 함"으로 적는다.
     - 실패하면 어떤 알림인지·시도별 예외·상태 코드를 남기고, 다음 성공 알림 끝에 덧붙인다.
     - 재시도 끝에 성공하면 `NOTIFICATION_RETRIED`를 남긴다(중복 가능 여부 포함).
+    - 앞선 시도가 도착했을 수 있으면(연결 실패가 아닌 예외) 다시 보내는 본문 끝에
+      `RESEND_MARK`를 붙인다.
     """
     reported = len(_unconfirmed)
     outgoing = _with_unconfirmed_note(text)
@@ -210,9 +216,11 @@ async def _deliver(
     attempts = 0
     for attempt in range(1, _SEND_ATTEMPTS + 1):
         attempts = attempt
+        maybe_delivered = any(e not in _NOT_DELIVERED_ERRORS for e in errors)
+        payload = f"{outgoing}\n{RESEND_MARK}" if maybe_delivered else outgoing
         try:
             async with client_factory() as client:
-                resp = await client.post(url, json={"chat_id": chat_id, "text": outgoing})
+                resp = await client.post(url, json={"chat_id": chat_id, "text": payload})
         except Exception as e:  # noqa: BLE001 — 알림 실패가 호출부를 흔들면 안 된다
             errors.append(type(e).__name__)
             last_error = _scrub(repr(e), token)
