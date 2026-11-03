@@ -1606,6 +1606,10 @@ def _improve_from_rows(
     trailing_gb: list[float] = []
     trailing_pnl: list[float] = []
     trailing_stop_slip: list[float] = []
+    # 불리 편차를 감지(활성 스탑 → 발동가, 우리 코드 몫)와 체결(발동가 → 체결가, 시장 몫)로 나눈다.
+    # 발동가를 아는 거래만 들어간다(docs/STEP_TRAIL_SLIPPAGE_FOLLOWUP_20261029.md 7절).
+    trailing_detect_slip: list[float] = []
+    trailing_fill_slip: list[float] = []
     timeout_pnl: list[float] = []
     timeout_pnl_net: list[float] = []
     timeout_mfe: list[float] = []
@@ -1654,6 +1658,12 @@ def _improve_from_rows(
             if pnl is not None and step_reached:
                 active_stop_pnl = (highest_step - STEP_TRAIL) * 100
                 trailing_stop_slip.append(active_stop_pnl - pnl)
+                trigger = t.get("trail_trigger_price")
+                entry = t.get("entry_price")
+                if trigger and entry:
+                    trigger_pnl = (float(trigger) / float(entry) - 1) * 100
+                    trailing_detect_slip.append(active_stop_pnl - trigger_pnl)
+                    trailing_fill_slip.append(trigger_pnl - pnl)
         elif reason == "TIMEOUT":
             if pnl is not None:
                 timeout_pnl.append(pnl)
@@ -1790,6 +1800,15 @@ def _improve_from_rows(
             "max_stop_slip_pp": (
                 round(max(0.0, max(trailing_stop_slip)), 2) if trailing_stop_slip else 0.0
             ),
+            "detect_eval_n": len(trailing_detect_slip),
+            "avg_detect_slip_pp": round(max(0.0, _avg(trailing_detect_slip)), 2),
+            "max_detect_slip_pp": (
+                round(max(0.0, max(trailing_detect_slip)), 2) if trailing_detect_slip else 0.0
+            ),
+            "avg_fill_slip_pp": round(_avg(trailing_fill_slip), 2),
+            "max_fill_slip_pp": (
+                round(max(trailing_fill_slip), 2) if trailing_fill_slip else 0.0
+            ),
             "structural_giveback_min_pp": round(STEP_TRAIL * 100, 2),
             "structural_giveback_max_pp": round((STEP_SIZE + STEP_TRAIL) * 100, 2),
         },
@@ -1845,9 +1864,15 @@ async def api_improve(track: str = "A", scope: str = "fingerprint") -> JSONRespo
     try:
         conn = db.get()
         async with conn.execute(
-            """SELECT id, date, ticker, name, entry_price, high_price, highest_step,
-                      pnl_pct, close_reason, entry_at, exit_at, strategy_fingerprint
-               FROM trades WHERE status='CLOSED' AND track=? ORDER BY date""",
+            # 트레일링 발동가(스탑 아래 첫 체결가)는 trades에 없고, 트레일링 섀도 비교의
+            # recommended_exit_price로 남는다(운영 17건이 TRAILING_STOP.trigger_price와 같았다).
+            """SELECT t.id, t.date, t.ticker, t.name, t.entry_price, t.high_price, t.highest_step,
+                      t.pnl_pct, t.close_reason, t.entry_at, t.exit_at, t.strategy_fingerprint,
+                      CASE WHEN s.finalized = 1 AND s.close_reason = 'TRAILING'
+                           THEN s.recommended_exit_price END AS trail_trigger_price
+               FROM trades t
+               LEFT JOIN trailing_shadow_comparisons s ON s.trade_id = t.id
+               WHERE t.status='CLOSED' AND t.track=? ORDER BY t.date""",
             (track,),
         ) as cur:
             trades = [dict(r) for r in await cur.fetchall()]

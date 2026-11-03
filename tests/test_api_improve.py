@@ -321,6 +321,40 @@ def test_improve_trailing_diagnostic_compares_exit_with_active_step_stop():
     assert diag["structural_giveback_max_pp"] == 4.5
 
 
+def test_trailing_slip_splits_into_detection_and_fill_when_trigger_is_known():
+    """불리 편차 = 감지(활성 스탑 → 발동가) + 체결(발동가 → 실제 체결가).
+    docs/STEP_TRAIL_SLIPPAGE_FOLLOWUP_20261029.md 7절 다 — 판정은 감지(우리 코드 몫)로 한다."""
+    trades = [
+        # 스탑 10,550(+5.5%), 발동 10,540(+5.4%), 체결 +4.6% → 감지 0.1, 체결 0.8
+        _trade(date="20260701", close_reason="TRAILING", highest_step=0.075, pnl_pct=4.6,
+               trail_trigger_price=10_540.0),
+        # 스탑 10,050(+0.5%), 발동 10,050, 체결 +0.8% → 감지 0.0, 체결 −0.3(유리)
+        _trade(date="20260702", close_reason="TRAILING", highest_step=0.025, pnl_pct=0.8,
+               trail_trigger_price=10_050.0),
+        # 발동가 모름 → 합계 편차에만 들어간다
+        _trade(date="20260703", close_reason="TRAILING", highest_step=0.025, pnl_pct=0.5),
+    ]
+
+    diag = server._improve_from_rows(trades, [], {})["trailing_diagnostics"]
+
+    assert diag["stop_eval_n"] == 3
+    assert diag["detect_eval_n"] == 2
+    assert diag["avg_detect_slip_pp"] == 0.05
+    assert diag["max_detect_slip_pp"] == 0.1
+    assert diag["avg_fill_slip_pp"] == 0.25
+    assert diag["max_fill_slip_pp"] == 0.8
+
+
+def test_trailing_detection_is_empty_without_trigger_prices():
+    trades = [_trade(close_reason="TRAILING", highest_step=0.025, pnl_pct=0.4)]
+
+    diag = server._improve_from_rows(trades, [], {})["trailing_diagnostics"]
+
+    assert diag["detect_eval_n"] == 0
+    assert diag["avg_detect_slip_pp"] == 0.0
+    assert diag["max_detect_slip_pp"] == 0.0
+
+
 def test_improve_candidate_supply_uses_no_target_only_and_deduplicates_dates():
     trades = [_trade(date="20260703", close_reason="TIMEOUT", pnl_pct=1.0)]
     skips = {"NO_TARGET": 2, "ENTRY_FAIL": 1, "MARKET_CLOSED": 1}
@@ -364,6 +398,34 @@ async def test_api_improve_empty_db_returns_default_structure(tmp_path):
     assert payload["slippage"]["buy"]["n"] == 0
     assert payload["candidates"]["skips"] == {}
     assert payload["params"]["hard_stop_pct"] == 2.0
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_api_improve_reads_trailing_trigger_from_the_shadow_comparison(tmp_path):
+    """발동가는 trades에 없다. 트레일링 섀도 비교의 recommended_exit_price가 스탑 아래 첫 체결가
+    (`TRAILING_STOP.trigger_price`)와 같다(2026-11-03, 운영 17건 대조)."""
+    await db.init(str(tmp_path / "improve.db"))
+    conn = db.get()
+    tid = await db.open_trade("20260702", "000660", 10_000.0, 10, name="SK하이닉스")
+    await db.update_trade_progress(tid, 10_400.0, 0.025)
+    await db.close_trade(tid, 9_990.0, "TRAILING", -0.1, 0.025, exit_qty=10, high_price=10_400.0)
+    await conn.execute(
+        """INSERT INTO trailing_shadow_comparisons
+           (trade_id, baseline_step_trail, recommended_step_trail, entry_price,
+            recommended_stop_price, recommended_exit_price, actual_exit_price, close_reason,
+            finalized, created_at, updated_at)
+           VALUES (?, 0.015, 0.02, 10000, 10050, 10040, 9990, 'TRAILING', 1, 'x', 'x')""",
+        (tid,),
+    )
+    await conn.commit()
+
+    payload = json.loads((await server.api_improve(scope="all")).body.decode("utf-8"))
+    diag = payload["trailing_diagnostics"]
+
+    assert diag["detect_eval_n"] == 1
+    assert diag["avg_detect_slip_pp"] == 0.1   # 10,050 → 10,040
+    assert diag["avg_fill_slip_pp"] == 0.5     # 10,040 → 9,990
     await db.close()
 
 

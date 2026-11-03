@@ -1764,10 +1764,13 @@ function judgeStepSize(d) {
 function judgeStepTrail(d) {
   const t = d.trailing;
   const x = d.trailing_diagnostics || {};
-  const ev = `트레일링 ${t.n}건 · 활성 스탑 비교 ${x.stop_eval_n||0}건 · 평균 불리 편차 ${x.avg_stop_slip_pp||0}%p · 평균 고점 반납 ${t.avg_giveback_pp}%p(${x.giveback_n||0}건)`;
-  if ((x.stop_eval_n||0) < 5) return ['nodata', ev, `판정까지 활성 스탑 비교 ${5 - (x.stop_eval_n||0)}건 더 필요합니다. 고점 반납의 구조적 범위는 ${x.structural_giveback_min_pp||0}~${x.structural_giveback_max_pp||0}%p입니다.`];
-  if ((x.avg_stop_slip_pp||0) > 0.3 || (x.max_stop_slip_pp||0) > 0.5) return ['adjust', ev, '활성 스탑 목표보다 체결이 반복적으로 밀립니다. 트레일 폭보다 주문 실행 경로를 먼저 점검하세요.'];
-  return ['ok', ev, `활성 스탑대로 청산되고 있습니다. 고점 반납 ${x.structural_giveback_min_pp}~${x.structural_giveback_max_pp}%p는 STEP_SIZE가 포함된 정상 구조 범위입니다.`];
+  // 판정은 감지(활성 스탑 → 발동가, 우리 코드 몫)로만 한다. 체결(발동가 → 체결가)은 장 초반 급락 관통 같은
+  // 시장 몫이라 참고로 보인다(docs/STEP_TRAIL_SLIPPAGE_FOLLOWUP_20261029.md 7절 다). 문턱은 그대로다.
+  const dn = x.detect_eval_n || 0;
+  const ev = `트레일링 ${t.n}건 · 감지 평균 ${x.avg_detect_slip_pp||0}%p·최대 ${x.max_detect_slip_pp||0}%p(${dn}건) · 체결 평균 ${x.avg_fill_slip_pp||0}%p·최대 ${x.max_fill_slip_pp||0}%p(참고) · 합계 평균 ${x.avg_stop_slip_pp||0}%p(${x.stop_eval_n||0}건) · 평균 고점 반납 ${t.avg_giveback_pp}%p(${x.giveback_n||0}건)`;
+  if (dn < 5) return ['nodata', ev, `판정까지 발동가가 기록된 트레일링 청산 ${5 - dn}건 더 필요합니다. 고점 반납의 구조적 범위는 ${x.structural_giveback_min_pp||0}~${x.structural_giveback_max_pp||0}%p입니다.`];
+  if ((x.avg_detect_slip_pp||0) > 0.3 || (x.max_detect_slip_pp||0) > 0.5) return ['adjust', ev, '스탑을 깬 뒤 발동이 늦습니다(감지 편차). 트레일 폭보다 주문 실행 경로를 먼저 점검하세요.'];
+  return ['ok', ev, `스탑 아래 첫 체결에서 발동하고 있습니다. 체결 편차는 급락 관통 등 시장 몫이라 참고로만 봅니다. 고점 반납 ${x.structural_giveback_min_pp}~${x.structural_giveback_max_pp}%p는 STEP_SIZE가 포함된 정상 구조 범위입니다.`];
 }
 function judgeSlipBuffer(d) {
   // 주문가 대비 체결가로 판정한다. 선정 기준가 대비 값은 진입 타이밍까지 섞여 참고로만 보인다.
