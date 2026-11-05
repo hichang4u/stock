@@ -171,3 +171,10 @@
 - `src/notifier.py`는 지문 대상이 아니다. 실계좌 카운터 영향 없음. 운영 반영은 장 마감 뒤 승격으로 한다.
 - 재전송 표시가 붙은 알림을 받으면 같은 날 로그에 `NOTIFICATION_RETRIED`(`possible_duplicate=true`)가 있어야 한다.
   일일 로그 분석에서 건수를 이 절 아래에 날짜별로 적는다.
+
+**일별 기록.**
+- 10/29 ~ 11/04: `NOTIFICATION_RETRIED`·`NOTIFICATION_FAILED` 0건.
+- 11/05: `NOTIFICATION_RETRIED` 1건. 매수 체결 알림(035720), `attempts=3`, `errors=['ReadTimeout','ReadTimeout']`,
+  `possible_duplicate=true`, 09:00:28.707. 재전송 표시(`release/20261102-1`)가 운영에서 처음 쓰였다. 체결 확정(09:00:14.857)에서
+  14초 늦게 끝났다. 그 무렵 KIS REST도 느렸다(진입 티켓 8.20절). **사용자는 이 알림을 3번 받았다(사용자 보고).** 응답 타임아웃이 난
+  두 번의 요청도 실제로는 도착했다는 뜻이고, 8.3절의 추정과 맞는다. 재전송 표시도 붙어 있었다(사용자 확인). 8.7절의 자가 운영에서 의도대로 동작한다.
