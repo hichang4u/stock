@@ -208,6 +208,85 @@ def test_main_prints_a_table_over_a_range(tmp_path, capsys):
     assert "1차 첫 체결 뒤 · 창 안 체결" in out
 
 
+def _rejected(hms: str, ticker: str = "354200") -> dict:
+    """11/06 모양: 거부된 주문은 주문번호가 빈 값이고 `rt_cd`가 1이다."""
+    return _ev(hms, "ENTRY_ORDER_SENT", ticker=ticker, order_id="", entry_attempt=1,
+               max_attempts=2, order_price=868.0, order_qty=8064, rt_cd="1",
+               msg_cd="40070000")
+
+
+def test_rejected_order_is_its_own_branch(tmp_path):
+    """11/06: 유일한 후보가 거부돼 무산됐다. 취소로 무산된 날과 갈래가 달라야 한다."""
+    _write_log(tmp_path, [
+        _rejected("09:00:06.745"),
+        _ev("09:00:06.746", "ENTRY_FAIL", ticker="354200", order_id="", reason="ORDER_REJECTED"),
+        _timing("09:00:07.297", total_ms=7297),
+    ])
+    _write_ticks(tmp_path, [("09:00:14.454", _rec("090014", 860, 151853, 151853, "354200"))],
+                 ticker="354200")
+    day = analyze_day(tmp_path, DATE)
+    [o] = day["orders"]
+    assert o["outcome"] == "REJECTED"
+    assert day["result"] == "FAILED"
+    assert branch_label(day) == "1차 첫 체결 전 · 주문 거부 → 무산"
+
+
+def test_rejected_order_does_not_take_other_empty_id_events(tmp_path):
+    """주문번호가 빈 값이라 같은 빈 값의 다른 이벤트로 갈래를 정하면 안 된다."""
+    _write_log(tmp_path, [
+        _rejected("09:00:06.745"),
+        _ev("09:00:06.746", "ENTRY_CANCEL_SENT", order_id="", rt_cd="0"),
+        _ev("09:00:06.747", "ENTRY_FAIL", order_id="", reason="ORDER_REJECTED"),
+        _timing("09:00:07.297"),
+    ])
+    assert analyze_day(tmp_path, DATE)["orders"][0]["outcome"] == "REJECTED"
+
+
+def test_rejection_then_next_candidate_filled(tmp_path):
+    """7/8 갈래: 거부된 뒤 다음 후보로 넘어가 체결되면 무산이 아니다."""
+    _write_log(tmp_path, [
+        _rejected("09:00:06.000"),
+        _ev("09:00:06.001", "ENTRY_FAIL", order_id="", reason="ORDER_REJECTED"),
+        _sent("09:00:10.000", "0000002000", 1, ticker="038110"),
+        _ev("09:00:11.000", "ENTRY_EXECUTED", ticker="038110", order_id="0000002000",
+            fill_price=5000, fill_qty=100),
+        _timing("09:00:11.000"),
+    ])
+    day = analyze_day(tmp_path, DATE)
+    assert [o["outcome"] for o in day["orders"]] == ["REJECTED", "IN_WINDOW"]
+    assert day["result"] == "ENTERED"
+    assert "무산" not in branch_label(day)
+
+
+def test_summary_counts_rejected_days_apart_from_cancelled_failures(tmp_path, capsys):
+    """요약 줄의 무산에 주문 거부와 체결 대기 실패를 섞지 않는다."""
+    _write_log(tmp_path, [
+        _sent("09:00:05.045", "0000001813", 1),
+        _ev("09:00:08.545", "ENTRY_CANCEL_SENT", order_id="0000001813", rt_cd="0"),
+        _ev("09:00:21.171", "ENTRY_FAIL", order_id="0000001813", reason="UNFILLED"),
+        _timing("09:00:21.770"),
+    ], date="20261023")
+    _write_log(tmp_path, [
+        _rejected("09:00:06.745"),
+        _ev("09:00:06.746", "ENTRY_FAIL", order_id="", reason="ORDER_REJECTED"),
+        _timing("09:00:07.297"),
+    ], date="20261106")
+    assert main(["--root", str(tmp_path), "--since", "20261020", "--until", "20261110"]) == 0
+    out = capsys.readouterr().out
+    assert "주문 거부 1" in out
+    assert "무산 1일 (1023)" in out
+    assert "주문 거부로 무산 1일 (1106)" in out
+
+
+def test_order_without_rt_cd_is_not_treated_as_rejected(tmp_path):
+    """`rt_cd`가 없는 기록은 거부로 치지 않는다."""
+    _write_log(tmp_path, [
+        _sent("09:00:05.000", "0000001000", 1),
+        _timing("09:00:06.000"),
+    ])
+    assert analyze_day(tmp_path, DATE)["orders"][0]["outcome"] == "UNKNOWN"
+
+
 def test_waited_for_the_first_trade_then_filled_in_window(tmp_path):
     """2026-10-27 가안 이후: 주문은 첫 체결 전, 창은 첫 체결부터 — 취소 없이 창 안 체결."""
     _write_log(tmp_path, [

@@ -12,6 +12,8 @@
   - `IN_WINDOW`: 2초 창 안에 체결 확인
   - `LATE_CONFIRM`: 창이 닫힌 뒤 체결돼 취소가 거부됨
   - `CANCELLED`: 취소 성공
+  - `REJECTED`: 서버가 주문을 거부함(`rt_cd`가 0이 아님). 체결 대기 실패가 아니므로 요약 줄의
+    무산에서 따로 센다(`docs/ORDER_REJECTED_PAPER_UNTRADABLE_FOLLOWUP_20261106.md`)
 - 주문 API 통신 시간은 `LATENCY_HIGH`(`order-cash`)에서 읽는다. 임계 미만이면 기록이 없다(—).
 - 시가 대비 금액은 **추정**이다. 첫 체결 전에 걸린 주문은 시가에 체결된다는 가정이다(8.9절).
 
@@ -39,6 +41,7 @@ _OUTCOME_KO = {
     "IN_WINDOW": "창 안 체결",
     "LATE_CONFIRM": "늦은 확인",
     "CANCELLED": "취소",
+    "REJECTED": "주문 거부",
     "UNKNOWN": "갈래 모름",
 }
 _ORDINAL = "1차", "2차", "3차", "4차"
@@ -112,8 +115,14 @@ def first_trade(root: Path, date: str, ticker: str) -> dict | None:
     return None
 
 
+def _is_rejected(sent: dict) -> bool:
+    """주문 응답이 거부인가. `rt_cd`가 없는 기록은 거부로 치지 않는다."""
+    rt_cd = sent.get("rt_cd")
+    return rt_cd not in (None, "") and str(rt_cd) != "0"
+
+
 def _order_outcome(events: list[dict], order_id: str) -> str:
-    mine = [e for e in events if e.get("order_id") == order_id]
+    mine =[e for e in events if e.get("order_id") == order_id]
     names = {e["event"] for e in mine}
     if "ENTRY_CANCEL_REJECTED_FILLED" in names:
         return "LATE_CONFIRM"
@@ -173,7 +182,11 @@ def analyze_day(root: Path, date: str) -> dict | None:
             "api_ms": api_ms,
             "rate_wait_ms": wait_ms,
             "lead_sec": lead,
-            "outcome": _order_outcome(events, str(sent.get("order_id"))),
+            # 거부된 주문은 주문번호가 빈 값이라 번호로 뒤 이벤트를 찾으면 안 된다.
+            "outcome": (
+                "REJECTED" if _is_rejected(sent)
+                else _order_outcome(events, str(sent.get("order_id")))
+            ),
         })
 
     result = "ENTERED" if executed is not None else ("FAILED" if failed is not None else "NO_ORDER")
@@ -264,13 +277,16 @@ def _summary(days: list[dict]) -> str:
         if first is not None and first <= 0:
             after_first += 1
     at_open = sum(1 for d in fast if d["vs_open_per_share"] == 0)
-    failed = [d["date"][4:] for d in fast if d["result"] == "FAILED"]
-    known = [d["vs_open_amount"] for d in fast if d["vs_open_amount"] is not None]
+    all_failed = [d for d in fast if d["result"] == "FAILED"]
+    rejected = [d["date"][4:] for d in all_failed if d["orders"][-1]["outcome"] == "REJECTED"]
+    failed = [d["date"][4:] for d in all_failed if d["orders"][-1]["outcome"] != "REJECTED"]
+    known =[d["vs_open_amount"] for d in fast if d["vs_open_amount"] is not None]
     return (
         f"빠른 경로 {len(fast)}일 · 주문 {sum(counts.values())}건: "
         + ", ".join(f"{_OUTCOME_KO[k]} {v}" for k, v in counts.items() if v)
         + f" · 1차 주문이 첫 체결 뒤 {after_first}일 · 시가 진입 {at_open}일"
         + f" · 무산 {len(failed)}일{' (' + ', '.join(failed) + ')' if failed else ''}"
+        + (f" · 주문 거부로 무산 {len(rejected)}일 ({', '.join(rejected)})" if rejected else "")
         + f" · 시가 대비 합계 {_fmt_signed(sum(known)) if known else '—'}원 (추정, {len(known)}일)"
     )
 

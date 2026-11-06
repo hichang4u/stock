@@ -71,6 +71,26 @@ cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts
 추정이다. 누적은 `--since 20261013`으로 본다(맨 아래 요약 줄). 레거시 경로 날은 캡처가 종목 고정 뒤부터라
 첫 체결을 비워 둔다.
 
+**주문 거부(`msg_cd=40070000` "매매불가 종목" 등)가 있으면 맨 앞에 쓴다.** 보고에는 "주문 거부" 갈래로 나오고, 요약 줄에서
+"주문 거부로 무산"으로 따로 센다. 체결 대기 실패가 아니다. 그날 15:40 이후 그 종목의 상태를 조회해
+`docs/ORDER_REJECTED_PAPER_UNTRADABLE_FOLLOWUP_20261106.md` 7절 표에 한 줄 더한다. 다음날이면 당시 상태를 잃는다(7/8이 그랬다).
+결정은 같은 티켓 6절이다. 장중에는 돌리지 않는다.
+
+```bash
+cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
+import asyncio,sys
+sys.path.insert(0,'.')
+from dotenv import load_dotenv; load_dotenv('.env')
+from src.api import auth,kis_rest
+async def m():
+    assert await auth.load_or_refresh()
+    r=await kis_rest.get('/uapi/domestic-stock/v1/quotations/inquire-price',tr_id='FHKST01010100',params={'FID_COND_MRKT_DIV_CODE':'J','FID_INPUT_ISCD':'<티커>'})
+    o=r.get('output') or {}
+    print(r.get('rt_cd'),{k:o.get(k) for k in ('iscd_stat_cls_code','mang_issu_cls_code','marg_rate','temp_stop_yn','mrkt_warn_cls_code')})
+asyncio.run(m())
+" 2>&1 | grep -v '^{'
+```
+
 `release/20261027-1`부터 09:00:00 ~ 09:00:45에 낸 주문은 그 종목의 첫 체결까지 기다렸다가 2초 확인 창을 연다
 (진입 티켓 8.12절). 빠른 경로 날마다 1절 출력에서 다음을 본다.
 - `ENTRY_FIRST_TRADE_WAIT` → `ENTRY_FIRST_TRADE_SEEN`: `waited_ms`, `via`(`FIRST_TRADE`/`FILL_NOTICE`),
