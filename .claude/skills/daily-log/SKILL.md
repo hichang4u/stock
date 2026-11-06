@@ -74,7 +74,8 @@ cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts
 `release/20261027-1`부터 09:00:00 ~ 09:00:45에 낸 주문은 그 종목의 첫 체결까지 기다렸다가 2초 확인 창을 연다
 (진입 티켓 8.12절). 빠른 경로 날마다 1절 출력에서 다음을 본다.
 - `ENTRY_FIRST_TRADE_WAIT` → `ENTRY_FIRST_TRADE_SEEN`: `waited_ms`, `via`(`FIRST_TRADE`/`FILL_NOTICE`),
-  `first_trade_at`. 모의에서는 통보가 장부에 오르지 않아 `via`는 늘 `FIRST_TRADE`다.
+  `first_trade_at`. 통보 체결 확정 릴리스(통보 티켓 8.9절) 전에는 모의 통보가 장부에 오르지 않아 `via`가 늘
+  `FIRST_TRADE`였다. 그 뒤로는 통보가 먼저 오면 `FILL_NOTICE`로 찍힌다.
 - **`ENTRY_FIRST_TRADE_WAIT_TIMEOUT`(WARN)이 있으면 맨 앞에 쓴다.** 첫 체결 신호를 09:00:45까지 못 받았다는
   뜻이다. 그 무렵 WS 단절과 틱 캡처의 첫 ws 행 `source_ts`를 대조한다.
 - 09시 정각 단절(09:00:02 ~ 04 무렵)과 첫 체결이 겹친 날은 `first_trade_at`과 `ENTRY_FIRST_TRADE_SEEN` 로그
@@ -242,11 +243,14 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
 - `FILL_NOTICE_FRAME`은 체결통보 레코드마다 하나다(접수 통보 포함, 2026-10-07 진단 로그). 주문 하나에 보통
   접수(`cntg_yn=1`, `reason=NOT_FILL`) → 체결(`cntg_yn=2`, `booked=true`) 순서다. `SHORT`·`BAD_VALUE`가 있으면
   해석 결함이다.
-- 2026-10-12부터 모의 통보는 23필드라 전부 `SHORT`다(티켓 8절). 2026-10-13 이후 로그의 `FILL_NOTICE_FRAME`에는
+- 모의 통보는 23필드다. 통보 체결 확정 릴리스(티켓 8.9절) 전에는 전부 `SHORT`로 버려졌고, 그 뒤로는 체결 통보가
+  `booked=true`로 장부에 오른다. 그 뒤의 `SHORT`·`LONG`은 필드 수가 23·26이 아니라는 뜻이니 맨 앞에 쓴다.
+  2026-10-13 이후 로그의 `FILL_NOTICE_FRAME`에는
   `side`·`ticker`·`cntg_qty`·`cntg_unpr`·`exchange_time`(공식 순서 인덱스 4·8~11의 원문)이 있다. 체결 통보
   (`cntg_yn=2`)의 `cntg_qty` 합이 주문 체결수량과, `cntg_unpr`가 DB 체결가와 맞는지 대조한다(분할 체결이면 수량
   가중 평균). 맞으면 위치가 확인된 것이다. `<len=N>`은 코드 모양이 아닌 값이라 가렸다는 뜻이다.
-  **2026-10-14·15 4개 주문에서 모두 맞았다(티켓 8.6절).** 이후에는 어긋나는 날만 맨 앞에 쓴다. 접수 통보
+  **10/14 ~ 11/05 체결 주문 28건이 모두 맞았다(티켓 8.9절).** 이후에는 어긋나는 날만 맨 앞에 쓴다. 통보로 확정한
+  진입이 어긋나면 진입가가 틀어졌을 수 있으니 특히 먼저 본다. 접수 통보
   (`cntg_yn=1`)의 수량·가격은 주문값이므로 대조에서 뺀다.
 - `WS_FRAME_UNKNOWN_TR`(WARN)는 시세도 체결통보도 아닌 TR 프레임이다. `tr_id`가 `K0STCNI9`면 통보가 그 이름으로
   오고 있다는 뜻이다(`docs/FILL_NOTICE_FOLLOWUP_20261007.md` 6.2절).
@@ -326,7 +330,7 @@ keepalive 단절 없음.
 cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts/performance_report.py --track A --root D:/Private/stock-prod
 ```
 
-보고 맨 끝에 전체 기간과 현재 구간(2026-10-28부터 "첫 체결 대기", 목록은 `src/perf_costs.py`)의 CAGR·MDD를
+보고 맨 끝에 전체 기간과 현재 구간(`src/perf_costs.py`의 끝이 열린 구간)의 CAGR·MDD를
 한 줄씩 붙인다. 대표값은
 전략 자본 기준 보수 손익이다. 1년 미만 CAGR에는 "(참고)"가 붙는다 — 총수익률을 함께 적는다.
 기간 30일 미만인 구간은 CAGR이 "— (30일 미만)"으로 나온다. 그 구간은 총수익률만 적는다.

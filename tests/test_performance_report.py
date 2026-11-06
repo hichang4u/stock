@@ -91,12 +91,18 @@ def test_first_trade_wait_opens_its_own_segment():
     from src.perf_costs import current_segment
 
     names = [s["name"] for s in TRACK_A_SEGMENTS]
-    parser, wait = TRACK_A_SEGMENTS[names.index("파서 수정 후")], TRACK_A_SEGMENTS[-1]
+    parser = TRACK_A_SEGMENTS[names.index("파서 수정 후")]
+    wait = TRACK_A_SEGMENTS[names.index("첫 체결 대기")]
+    notice = TRACK_A_SEGMENTS[-1]
     assert parser["end"] == "20261027"
-    assert wait["name"] == "첫 체결 대기"
-    assert wait["start"] == "20261028" and wait["end"] is None
+    assert wait["start"] == "20261028" and wait["end"] == "20261106"
     assert len(wait["changed"]) == 1 and "F3_FIRST_TRADE_WAIT_UNTIL_SEC" in wait["changed"][0]
-    assert current_segment() is wait
+
+    # 2026-11-06 장 마감 후 승격(11/09 적용): 23필드 체결 통보를 장부에 쓴다(통보 티켓 8.9절).
+    assert notice["name"] == "통보 체결 확정"
+    assert notice["start"] == "20261109" and notice["end"] is None
+    assert len(notice["changed"]) == 1 and "23필드" in notice["changed"][0]
+    assert current_segment() is notice
 
 
 def test_main_writes_a_run_and_returns_zero(tmp_path, capsys):

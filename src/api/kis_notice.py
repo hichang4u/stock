@@ -36,6 +36,10 @@ FIELDS = (
     "CRDT_LOAN_DATE", "CNTG_ISNM40", "ODER_PRC",
 )
 _IDX = {name: i for i, name in enumerate(FIELDS)}
+# 모의서버는 23필드로 보낸다. 쓰는 위치(인덱스 14까지)는 공식 사양과 같다
+# (docs/FILL_NOTICE_FOLLOWUP_20261007.md 8.6·8.9절). 다른 길이는 위치를 믿을 수 없어 쌓지 않는다.
+_BOOKABLE_FIELD_COUNTS = frozenset({23, len(FIELDS)})
+_CODE = re.compile(r"[0-9A-Z.]{0,12}")
 
 
 def enabled() -> bool:
@@ -64,9 +68,12 @@ class Notice:
 
 def parse(fields: list[str]) -> Notice | None:
     """체결 통보 한 건. 접수·거부 통보와 깨진 레코드는 None."""
-    if len(fields) < len(FIELDS):
+    if len(fields) not in _BOOKABLE_FIELD_COUNTS:
         return None
     if fields[_IDX["CNTG_YN"]] != "2" or fields[_IDX["RFUS_YN"]] == "1":
+        return None
+    ticker = fields[_IDX["STCK_SHRN_ISCD"]]
+    if not ticker or not _CODE.fullmatch(ticker):
         return None
     try:
         qty = int(fields[_IDX["CNTG_QTY"]])
@@ -76,7 +83,7 @@ def parse(fields: list[str]) -> Notice | None:
     if qty <= 0 or price <= 0:
         return None
     return Notice(order_id=_norm(fields[_IDX["ODER_NO"]]),
-                  ticker=fields[_IDX["STCK_SHRN_ISCD"]], qty=qty, price=price,
+                  ticker=ticker, qty=qty, price=price,
                   hms=fields[_IDX["STCK_CNTG_HOUR"]], side=fields[_IDX["SELN_BYOV_CLS"]])
 
 
@@ -145,10 +152,12 @@ class FillBook:
         if entry is None or entry["qty"] <= 0:
             return None
         qty, order_qty = int(entry["qty"]), int(entry["order_qty"])
+        # 조회 경로(f3_entry `_query_order_fill_snapshot`)와 같은 반올림이다. 확정 경로에 따라
+        # 진입가·스탑이 달라지면 안 된다.
         return {"status": "FILLED" if qty >= order_qty else "PARTIAL",
                 "order_qty": order_qty, "fill_qty": qty,
                 "remaining_qty": max(0, order_qty - qty),
-                "fill_price": entry["amount"] / qty}
+                "fill_price": round(entry["amount"] / qty)}
 
     def event_for(self, order_id: str) -> asyncio.Event | None:
         entry = self._orders.get(_norm(order_id))
@@ -293,16 +302,13 @@ def _field(fields: list[str], name: str) -> str | None:
 
 
 def _skip_reason(fields: list[str]) -> str:
-    if len(fields) < len(FIELDS):
-        return "SHORT"
+    if len(fields) not in _BOOKABLE_FIELD_COUNTS:
+        return "SHORT" if len(fields) < len(FIELDS) else "LONG"
     if fields[_IDX["CNTG_YN"]] != "2":
         return "NOT_FILL"
     if fields[_IDX["RFUS_YN"]] == "1":
         return "REJECTED"
     return "BAD_VALUE"
-
-
-_CODE = re.compile(r"[0-9A-Z.]{0,12}")
 
 
 def _code(fields: list[str], name: str) -> str | None:
@@ -319,8 +325,8 @@ def _log_frame(parts: list[str], count: int | None, records: int, fields: list[s
                notice: Notice | None) -> None:
     """체결통보 레코드 하나의 모양. 고객 ID·계좌번호·계좌명은 남기지 않는다.
 
-    side~exchange_time은 공식 순서 인덱스 4·8~11의 원문이다. 2026-10-12 모의 통보가 23필드라
-    수량·단가 위치를 실제 체결과 대조하려고 남긴다(docs/FILL_NOTICE_FOLLOWUP_20261007.md 8절).
+    side~exchange_time은 공식 순서 인덱스 4·8~11의 원문이다. 수량·단가 위치를 실제 체결과 계속
+    대조하려고 남긴다(docs/FILL_NOTICE_FOLLOWUP_20261007.md 8절).
     """
     log("FILL_NOTICE_FRAME", level="INFO", tr_id=parts[1], encrypted=parts[0] == "1",
         header_count=count, records=records, field_count=len(fields),

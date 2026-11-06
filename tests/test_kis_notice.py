@@ -79,7 +79,16 @@ def test_book_accumulates_partial_fills_and_signals_at_full():
     assert event.is_set()
     got = kis_notice.fill("1226")
     assert got["status"] == "FILLED" and got["fill_qty"] == 295 and got["remaining_qty"] == 0
-    assert got["fill_price"] == pytest.approx((100 * 23500 + 195 * 23400) / 295)
+    # 조회 경로(f3_entry `_query_order_fill_snapshot`)와 같은 반올림이다. 23,433.9 → 23,434.
+    assert got["fill_price"] == 23434
+
+
+def test_book_price_matches_the_query_rounding_on_a_real_split_fill():
+    """2026-11-05 035720: 통보 4건 평균 30,450.4원, DB 체결가 30,450원."""
+    kis_notice.expect("1836", 229)
+    for qty, price in ((100, 30450.0), (79, 30450.0), (40, 30450.0), (10, 30459.0)):
+        kis_notice.record(Notice("1836", "035720", qty, price, "090007", "02"))
+    assert kis_notice.fill("1836")["fill_price"] == 30450
 
 
 def test_notice_arriving_before_registration_is_kept():
@@ -238,18 +247,68 @@ def _short(fields: list[str]) -> list[str]:
     return fields[:23]
 
 
-def test_short_record_logs_the_values_needed_to_check_alignment(monkeypatch):
-    """23필드 통보의 수량·단가 위치를 실제 체결과 대조하려면 원문 값이 있어야 한다
-    (docs/FILL_NOTICE_FOLLOWUP_20261007.md 8.4절 가)."""
+def test_paper_23_field_fill_is_booked_and_keeps_its_value_log(monkeypatch):
+    """모의 통보는 23필드다. 위치는 10/14 ~ 11/05 체결 주문 28건과 대조해 맞았다
+    (docs/FILL_NOTICE_FOLLOWUP_20261007.md 8.9절)."""
     logs = _capture(monkeypatch)
+    kis_notice.expect("0000001226", 36)
     fill = _fields(qty="36", price="26750", hms="090100")
     fill[FIELDS.index("SELN_BYOV_CLS")] = "01"
     kis_notice.handle_message("0|H0STCNI9|001|" + "^".join(_short(fill)))
     (frame,) = _frames(logs)
-    assert frame["reason"] == "SHORT" and frame["booked"] is False
+    assert frame["field_count"] == 23
+    assert frame["reason"] == "FILL" and frame["booked"] is True
     assert (frame["side"], frame["ticker"], frame["cntg_qty"], frame["cntg_unpr"],
             frame["exchange_time"]) == ("01", fill[FIELDS.index("STCK_SHRN_ISCD")],
                                         "36", "26750", "090100")
+    assert kis_notice.fill("1226")["fill_qty"] == 36
+    assert kis_notice.event_for("1226").is_set()
+
+
+def test_paper_23_field_acceptance_is_not_a_fill(monkeypatch):
+    """접수 통보의 수량·단가 자리에는 주문값이 있다(8.6절).
+
+    체결로 쌓으면 미체결 주문을 체결로 본다.
+    """
+    logs = _capture(monkeypatch)
+    kis_notice.expect("1226", 295)
+    kis_notice.handle_message("0|H0STCNI9|001|" + "^".join(_short(_fields(cntg="1"))))
+    (frame,) = _frames(logs)
+    assert frame["reason"] == "NOT_FILL" and frame["booked"] is False
+    assert kis_notice.fill("1226") is None
+
+
+@pytest.mark.parametrize(("count", "reason"), [(22, "SHORT"), (24, "SHORT"), (25, "SHORT"),
+                                               (27, "LONG")])
+def test_other_field_counts_are_not_booked(monkeypatch, count, reason):
+    """형식이 또 바뀌면 위치를 믿을 수 없다. 조회 확인으로 돌아가고 사유를 남긴다."""
+    logs = _capture(monkeypatch)
+    kis_notice.expect("1226", 295)
+    fields = (_fields() + ["X"])[:count]
+    kis_notice.handle_message("0|H0STCNI9|001|" + "^".join(fields))
+    (frame,) = _frames(logs)
+    assert frame["field_count"] == count
+    assert frame["reason"] == reason and frame["booked"] is False
+    assert kis_notice.fill("1226") is None
+
+
+@pytest.mark.parametrize("ticker", ["", "홍길동", "ACCOUNT-NAME"])
+def test_fill_with_a_ticker_that_is_not_a_code_is_not_booked(monkeypatch, ticker):
+    """종목 자리에 코드가 아닌 값이 있으면 위치가 밀린 레코드다.
+
+    체결로 쌓지 않고 값도 남기지 않는다.
+    """
+    logs = _capture(monkeypatch)
+    kis_notice.expect("1226", 295)
+    rec = _fields()
+    rec[FIELDS.index("STCK_SHRN_ISCD")] = ticker
+    kis_notice.handle_message("0|H0STCNI9|001|" + "^".join(_short(rec)))
+    (frame,) = _frames(logs)
+    assert frame["reason"] == "BAD_VALUE" and frame["booked"] is False
+    assert kis_notice.fill("1226") is None
+    assert "FILL_NOTICE_RECEIVED" not in [e for e, _ in logs]
+    if ticker:
+        assert ticker not in repr(logs)
 
 
 def test_value_fields_are_withheld_when_the_record_looks_misaligned(monkeypatch):
