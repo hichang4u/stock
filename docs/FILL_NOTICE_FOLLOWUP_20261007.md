@@ -403,3 +403,21 @@
 - `ENTRY_FILL_CONFIRMED_BY_NOTICE`의 `stage`·`fill_qty`·`fill_price`가 DB 주문 기록과 같은지.
 - 통보가 첫 체결 신호보다 먼저 오면 `ENTRY_FIRST_TRADE_SEEN`이 `via=FILL_NOTICE`로 찍히는지(11/04 모양).
 - 어긋나면 `F3_FILL_NOTICE_ENABLED=0`으로 끈다. 이 변수도 `F3_` 접두사라 지문이 바뀐다.
+
+### 8.10 2026-11-10 — 통보 체결 확정이 운영에서 처음 돌았다 (2026-11-10 로그 분석)
+
+8.9절 "승격 뒤 첫 진입일에 볼 것"의 결과다. 11/09는 부분 체결이라 통보로 확정하지 않았다(설계대로, 진입 티켓 8.22절). 11/10이
+`ENTRY_FILL_CONFIRMED_BY_NOTICE`가 남은 첫날이다(10/01 ~ 11/10 운영 로그 전체에서 1건).
+
+| 항목 | 결과 (실측) |
+|---|---|
+| 진입 체결 통보 (`cntg_yn=2`) | 11건, 모두 `booked=true`·`reason=FILL`, `field_count=23` |
+| 통보 합계 | 865주, 수량 가중 평균 7,960.53원 |
+| `ENTRY_FILL_CONFIRMED_BY_NOTICE` | `stage=POLL_WAIT`, `fill_qty=865`, `fill_price=7961`, `notice_latency_ms=343` |
+| DB 주문 기록 (`FIRST_BUY`) | 865주 × 7,961원 — 통보와 같다 |
+| 주문 접수 → 확정 | 0.687초 (09:00:06.291 → 06.978) |
+| 청산 통보 | 25건 865주, 평균 8,234.1원 — DB 8,234원과 같다 |
+| `SHORT`·`LONG`·`BAD_VALUE` | 0건 |
+
+- 주문이 첫 체결 뒤에 닿아 첫 체결 대기가 없었다. 그래서 `ENTRY_FIRST_TRADE_SEEN` `via=FILL_NOTICE`는 이날 볼 수 없었다.
+- `F3_FILL_NOTICE_ENABLED`를 끌 근거는 없다.
