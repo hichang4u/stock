@@ -163,19 +163,20 @@ print('정각 밖 단절', len(off), off, '| keepalive', ka)
   단위)으로 비교하므로 REST 백업 틱이 끼면 그만큼 는다. 2026-10-28에는 1,325건이었지만 ws 행끼리는 0건이었다.
   REST 백업이 많은 날(WS_STALE이 잦은 보유일) 크게 나오면 정상이다.
 
+틱 파일은 `src/utils/jsonl_gz.py`의 `read_jsonl_gz`로 읽는다(개발 트리에서 돌리고 운영 파일을 경로로 준다).
+장중 기록 중인 파일은 읽힌 데까지, 전원 차단으로 끊긴 멤버가 있으면 그 뒤에 이어 쓴 멤버까지 읽는다. 표준 `gzip`은
+끊긴 멤버에서 `zlib.error`로 멈추고 뒤 멤버를 잃는다(`docs/TICK_GZIP_CORRUPTION_FOLLOWUP_20261109.md`). `damaged_at`이
+비어 있지 않으면 그 파일에 끊긴 멤버가 있었다는 뜻이니 보고에 적는다.
+
 ```bash
-cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
-import gzip, glob, json
+cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
+import glob
 from datetime import datetime
+from src.utils.jsonl_gz import read_jsonl_gz
 rows=[]
-for p in sorted(glob.glob('data/strategy_ticks/<YYYYMMDD>/<티커>.*.jsonl.gz')):
-    try:
-        with gzip.open(p,'rt',encoding='utf-8') as fh:
-            for line in fh:
-                if line.strip():
-                    try: rows.append(json.loads(line))
-                    except ValueError: pass
-    except EOFError: pass
+for p in sorted(glob.glob('D:/Private/stock-prod/data/strategy_ticks/<YYYYMMDD>/<티커>.*.jsonl.gz')):
+    got=read_jsonl_gz(p); rows+=got.rows
+    if got.damaged_at: print('끊긴 멤버', p[-22:], got.damaged_at)
 prev=None
 for r in (r for r in rows if r.get('source')=='ws'):
     f=r['raw'] if isinstance(r['raw'],list) else str(r['raw']).split('^')
@@ -309,18 +310,10 @@ for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
   있으니, 청산 구간까지 읽히지 않으면 15:20 이후에 다시 잰다.
 
 ```bash
-cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
-import gzip, json
+cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -c "
 from datetime import datetime
-rows=[]
-try:
-    with gzip.open('data/strategy_ticks/<YYYYMMDD>/<티커>.09.jsonl.gz','rt',encoding='utf-8') as fh:
-        for line in fh:
-            line=line.strip()
-            if line:
-                try: rows.append(json.loads(line))
-                except ValueError: pass
-except EOFError: pass   # 장중이면 기록 중이라 잘려 있다
+from src.utils.jsonl_gz import read_jsonl_gz
+rows=read_jsonl_gz('D:/Private/stock-prod/data/strategy_ticks/<YYYYMMDD>/<티커>.09.jsonl.gz').rows  # 장중이면 잘려 있다
 rows.sort(key=lambda r: r.get('received_at',''))
 ws=[r for r in rows if r.get('source')=='ws']
 o=datetime.fromisoformat('<CLOSE_SELL ordered_at>'); f=datetime.fromisoformat('<filled_at>')

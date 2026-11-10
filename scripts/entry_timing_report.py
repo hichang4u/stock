@@ -20,14 +20,13 @@
     .\\.venv\\Scripts\\python.exe scripts\\entry_timing_report.py --root D:\\Private\\stock-prod
 
 `--date`가 없으면 오늘(KST) 하루다. `--since`·`--until`로 범위를 준다. 장중 파일은 잘려 있다 —
-`EOFError`를 삼키고 읽힌 데까지 쓴다.
+읽힌 데까지 쓴다. 전원 차단으로 끊긴 멤버 뒤에 이어 쓴 멤버도 읽는다(`src/utils/jsonl_gz.py`).
 누적은 `--since 20261013`으로 본다.
 """
 
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import sys
 from datetime import datetime
@@ -35,6 +34,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.utils.jsonl_gz import read_jsonl_gz  # noqa: E402
+
 KST = ZoneInfo("Asia/Seoul")
 
 _OUTCOME_KO = {
@@ -61,20 +65,16 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 def _read_gz(path: Path) -> list[dict]:
-    rows: list[dict] = []
     try:
-        with gzip.open(path, "rt", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    pass
-    except (EOFError, OSError):
-        pass  # 장중이면 기록 중이라 잘려 있다
-    return rows
+        got = read_jsonl_gz(path)
+    except OSError:
+        return []
+    if got.damaged_at:
+        print(
+            f"[틱 파일] {path.name}: 끊긴 멤버를 건너뛰고 읽음 (바이트 {got.damaged_at})",
+            file=sys.stderr,
+        )
+    return got.rows
 
 
 def _ts(value: str) -> datetime:

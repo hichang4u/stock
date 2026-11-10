@@ -14,7 +14,8 @@
   - 그 전 행은 프레임 하나다. **이 트리의 현재** 파서에 다시 넣어 센다. 파서를 고친 뒤에는
     옛 날짜도 100%가 된다. 그날 운영이 실제로 본 비율은 프레임 ÷ 체결이다.
 
-장중 파일은 기록 중이라 잘려 있다 — `EOFError`를 삼키고 읽힌 데까지 쓴다.
+장중 파일은 기록 중이라 잘려 있다 — 읽힌 데까지 쓴다. 전원 차단으로 끊긴 멤버 뒤에 이어 쓴 멤버도
+읽고, 그런 파일은 "깨진 멤버 건너뜀"으로 표시한다(`src/utils/jsonl_gz.py`).
 
     .\\.venv\\Scripts\\python.exe scripts\\ws_frame_check.py --root D:\\Private\\stock-prod
 
@@ -26,7 +27,6 @@
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import re
 import sys
@@ -38,6 +38,8 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+from src.utils.jsonl_gz import read_jsonl_gz  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
 # 2026-09-14부터. KIS 공식 예제는 2026-09-28(b76b076)에 같은 컬럼을 반영했다.
@@ -61,22 +63,10 @@ def infer_record_length(raw: list[str], ticker: str) -> int | None:
     return None
 
 
-def _read_frames(path: Path) -> tuple[list[dict], bool]:
-    rows: list[dict] = []
-    truncated = False
-    try:
-        with gzip.open(path, "rt", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    pass
-    except EOFError:
-        truncated = True
-    return rows, truncated
+def _read_frames(path: Path) -> tuple[list[dict], bool, bool]:
+    """(행, 끝이 잘렸나, 끊긴 멤버를 건너뛰었나)."""
+    got = read_jsonl_gz(path)
+    return got.rows, got.truncated, bool(got.damaged_at)
 
 
 def _live_splitter() -> Splitter:
@@ -94,10 +84,11 @@ def check_day(root: Path, date: str, split: Splitter | None = None) -> dict:
         t = tickers.setdefault(ticker, {
             "frames": 0, "records": 0, "multi_frames": 0, "parser_records": 0,
             "unaligned_frames": 0, "header_mismatch_frames": 0,
-            "record_lengths": Counter(), "truncated": False,
+            "record_lengths": Counter(), "truncated": False, "damaged": False,
         })
-        rows, truncated = _read_frames(path)
+        rows, truncated, damaged = _read_frames(path)
         t["truncated"] = t["truncated"] or truncated
+        t["damaged"] = t["damaged"] or damaged
         for row in rows:
             raw = row.get("raw")
             if row.get("source") != "ws" or not isinstance(raw, list) or not raw:
@@ -163,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             f"(다건 {t['multi_frames']:,}) | 파서가 낸 체결 {t['parser_records']:,} "
             f"= {t['coverage_pct']}% | 레코드 길이 {t['record_lengths']} "
             f"| 정렬 실패 {t['unaligned_frames']}" + (" | 잘린 파일" if t["truncated"] else "")
+            + (" | 깨진 멤버 건너뜀" if t["damaged"] else "")
         )
     print("이상: " + (", ".join(out["issues"]) if out["issues"] else "없음"))
     if args.json:

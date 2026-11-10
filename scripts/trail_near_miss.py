@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import glob
-import gzip
 import json
 import sqlite3
 import sys
@@ -31,6 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from src.utils.jsonl_gz import read_jsonl_gz  # noqa: E402
 
 # f4_tracking.py의 상수와 같은 값. 그쪽은 지문 대상이라 import 하지 않고 여기 복사한다 —
 # 값이 바뀌면 여기도 맞춘다.
@@ -122,13 +123,8 @@ def load_ws_ticks(root: Path, date: str, ticker: str) -> list[dict]:
     ticks: list[dict] = []
     pattern = root / "data" / "strategy_ticks" / date / f"{ticker}.*.jsonl.gz"
     for path in sorted(glob.glob(str(pattern))):
-        try:
-            with gzip.open(path, "rt", encoding="utf-8") as fh:
-                for line in fh:
-                    if line.strip():
-                        ticks.append(json.loads(line))
-        except EOFError:
-            pass  # 잘린 청크: 읽힌 데까지만 쓴다
+        # 잘린 청크는 읽힌 데까지, 끊긴 멤버 뒤의 멤버도 읽는다(src/utils/jsonl_gz.py).
+        ticks.extend(read_jsonl_gz(path).rows)
     ticks = [
         t for t in ticks
         if t.get("source") == "ws" and t.get("source_ts") and t.get("price")

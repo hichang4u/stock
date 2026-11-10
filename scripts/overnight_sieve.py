@@ -15,7 +15,6 @@ r"""C1 오버나이트 체 — 후보를 D-0 종가에 산 것으로 두고 D+1 
 from __future__ import annotations
 
 import argparse
-import gzip
 import json
 import sqlite3
 import sys
@@ -42,6 +41,7 @@ from scripts.track_b_backtest import bootstrap_ci  # noqa: E402
 from scripts.track_b_rules import HARD_STOP, simulate_exit  # noqa: E402
 from scripts.ws_frame_check import infer_record_length  # noqa: E402
 from src import warmup  # noqa: E402
+from src.utils.jsonl_gz import read_jsonl_gz  # noqa: E402
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -120,24 +120,15 @@ def load_tick_prices(root: Path, date: str, ticker: str) -> list[tuple[str, floa
 
     2026-09-14 ~ 10-01 캡처는 ws 행 하나가 다건 프레임이라 `raw`를 레코드 길이로 쪼갠다
     (docs/WS_47FIELD_PARSER_FOLLOWUP_20261001.md). tick-schema-3 행(`frame_size` 있음)은 체결
-    하나다. REST 백업 행은 수신 시각과 가격만 쓴다. 장중 잘린 파일은 읽힌 데까지 쓴다.
+    하나다. REST 백업 행은 수신 시각과 가격만 쓴다. 장중 잘린 파일은 읽힌 데까지 쓴다. 전원 차단으로
+    끊긴 멤버 뒤의 멤버도 읽는다(`src/utils/jsonl_gz.py`).
     """
     files = sorted((root / "data" / "strategy_ticks" / date).glob(f"{ticker}.*.jsonl.gz"))
     if not files:
         return None
     rows: list[dict] = []
     for path in files:
-        try:
-            with gzip.open(path, "rt", encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(row, dict):
-                        rows.append(row)
-        except EOFError:
-            pass
+        rows.extend(read_jsonl_gz(path).rows)
     rows.sort(key=lambda r: (str(r.get("received_at", "")), r.get("frame_index") or 0))
     out: list[tuple[str, float]] = []
     for row in rows:

@@ -15,14 +15,13 @@
     python -m scripts.replay_ticks_to_bars 20260827 006340
 """
 
-import gzip
-import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import bars  # noqa: E402
+from src.utils.jsonl_gz import read_jsonl_gz  # noqa: E402
 
 CAPTURE_DIR = Path("data/strategy_ticks")
 
@@ -67,19 +66,12 @@ def replay(date: str, ticker: str = "") -> dict[tuple[str, str], int]:
     fed = 0
     for path in files:
         code = path.name.split(".")[0]
-        with gzip.open(path, "rt", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                tick = tick_from_record(record, code)
-                if tick is not None:
-                    bars.on_tick(tick)
-                    fed += 1
+        # 잘린 파일은 읽힌 데까지, 끊긴 멤버 뒤의 멤버도 읽는다(src/utils/jsonl_gz.py).
+        for record in read_jsonl_gz(path).rows:
+            tick = tick_from_record(record, code)
+            if tick is not None:
+                bars.on_tick(tick)
+                fed += 1
         # 파일 단위로 비운다 — 하루치를 전부 메모리에 쌓지 않는다.
         bars.drain()
 

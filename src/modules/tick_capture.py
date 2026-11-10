@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 from src import db
 from src.schedule_times import F5_EXEC_H, F5_EXEC_M
+from src.utils.jsonl_gz import GzipLines
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -287,17 +288,23 @@ class TickCapture:
             self._note_timestamps(source_ts, received_at)
 
     def _iter_chunk_rows(self):
-        """chunk 행을 파일명(=시간) 순서로 스트리밍한다. 행은 append 순 = seq 순."""
+        """chunk 행을 파일명(=시간) 순서로 스트리밍한다. 행은 append 순 = seq 순.
+
+        끝이 잘린 멤버는 읽힌 데까지 쓰고, 그 뒤에 이어 쓴 멤버도 읽는다. 2026-11-09에는
+        보유 중 전원 차단 뒤 재시작에서 표준 gzip 읽기가 `EOFError`로 복원을 멈췄다
+        (docs/TICK_GZIP_CORRUPTION_FOLLOWUP_20261109.md).
+        """
         for gzp in sorted(self.dir.glob(f"{self.ticker}.*.jsonl.gz")):
             try:
-                with gzip.open(gzp, "rt", encoding="utf-8") as f:
-                    for line in f:
-                        if not line.strip():
-                            continue
-                        try:
-                            yield json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+                for line in GzipLines(gzp):
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict):
+                        yield row
             except OSError:
                 continue
 
@@ -676,27 +683,29 @@ class TickCapture:
             first_seq: int | None = None
             last_seq: int | None = None
             seq_count = 0
+            # 끊긴 멤버 뒤에 이어 쓴 멤버까지 센다. 2026-11-09 15:20 마감은 표준 gzip
+            # 읽기가 zlib.error로 멈춰 manifest를 확정하지 못했다.
+            lines = GzipLines(gzp)
             try:
-                with gzip.open(gzp, "rt", encoding="utf-8") as f:
-                    for line in f:
-                        if not line.strip():
-                            continue
-                        rows += 1
-                        uncompressed += len(line.encode("utf-8"))
-                        try:
-                            seq = int(json.loads(line).get("seq") or 0)
-                        except (json.JSONDecodeError, TypeError, ValueError):
-                            continue
-                        if seq <= 0:
-                            continue
-                        seq_count += 1
-                        if first_seq is None or seq < first_seq:
-                            first_seq = seq
-                        if last_seq is None or seq > last_seq:
-                            last_seq = seq
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    rows += 1
+                    uncompressed += len(line.encode("utf-8")) + 1  # 줄바꿈 포함(전과 같은 기준)
+                    try:
+                        seq = int(json.loads(line).get("seq") or 0)
+                    except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+                        continue
+                    if seq <= 0:
+                        continue
+                    seq_count += 1
+                    if first_seq is None or seq < first_seq:
+                        first_seq = seq
+                    if last_seq is None or seq > last_seq:
+                        last_seq = seq
             except OSError:
                 pass
-            chunks.append({
+            chunk = {
                 "path": str(gzp),
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "size_compressed": len(raw),
@@ -705,7 +714,11 @@ class TickCapture:
                 "first_seq": first_seq,
                 "last_seq": last_seq,
                 "seq_count": seq_count,
-            })
+            }
+            if lines.damaged_at:
+                # 끊긴 멤버의 시작 바이트. 그 멤버의 끊긴 지점 뒤 몇 초는 잃었다.
+                chunk["damaged_at"] = lines.damaged_at
+            chunks.append(chunk)
         return chunks
 
     def _day_compressed_bytes(self) -> int:

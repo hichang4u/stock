@@ -83,5 +83,6 @@ IMPORTANT: 그 파일들을 고치기 전에 현재 누적 건수를 확인하�
 | DB | `data/db/trading.db` (`trades`, `orders`) |
 | 백업 | `D:\Private\stock_backups\data_<날짜>_<시각>` |
 
-장중에는 틱 `.gz`가 기록 중이라 잘린 스트림이다 — 읽을 때 `EOFError`를 삼키고
-읽힌 데까지만 쓴다.
+틱 `.gz`는 `src/utils/jsonl_gz.py`의 `read_jsonl_gz`로 읽는다. 장중에는 기록 중이라 잘린
+스트림이고(읽힌 데까지 쓴다), 전원 차단 뒤에는 끊긴 멤버 뒤에 새 멤버가 붙는다. 표준 `gzip`은
+그 파일에서 `zlib.error`로 멈추고 뒤 멤버를 통째로 잃는다(2026-11-09).
