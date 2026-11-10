@@ -201,6 +201,7 @@ async def _deliver(
 
     - 429는 retry_after만큼 쉬고 다시 보낸다. 그 밖의 오류 응답은 재시도하지 않는다(기존 동작).
     - 예외는 다시 보낸다. 응답 타임아웃이면 메시지가 이미 도착했을 수 있어 "확인 못 함"으로 적는다.
+      연결 실패뿐이었으면 "전송 안 됨"으로 적는다.
     - 실패하면 어떤 알림인지·시도별 예외·상태 코드를 남기고, 다음 성공 알림 끝에 덧붙인다.
     - 재시도 끝에 성공하면 `NOTIFICATION_RETRIED`를 남긴다(중복 가능 여부 포함).
     - 앞선 시도가 도착했을 수 있으면(연결 실패가 아닌 예외) 다시 보내는 본문 끝에
@@ -245,7 +246,14 @@ async def _deliver(
             continue
         break
 
-    rejected = status is not None
+    # REJECTED: 마지막 시도가 오류 응답. NOT_SENT: 예외가 모두 연결 실패라 어느 시도도 서버에 닿지
+    # 않았다(429는 서버가 거부한 것). UNCONFIRMED: 응답 타임아웃 등 도착했을 수 있는 시도가 있었다.
+    if status is not None:
+        delivery, reason = "REJECTED", "거부됨"
+    elif all(e in _NOT_DELIVERED_ERRORS for e in errors):
+        delivery, reason = "NOT_SENT", "전송 안 됨"
+    else:
+        delivery, reason = "UNCONFIRMED", "확인 못 함 — 도착·중복 가능"
     log(
         "NOTIFICATION_FAILED",
         level="WARN",
@@ -255,9 +263,8 @@ async def _deliver(
         error=last_error or None,
         status=status,
         body=body or None,
-        delivery="REJECTED" if rejected else "UNCONFIRMED",
+        delivery=delivery,
     )
-    reason = "거부됨" if rejected else "확인 못 함 — 도착·중복 가능"
     _unconfirmed.append(f"{_alert_head(text)} ({reason})")
     del _unconfirmed[:-_UNCONFIRMED_KEEP]
     return False

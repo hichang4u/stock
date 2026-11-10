@@ -327,12 +327,19 @@ cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
 import json
 for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
     d=json.loads(l); e=d.get('event','')
-    if e.startswith('NOTIFICATION'):
-        print(d['ts'][11:23], e, {k:v for k,v in d.items() if k in ('alert','attempts','errors','error','status','delivery','possible_duplicate','count')})
+    if e.startswith('NOTIFICATION') or e=='PROCESS_RESTART_DETECTED':
+        print(d['ts'][11:23], e, {k:v for k,v in d.items() if k in ('alert','attempts','errors','error','status','delivery','possible_duplicate','count','recovered_status')})
 "
 ```
 
-- `NOTIFICATION_FAILED`: 세 번 다 실패. `delivery=UNCONFIRMED`면 도착했을 수도 있다(중복 가능).
+- `NOTIFICATION_FAILED`: 세 번 다 실패. `delivery`가 셋이다.
+  - `UNCONFIRMED`: 응답 타임아웃 등 도착했을 수 있는 시도가 있었다(중복 가능).
+  - `NOT_SENT`: 연결 실패(`ConnectError`·`ConnectTimeout`)뿐이었다. 도착하지 않았다. 이 구분은 2026-11-11 커밋분이 승격된
+    뒤부터다. 그 전 로그에서는 연결 실패뿐이어도 `UNCONFIRMED`로 남는다(`errors`로 가른다).
+  - `REJECTED`: 서버가 오류 응답으로 거부했다.
+- **`NOTIFICATION_FAILED` 뒤에 `NOTIFICATION_UNCONFIRMED_REPORTED` 없이 `PROCESS_RESTART_DETECTED`가 오면 맨 앞에 쓴다.**
+  실패한 알림 목록은 프로세스 메모리에만 있어서 재시작하면 사라진다. 사용자는 그 알림이 빠졌다는 표시를 받지 못했다
+  (`docs/NOTIFICATION_LOSS_FOLLOWUP_20261026.md` 8.8절, 2026-11-11 결정 라). 그 절의 표에 한 줄 더하고 재검토 조건에 닿았는지 본다.
 - `NOTIFICATION_RETRIED`(`release/20261028-1`~): 재시도 끝에 성공. `possible_duplicate=true`면 사용자가 같은 알림을
   두 번 이상 받았을 수 있다. 건수를 `docs/NOTIFICATION_LOSS_FOLLOWUP_20261026.md` 8절 아래에 날짜별로 적는다.
 - 로그에 아무것도 없는데 사용자가 중복을 보고하면, 그 알림 이벤트(`TIMEOUT_CLOSE` 등)가 한 번뿐인지와 운영
