@@ -246,14 +246,16 @@ async def _deliver(
             continue
         break
 
-    # REJECTED: 마지막 시도가 오류 응답. NOT_SENT: 예외가 모두 연결 실패라 어느 시도도 서버에 닿지
-    # 않았다(429는 서버가 거부한 것). UNCONFIRMED: 응답 타임아웃 등 도착했을 수 있는 시도가 있었다.
-    if status is not None:
-        delivery, reason = "REJECTED", "거부됨"
-    elif all(e in _NOT_DELIVERED_ERRORS for e in errors):
-        delivery, reason = "NOT_SENT", "전송 안 됨"
-    else:
+    # UNCONFIRMED: 응답 타임아웃 등 도착했을 수 있는 시도가 하나라도 있었다. 뒤 시도가 거부됐어도
+    #   앞 시도가 도착했을 수 있으니 먼저 본다.
+    # REJECTED: 그런 시도 없이 마지막 시도가 오류 응답이었다.
+    # NOT_SENT: 예외가 모두 연결 실패라 어느 시도도 서버에 닿지 않았다(앞선 429는 서버가 거부한 것).
+    if any(e not in _NOT_DELIVERED_ERRORS for e in errors):
         delivery, reason = "UNCONFIRMED", "확인 못 함 — 도착·중복 가능"
+    elif status is not None:
+        delivery, reason = "REJECTED", "거부됨"
+    else:
+        delivery, reason = "NOT_SENT", "전송 안 됨"
     log(
         "NOTIFICATION_FAILED",
         level="WARN",

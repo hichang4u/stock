@@ -257,6 +257,53 @@ async def test_rate_limit_then_connect_failures_is_not_sent(events):
     assert kw["delivery"] == "NOT_SENT"  # 429는 서버가 거부한 것이라 역시 도착하지 않았다
 
 
+async def test_read_timeout_then_rate_limits_stays_unconfirmed(events):
+    """첫 시도가 도착했을 수 있으면, 뒤 시도가 거부돼도 "거부됨"이라고 하면 안 된다."""
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if len(seen) == 1:
+            raise httpx.ReadTimeout("", request=request)
+        return httpx.Response(429, json={"ok": False, "parameters": {"retry_after": 1}})
+
+    assert await _deliver(handler) is False
+    [(event, kw)] = [e for e in events if e[0] == "NOTIFICATION_FAILED"]
+    assert kw["status"] == 429
+    assert kw["delivery"] == "UNCONFIRMED"
+    assert notifier._unconfirmed == [
+        "[알림] 매수 체결 · 396300 HT로보틱스 (확인 못 함 — 도착·중복 가능)"
+    ]
+
+
+async def test_read_timeout_then_error_response_stays_unconfirmed(events):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if len(seen) == 1:
+            raise httpx.ReadTimeout("", request=request)
+        return httpx.Response(400, json={"ok": False})
+
+    assert await _deliver(handler) is False
+    [(event, kw)] = [e for e in events if e[0] == "NOTIFICATION_FAILED"]
+    assert kw["status"] == 400 and kw["delivery"] == "UNCONFIRMED"
+
+
+async def test_connect_failure_then_error_response_is_rejected(events):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if len(seen) == 1:
+            raise httpx.ConnectError("", request=request)
+        return httpx.Response(400, json={"ok": False})
+
+    assert await _deliver(handler) is False
+    [(event, kw)] = [e for e in events if e[0] == "NOTIFICATION_FAILED"]
+    assert kw["delivery"] == "REJECTED"
+
+
 async def test_bot_token_never_reaches_the_log(events):
     def handler(request):
         raise httpx.ConnectError(f"cannot reach {request.url}", request=request)

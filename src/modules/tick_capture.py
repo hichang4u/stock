@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 from src import db
 from src.schedule_times import F5_EXEC_H, F5_EXEC_M
-from src.utils.jsonl_gz import GzipLines
+from src.utils.jsonl_gz import GzipLines, iter_rows
 from src.utils.logger import log
 
 KST = ZoneInfo("Asia/Seoul")
@@ -296,15 +296,7 @@ class TickCapture:
         """
         for gzp in sorted(self.dir.glob(f"{self.ticker}.*.jsonl.gz")):
             try:
-                for line in GzipLines(gzp):
-                    if not line.strip():
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(row, dict):
-                        yield row
+                yield from iter_rows(GzipLines(gzp))
             except OSError:
                 continue
 
@@ -685,13 +677,16 @@ class TickCapture:
             seq_count = 0
             # 끊긴 멤버 뒤에 이어 쓴 멤버까지 센다. 2026-11-09 15:20 마감은 표준 gzip
             # 읽기가 zlib.error로 멈춰 manifest를 확정하지 못했다.
-            lines = GzipLines(gzp)
+            # 해시를 낸 그 바이트로 센다. 기록 중인 파일을 두 번 읽으면 시점이 어긋난다.
+            lines = GzipLines(gzp, data=raw)
             try:
                 for line in lines:
                     if not line.strip():
                         continue
                     rows += 1
-                    uncompressed += len(line.encode("utf-8")) + 1  # 줄바꿈 포함(전과 같은 기준)
+                    # 줄 내용 + 줄바꿈 1바이트. 파일은 CRLF지만 텍스트 모드로 읽던 때와
+                    # 같은 기준이다.
+                    uncompressed += len(line.encode("utf-8")) + 1
                     try:
                         seq = int(json.loads(line).get("seq") or 0)
                     except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
@@ -716,7 +711,8 @@ class TickCapture:
                 "seq_count": seq_count,
             }
             if lines.damaged_at:
-                # 끊긴 멤버의 시작 바이트. 그 멤버의 끊긴 지점 뒤 몇 초는 잃었다.
+                # 읽지 못한 구간이 시작하는 바이트(끊긴 멤버의 시작, 또는 멤버로 읽히지 않는 조각의
+                # 시작). 그 지점 뒤 몇 초는 잃었다.
                 chunk["damaged_at"] = lines.damaged_at
             chunks.append(chunk)
         return chunks

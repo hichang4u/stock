@@ -3,12 +3,15 @@
 공용 읽기와 그 단위 테스트는 `src/utils/jsonl_gz.py`, `tests/test_jsonl_gz.py`.
 """
 
+import gzip
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import scripts.replay_ticks_to_bars as replay_mod
+import scripts.ws_frame_check as frame_check_mod
 from scripts.entry_timing_report import _read_gz
 from scripts.overnight_sieve import load_tick_prices
 from scripts.trail_near_miss import load_ws_ticks
@@ -116,3 +119,53 @@ async def test_tick_capture_resumes_and_finalizes_after_power_loss(mem, tmp_path
     m = await db.get_price_path_manifest(DATE, TICKER, "x")
     assert m["finalized_at"]
     assert json.loads(m["chunks_json"])[0]["rows"] == 50
+
+
+# ── 코드 리뷰(2026-11-11)에서 나온 것 ──
+
+
+def test_ws_frame_check_reports_a_damaged_member_as_an_issue(tmp_path, capsys):
+    """끊긴 멤버가 있으면 행을 잃었다. "이상: 없음"·종료 코드 0이면 안 된다."""
+    a = [_frame(_rec(TICKER, f"0905{i:02d}")) for i in range(10)]
+    b = [_frame(_rec(TICKER, f"0911{i:02d}")) for i in range(15)]
+    power_loss_file(_day_dir(tmp_path) / f"{TICKER}.09.jsonl.gz", a, b)
+    assert "DAMAGED_MEMBER" in check_day(tmp_path, DATE, split=_split47)["issues"]
+    assert frame_check_mod.main(["--root", str(tmp_path), "--date", DATE]) == 1
+    assert "DAMAGED_MEMBER" in capsys.readouterr().out
+
+
+def _crlf_gz(path, items) -> int:
+    """Windows 운영 파일 모양(CRLF). 돌려주는 값은 줄 내용 + 줄바꿈 1바이트의 합."""
+    body = "".join(json.dumps(r) + "\r\n" for r in items).encode("utf-8")
+    path.write_bytes(gzip.compress(body))
+    return sum(len(json.dumps(r).encode("utf-8")) + 1 for r in items)
+
+
+def test_chunk_size_counts_one_newline_per_row_on_crlf_files(tmp_path):
+    """`size_uncompressed`는 줄 내용 + 줄바꿈 1바이트다(복구 읽기 전과 같은 기준)."""
+    day = tmp_path / DATE
+    day.mkdir()
+    expected = _crlf_gz(day / f"{TICKER}.09.jsonl.gz", _ticks("05", 20))
+    [chunk] = _capture(tmp_path)._chunk_metadata()
+    assert chunk["rows"] == 20
+    assert chunk["size_uncompressed"] == expected
+
+
+def test_chunk_metadata_reads_each_file_once(tmp_path, monkeypatch):
+    """해시·크기와 행 수가 같은 시점의 바이트에서 나와야 한다(기록 중인 파일)."""
+    day = tmp_path / DATE
+    day.mkdir()
+    target = day / f"{TICKER}.09.jsonl.gz"
+    _crlf_gz(target, _ticks("05", 20))
+    reads = []
+    real = Path.read_bytes
+
+    def counting(self):
+        if self == target:
+            reads.append(self)
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counting)
+    [chunk] = _capture(tmp_path)._chunk_metadata()
+    assert chunk["rows"] == 20
+    assert len(reads) == 1

@@ -122,7 +122,7 @@ def _is_rejected(sent: dict) -> bool:
 
 
 def _order_outcome(events: list[dict], order_id: str) -> str:
-    mine =[e for e in events if e.get("order_id") == order_id]
+    mine = [e for e in events if e.get("order_id") == order_id]
     names = {e["event"] for e in mine}
     if "ENTRY_CANCEL_REJECTED_FILLED" in names:
         return "LATE_CONFIRM"
@@ -164,19 +164,34 @@ def analyze_day(root: Path, date: str) -> dict | None:
         # 진입 뒤 같은 날 다른 시도는 없다. 그래도 진입 주문까지만 본다.
         sents = [e for e in sents if e["ts"] <= executed["ts"]]
 
-    ticker = next((str(e["ticker"]) for e in sents + [executed or {}] if e.get("ticker")), None)
+    # 그날의 종목은 체결된 종목이다. 앞 후보가 거부되고 다음 후보가 체결된 날, 거부된 종목의
+    # 첫 체결가로 진입가를 재면 안 된다. 진입이 없으면 첫 주문의 종목이다.
+    ticker = next((str(e["ticker"]) for e in [executed or {}] + sents if e.get("ticker")), None)
     source = timing.get("selection_source") if timing else None
     # 레거시 경로 날 캡처는 종목 고정(09:01 이후)부터라 첫 행이 그날 첫 체결이 아니다.
-    first = first_trade(root, date, ticker) if ticker and source == "FAST_MULTI" else None
+    firsts: dict[str, dict | None] = {}
+
+    def first_of(tk: str | None) -> dict | None:
+        if not tk or source != "FAST_MULTI":
+            return None
+        if tk not in firsts:
+            firsts[tk] = first_trade(root, date, tk)
+        return firsts[tk]
+
+    first = first_of(ticker)
 
     orders = []
     for sent in sents:
         api_ms, wait_ms = _order_api(events, sent)
+        # 주문마다 자기 종목의 첫 체결과 견준다.
+        own_ticker = str(sent["ticker"]) if sent.get("ticker") else ticker
+        own_first = first_of(own_ticker)
         lead = None
-        if first is not None:
-            lead = round((_ts(first["received_at"]) - _ts(sent["ts"])).total_seconds(), 3)
+        if own_first is not None:
+            lead = round((_ts(own_first["received_at"]) - _ts(sent["ts"])).total_seconds(), 3)
         orders.append({
             "order_id": sent.get("order_id"),
+            "ticker": own_ticker,
             "attempt": sent.get("entry_attempt"),
             "sent_at": _hms(sent["ts"]),
             "api_ms": api_ms,
@@ -280,7 +295,7 @@ def _summary(days: list[dict]) -> str:
     all_failed = [d for d in fast if d["result"] == "FAILED"]
     rejected = [d["date"][4:] for d in all_failed if d["orders"][-1]["outcome"] == "REJECTED"]
     failed = [d["date"][4:] for d in all_failed if d["orders"][-1]["outcome"] != "REJECTED"]
-    known =[d["vs_open_amount"] for d in fast if d["vs_open_amount"] is not None]
+    known = [d["vs_open_amount"] for d in fast if d["vs_open_amount"] is not None]
     return (
         f"빠른 경로 {len(fast)}일 · 주문 {sum(counts.values())}건: "
         + ", ".join(f"{_OUTCOME_KO[k]} {v}" for k, v in counts.items() if v)

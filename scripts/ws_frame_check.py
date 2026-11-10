@@ -15,7 +15,8 @@
     옛 날짜도 100%가 된다. 그날 운영이 실제로 본 비율은 프레임 ÷ 체결이다.
 
 장중 파일은 기록 중이라 잘려 있다 — 읽힌 데까지 쓴다. 전원 차단으로 끊긴 멤버 뒤에 이어 쓴 멤버도
-읽고, 그런 파일은 "깨진 멤버 건너뜀"으로 표시한다(`src/utils/jsonl_gz.py`).
+읽고, 그런 파일은 "깨진 멤버 건너뜀"으로 표시한다(`src/utils/jsonl_gz.py`). 끊긴 지점의 행은 잃은
+것이므로 이상(`DAMAGED_MEMBER`)으로 센다.
 
     .\\.venv\\Scripts\\python.exe scripts\\ws_frame_check.py --root D:\\Private\\stock-prod
 
@@ -131,6 +132,9 @@ def check_day(root: Path, date: str, split: Splitter | None = None) -> dict:
             issues.add("PARSER_DROPS")
         if t["header_mismatch_frames"]:
             issues.add("HEADER_MISMATCH")
+        if t["damaged"]:
+            # 끊긴 멤버 뒤의 행은 읽었지만 끊긴 지점의 행은 잃었다. 깨끗한 날로 넘기지 않는다.
+            issues.add("DAMAGED_MEMBER")
     return {
         "date": date, "expected_fields": EXPECTED_FIELDS,
         "tickers": tickers, "issues": sorted(issues),

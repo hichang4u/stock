@@ -56,10 +56,13 @@ def stop(e,s): return e*(1+s-TRAIL) if s>=STEP else e*(1-HARD)
 for i,r in enumerate(rows):
     if r.get('recovered_status')!='HOLDING_RESUMED': continue
     t1=r['ts']
-    hb=[x for x in rows[:i] if x.get('event')=='F4_HEARTBEAT']
-    if not hb: print(t1[11:23],'재시작 전 F4_HEARTBEAT 없음'); continue
-    t0=hb[-1]['ts']   # 꺼지기 전 마지막 생존 신호(30초 간격이라 실제 정지는 그 뒤 30초 안)
-    tk=hb[-1]['ticker']; kept=hb[-1]['high_price']
+    live=[x for x in rows[:i] if x.get('event') in ('F4_HEARTBEAT','F4_STATE_PERSISTED')]
+    if not live: print(t1[11:23],'재시작 전 F4 기록 없음'); continue
+    t0=live[-1]['ts']   # 꺼지기 전 마지막 생존 신호(실제 정지는 그 뒤 30초 안)
+    saved=[x for x in live if x['event']=='F4_STATE_PERSISTED' and x.get('state_saved')]
+    src=saved[-1] if saved else live[-1]   # 재시작이 복원하는 것은 마지막으로 저장된 상태다
+    tk=src['ticker']; kept=src['high_price']
+    if not saved: print('  (저장 기록이 없어 하트비트 고가를 썼다. 이어받은 값과 다를 수 있다)')
     e=db.execute('select entry_price from trades where date=? and ticker=? order by id desc',(D,tk)).fetchone()[0]
     try: allbars=json.load(open(f'data/bars/{D}_{tk}.json',encoding='utf-8'))
     except OSError: print(tk,t1[11:23],'분봉 파일 없음'); continue
@@ -74,13 +77,16 @@ for i,r in enumerate(rows):
 "
 ```
 
-- 공백 시작은 재시작 전 마지막 `F4_HEARTBEAT`다. 30초 간격이라 실제로 멈춘 시각은 그 뒤 30초 안이다.
+- 공백 시작은 재시작 전 마지막 F4 기록(`F4_HEARTBEAT` 또는 `F4_STATE_PERSISTED`)이다. 하트비트가 30초 간격이라 실제로 멈춘
+  시각은 그 뒤 30초 안이다.
+- 이어받은 고가는 마지막 `F4_STATE_PERSISTED`(`state_saved=true`)의 값이다. 재시작은 상태 파일을 복원하므로, 하트비트 뒤에
+  고가가 갱신돼 저장됐으면 하트비트 값과 다르다. 11/09에는 둘이 같았다(11,610원).
 - 공백 안에 통째로 든 분봉만 쓴다. 경계 분봉에는 봇이 살아 있던 동안의 틱이 섞인다.
 - **공백 고가로 스텝이 올라갔어야 했으면 맨 앞에 쓴다.** 이어받은 스탑, 올라갔어야 할 스탑, 실제 청산을 함께 적는다.
   금액 차이는 분봉 안 가격 순서를 모르므로 추정이다.
 - **공백 저가가 이어받은 스탑 아래였으면(`<<<`) 맨 앞에 쓴다.** 꺼져 있는 동안은 스탑이 없었다는 뜻이다.
 - 둘 중 하나라도 나오면 티켓 7절 표에 한 줄 더하고, 재검토 조건(7절)에 닿았는지 본다.
-- 재시작 전 `F4_HEARTBEAT`가 없는 옛 로그(2026-08 이전)나 분봉 파일이 없는 날은 대조하지 못한다고 적는다.
+- 재시작 전 F4 기록이 없는 옛 로그(2026-08 이전)나 분봉 파일이 없는 날은 대조하지 못한다고 적는다.
 
 ## 3. 빠른 경로가 이겼는지
 
@@ -263,12 +269,14 @@ print(dict(c)); print('한도 초과 경로', dict(paths))
 cd /d/Private/stock && PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe scripts/ws_frame_check.py --root D:/Private/stock-prod --date <YYYYMMDD>
 ```
 
-종료 코드 1이면 보고 맨 앞에 쓴다. 이상 종류는 네 가지다.
+종료 코드 1이면 보고 맨 앞에 쓴다. 이상 종류는 다섯 가지다.
 
 - `FIELD_COUNT_CHANGED`: KIS가 `H0STCNT0` 필드 수를 또 바꿨다(기대값 47).
 - `PARSER_DROPS`: 파서가 다건 프레임의 체결을 버리고 있다(`coverage_pct` < 100).
 - `UNALIGNED`: 레코드로 정렬되지 않는 프레임이 있다.
 - `HEADER_MISMATCH`: 프레임 헤더의 건수와 파서가 낸 레코드 수가 다르다(tick-schema-3 이후).
+- `DAMAGED_MEMBER`: 틱 파일에 끊긴 gzip 멤버가 있다(전원 차단·강제 종료). 뒤 멤버는 읽었지만 끊긴 지점의 행은 잃었다.
+  파서 결함이 아니다. 그날 재시작·전원 기록과 대조한다(`docs/TICK_GZIP_CORRUPTION_FOLLOWUP_20261109.md`).
 
 2026-09-14에 46 → 47로 바뀐 뒤 11거래일 동안 아무도 몰랐다
 (`docs/WS_47FIELD_PARSER_FOLLOWUP_20261001.md`).

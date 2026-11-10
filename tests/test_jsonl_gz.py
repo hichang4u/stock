@@ -10,7 +10,7 @@ import json
 import zlib
 from pathlib import Path
 
-from src.utils.jsonl_gz import GzipLines, read_jsonl_gz
+from src.utils.jsonl_gz import GzipLines, iter_rows, read_jsonl_gz
 
 
 def rows(prefix: str, n: int) -> list[dict]:
@@ -130,3 +130,70 @@ def test_empty_file_and_blank_or_bad_lines(tmp_path):
     assert r.rows == [] and not r.truncated
     p.write_bytes(gzip.compress(b'{"seq": 1}\n\nnot json\n[1, 2]\n{"seq": 2}\n'))
     assert read_jsonl_gz(p).rows == [{"seq": 1}, {"seq": 2}]
+
+
+# ── 코드 리뷰(2026-11-11)에서 나온 것 ──
+
+
+def test_crlf_lines_come_back_without_the_carriage_return(tmp_path):
+    """운영 파일은 Windows에서 `gzip.open(path, "at")`으로 써서 줄 끝이 CRLF다."""
+    p = tmp_path / "x.jsonl.gz"
+    p.write_bytes(gzip.compress(b'{"seq": 1}\r\n{"seq": 2}\r\n'))
+    assert list(GzipLines(p)) == ['{"seq": 1}', '{"seq": 2}']
+
+
+def test_fragment_after_a_closed_member_is_reported_at_its_own_offset(tmp_path):
+    """머리만 쓰고 죽은 프로세스의 조각. 앞의 멀쩡한 멤버를 깨졌다고 하면 안 된다."""
+    a, b = rows("a", 5), rows("b", 5)
+    first = complete_member(a)
+    header_only = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
+    p = tmp_path / "x.jsonl.gz"
+    p.write_bytes(first + header_only + complete_member(b))
+    r = read_jsonl_gz(p)
+    assert r.rows == a + b
+    assert r.damaged_at == [len(first)]
+    assert not r.truncated
+
+
+def test_fragment_with_an_unfinished_first_line_is_reported_at_its_own_offset(tmp_path):
+    a, b = rows("a", 5), rows("b", 5)
+    first = complete_member(a)
+    c = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+    fragment = c.compress(b'{"seq": 1, "pad": "xxxx') + c.flush(zlib.Z_SYNC_FLUSH)
+    p = tmp_path / "x.jsonl.gz"
+    p.write_bytes(first + fragment + complete_member(b))
+    r = read_jsonl_gz(p)
+    assert r.rows == a + b
+    assert r.damaged_at == [len(first)]
+
+
+def test_closed_member_with_a_zero_filled_tail_is_truncated(tmp_path):
+    a = rows("a", 5)
+    p = tmp_path / "x.jsonl.gz"
+    p.write_bytes(complete_member(a) + b"\x00" * 512)
+    r = read_jsonl_gz(p)
+    assert r.rows == a
+    assert r.truncated and r.damaged_at == []
+
+
+def test_iterating_twice_does_not_accumulate_state(tmp_path):
+    p = power_loss_file(tmp_path / "x.jsonl.gz", rows("a", 5), rows("b", 5))
+    g = GzipLines(p)
+    assert list(g) == list(g)
+    assert g.damaged_at == [0]
+
+    p.write_bytes(complete_member(rows("a", 5)))  # 다시 돌 때 파일이 멀쩡해졌으면 표시도 지운다
+    list(g)
+    assert g.damaged_at == [] and not g.truncated
+
+
+def test_lines_can_be_read_from_bytes_already_in_hand(tmp_path):
+    """해시를 낸 그 바이트로 행도 센다. 파일을 다시 읽지 않는다."""
+    a = rows("a", 5)
+    g = GzipLines(tmp_path / "missing.jsonl.gz", data=complete_member(a))
+    assert [json.loads(line) for line in g] == a
+
+
+def test_iter_rows_keeps_json_objects_only():
+    lines = ['{"seq": 1}', "", "   ", "not json", "[1, 2]", '{"seq": 2}']
+    assert list(iter_rows(lines)) == [{"seq": 1}, {"seq": 2}]

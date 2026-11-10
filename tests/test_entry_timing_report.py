@@ -305,3 +305,27 @@ def test_waited_for_the_first_trade_then_filled_in_window(tmp_path):
     assert o["outcome"] == "IN_WINDOW" and o["lead_sec"] == 22.129
     assert day["vs_open_per_share"] == 0
     assert branch_label(day) == "1차 첫 체결 전 · 창 안 체결"
+
+
+def test_rejection_then_next_candidate_is_measured_against_the_filled_ticker(tmp_path):
+    """거부된 종목의 첫 체결가로 체결된 종목의 진입가를 재면 안 된다(코드 리뷰 2026-11-11)."""
+    _write_log(tmp_path, [
+        _rejected("09:00:06.000"),
+        _ev("09:00:06.001", "ENTRY_FAIL", order_id="", reason="ORDER_REJECTED"),
+        _sent("09:00:10.000", "0000002000", 1, ticker="038110"),
+        _ev("09:00:11.000", "ENTRY_EXECUTED", ticker="038110", order_id="0000002000",
+            fill_price=5000, fill_qty=100),
+        _timing("09:00:11.000"),
+    ])
+    _write_ticks(tmp_path, [("09:00:14.454", _rec("090014", 860, 151853, 151853, "354200"))],
+                 ticker="354200")
+    _write_ticks(tmp_path, [("09:00:09.000", _rec("090009", 4990, 1000, 1000, "038110"))],
+                 ticker="038110")
+    day = analyze_day(tmp_path, DATE)
+    assert day["ticker"] == "038110"
+    assert day["first_trade"]["price"] == 4990
+    assert day["vs_open_per_share"] == 10
+    assert day["vs_open_amount"] == 1000
+    assert [o["ticker"] for o in day["orders"]] == ["354200", "038110"]
+    assert [o["lead_sec"] for o in day["orders"]] == [8.454, -1.0]
+    assert branch_label(day) == "1차 첫 체결 전 · 주문 거부 → 2차 첫 체결 뒤 · 창 안 체결"
