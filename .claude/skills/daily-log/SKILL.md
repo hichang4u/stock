@@ -40,6 +40,48 @@ for r in db.execute(\"select order_phase,ticker,order_price,order_qty,fill_price
 `ordered_at`→`filled_at` 간격을 본다. 진입은 보통 1초 내, 길면 `F3_LIMIT_FILL_TIMEOUT_SEC`
 경로를 확인한다.
 
+### 2.1 보유 중 재시작 — `HOLDING_RESUMED`가 있으면 돌린다
+
+재시작 복구는 상태 파일의 고가·스텝을 그대로 이어받고, 꺼져 있던 동안의 고가를 다시 보지 않는다
+(`docs/RESTART_HOLDING_HIGH_GAP_FOLLOWUP_20261109.md`, 2026-11-10 결정 나). 그래서 그날마다 공백 구간 분봉과 대조한다.
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import json, math, sqlite3
+D='<YYYYMMDD>'; STEP=0.025; TRAIL=0.020; HARD=0.02   # f4_tracking.py 상수
+rows=[json.loads(l) for l in open(f'data/logs/{D}.jsonl',encoding='utf-8') if l.strip()]
+db=sqlite3.connect('file:data/db/trading.db?mode=ro',uri=True)
+def step(p,e): return max(math.floor((p/e-1)/STEP)*STEP,0.0)
+def stop(e,s): return e*(1+s-TRAIL) if s>=STEP else e*(1-HARD)
+for i,r in enumerate(rows):
+    if r.get('recovered_status')!='HOLDING_RESUMED': continue
+    t1=r['ts']
+    hb=[x for x in rows[:i] if x.get('event')=='F4_HEARTBEAT']
+    if not hb: print(t1[11:23],'재시작 전 F4_HEARTBEAT 없음'); continue
+    t0=hb[-1]['ts']   # 꺼지기 전 마지막 생존 신호(30초 간격이라 실제 정지는 그 뒤 30초 안)
+    tk=hb[-1]['ticker']; kept=hb[-1]['high_price']
+    e=db.execute('select entry_price from trades where date=? and ticker=? order by id desc',(D,tk)).fetchone()[0]
+    try: allbars=json.load(open(f'data/bars/{D}_{tk}.json',encoding='utf-8'))
+    except OSError: print(tk,t1[11:23],'분봉 파일 없음'); continue
+    # 공백 안에 통째로 든 분만 쓴다. 경계 분봉에는 봇이 살아 있던 동안의 틱이 섞인다.
+    bars=[b for b in allbars if t0[11:13]+t0[14:16] < b['time'][:4] < t1[11:13]+t1[14:16]]
+    if not bars: print(tk,t0[11:23],'->',t1[11:23],'공백 안에 온전한 분봉 없음'); continue
+    hi=max(b['high'] for b in bars); lo=min(b['low'] for b in bars)
+    print(tk,'공백',t0[11:23],'->',t1[11:23],'| 분봉',bars[0]['time'][:4],'~',bars[-1]['time'][:4],'| 진입',e)
+    print('  이어받은 고가',kept,'스텝',step(kept,e),'스탑',round(stop(e,step(kept,e))))
+    print('  공백 고가',hi,'스텝',step(max(hi,kept),e),'스탑',round(stop(e,step(max(hi,kept),e))),'| 공백 저가',lo,
+          '<<< 이어받은 스탑 아래' if lo<=stop(e,step(kept,e)) else '')
+"
+```
+
+- 공백 시작은 재시작 전 마지막 `F4_HEARTBEAT`다. 30초 간격이라 실제로 멈춘 시각은 그 뒤 30초 안이다.
+- 공백 안에 통째로 든 분봉만 쓴다. 경계 분봉에는 봇이 살아 있던 동안의 틱이 섞인다.
+- **공백 고가로 스텝이 올라갔어야 했으면 맨 앞에 쓴다.** 이어받은 스탑, 올라갔어야 할 스탑, 실제 청산을 함께 적는다.
+  금액 차이는 분봉 안 가격 순서를 모르므로 추정이다.
+- **공백 저가가 이어받은 스탑 아래였으면(`<<<`) 맨 앞에 쓴다.** 꺼져 있는 동안은 스탑이 없었다는 뜻이다.
+- 둘 중 하나라도 나오면 티켓 7절 표에 한 줄 더하고, 재검토 조건(7절)에 닿았는지 본다.
+- 재시작 전 `F4_HEARTBEAT`가 없는 옛 로그(2026-08 이전)나 분봉 파일이 없는 날은 대조하지 못한다고 적는다.
+
 ## 3. 빠른 경로가 이겼는지
 
 `ENTRY_PIPELINE_TIMING.selection_source`가 `FAST_MULTI`면 정상,
