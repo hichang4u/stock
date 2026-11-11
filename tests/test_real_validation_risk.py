@@ -14,7 +14,7 @@ from src.real_validation import risk_halt, sizing
 from src.real_validation.core import Verdict
 from src.real_validation.risk_halt import AccountRiskState, Action, HaltKind
 from src.real_validation.risk_policy import RiskPolicy
-from src.real_validation.sizing import SizingInput
+from src.real_validation.sizing import BudgetUse, SizingInput
 from src.real_validation.store import Store
 from tests import real_validation_support as s
 
@@ -126,17 +126,35 @@ def test_policy_hash_tracks_every_value_and_unknown_keys_are_rejected():
 
 # ── 주문 예산 ────────────────────────────────────────────────────────
 
+CASH_AS_OF = s.ts(DAY, "08:59")
+NOW = "2027-01-04T08:59:05+09:00"
+
+
+def _use(**overrides):
+    values = {
+        "cash_as_of": CASH_AS_OF,
+        "loss_in_use": 0.0,
+        "amount_not_in_cash": 0.0,
+        "pending_amount": 0.0,
+        "exposure_amount": 0.0,
+    }
+    values.update(overrides)
+    return BudgetUse(**values)
+
 
 def _input(**overrides):
     values = {
         "price": 10_037.0,
         "tick_size": 10,
         "available_cash": 50_000_000.0,
-        "account_data_age_sec": 5.0,
+        "cash_basis": sizing.CASH_BASIS_ORDERABLE,
+        "cash_as_of": CASH_AS_OF,
+        "now": NOW,
         "ask_depth_amount": 100_000_000.0,
         "expected_trade_amount": 10_000_000_000.0,
         "quote_age_ms": 100.0,
         "entry_delay_ms": 500.0,
+        "use": _use(),
     }
     values.update(overrides)
     return SizingInput(**values)
@@ -197,10 +215,12 @@ def test_worse_cost_delay_or_liquidity_shrinks_the_order_then_abandons_it():
 def test_existing_exposure_and_pending_buys_consume_the_loss_budget():
     fresh = sizing.allowed_order(s.risk_policy(), _input())
     with_exposure = sizing.allowed_order(
-        s.risk_policy(), _input(open_exposure_loss=20_000.0, reserved_loss=15_000.0)
+        s.risk_policy(),
+        _input(external_exposure_loss=20_000.0, use=_use(loss_in_use=15_000.0)),
     )
     exhausted = sizing.allowed_order(
-        s.risk_policy(), _input(open_exposure_loss=30_000.0, reserved_loss=20_000.0)
+        s.risk_policy(),
+        _input(external_exposure_loss=30_000.0, use=_use(loss_in_use=20_000.0)),
     )
 
     assert with_exposure.limits["loss_budget"] == pytest.approx(15_000.0 / 0.0375)
@@ -209,30 +229,48 @@ def test_existing_exposure_and_pending_buys_consume_the_loss_budget():
     assert exhausted.blocked == ("BUDGET_BELOW_ONE_SHARE_LOSS_BUDGET",)
 
 
-def test_pending_buy_amount_is_taken_out_of_the_cash_limit():
-    decision = sizing.allowed_order(
-        s.risk_policy(), _input(available_cash=6_000_000.0, reserved_amount=5_000_000.0)
+def test_cash_limit_subtracts_only_what_the_cash_snapshot_does_not_already_reflect():
+    """증권사 주문가능현금은 접수된 미체결 매수를 이미 뺐다. 그 금액을 또 빼지 않는다."""
+    already_netted = sizing.allowed_order(
+        s.risk_policy(),
+        _input(
+            available_cash=1_000_000.0,
+            use=_use(pending_amount=5_000_000.0, amount_not_in_cash=0.0),
+        ),
+    )
+    not_yet_seen = sizing.allowed_order(
+        s.risk_policy(),
+        _input(
+            available_cash=6_000_000.0,
+            use=_use(pending_amount=5_000_000.0, amount_not_in_cash=5_000_000.0),
+        ),
     )
 
-    assert decision.limits["cash"] == pytest.approx(200_000.0)
-    assert decision.binding == "cash"
+    assert already_netted.limits["cash"] == pytest.approx(200_000.0)
+    assert not_yet_seen.limits["cash"] == pytest.approx(200_000.0)
 
 
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
         ({"available_cash": None}, "CASH_UNKNOWN"),
+        ({"cash_basis": None}, "CASH_BASIS_NOT_ORDERABLE_CASH"),
+        ({"cash_basis": "DEPOSIT_BALANCE"}, "CASH_BASIS_NOT_ORDERABLE_CASH"),
         ({"ask_depth_amount": None}, "LIQUIDITY_UNKNOWN"),
         ({"expected_trade_amount": None}, "LIQUIDITY_UNKNOWN"),
-        ({"account_data_age_sec": None}, "ACCOUNT_DATA_AGE_UNKNOWN"),
-        ({"account_data_age_sec": 30.001}, "STALE_ACCOUNT_DATA"),
+        ({"cash_as_of": None}, "ACCOUNT_DATA_AS_OF_UNKNOWN"),
+        ({"now": "2027-01-04T08:59:05"}, "ACCOUNT_DATA_AS_OF_UNKNOWN"),
+        ({"now": "2027-01-04T08:58:59+09:00"}, "ACCOUNT_DATA_AS_OF_IN_FUTURE"),
+        ({"now": "2027-01-04T08:59:30.001+09:00"}, "STALE_ACCOUNT_DATA"),
+        ({"use": None}, "BUDGET_USE_UNKNOWN"),
+        ({"use": _use(cash_as_of=s.ts(DAY, "08:50"))}, "BUDGET_USE_AS_OF_MISMATCH"),
         ({"quote_age_ms": None}, "QUOTE_AGE_UNKNOWN"),
         ({"quote_age_ms": 500.001}, "QUOTE_STALE"),
         ({"entry_delay_ms": None}, "ENTRY_DELAY_UNKNOWN"),
         ({"entry_delay_ms": 3_000.001}, "ENTRY_DELAY_EXCEEDED"),
         ({"price": 0.0}, "PRICE_INVALID"),
         ({"tick_size": 0}, "TICK_SIZE_INVALID"),
-        ({"reserved_loss": float("nan")}, "EXPOSURE_OR_RESERVATION_UNKNOWN"),
+        ({"external_exposure_loss": float("nan")}, "EXTERNAL_EXPOSURE_UNKNOWN"),
     ],
 )
 def test_unknown_or_stale_input_blocks_the_order(overrides, reason):
@@ -245,7 +283,7 @@ def test_unknown_or_stale_input_blocks_the_order(overrides, reason):
 def test_freshness_limits_are_inclusive_at_the_boundary():
     decision = sizing.allowed_order(
         s.risk_policy(),
-        _input(account_data_age_sec=30.0, quote_age_ms=500.0, entry_delay_ms=3_000.0),
+        _input(now="2027-01-04T08:59:30+09:00", quote_age_ms=500.0, entry_delay_ms=3_000.0),
     )
 
     assert decision.allowed
@@ -258,7 +296,7 @@ def test_invalid_policy_blocks_every_order():
     assert decision.blocked == ("RISK_POLICY_ABSOLUTE_ORDER_CAP_ZERO_MEANS_UNLIMITED",)
 
 
-# ── 미체결 예산 예약 ─────────────────────────────────────────────────
+# ── 주문 예산 장부 ───────────────────────────────────────────────────
 
 
 @pytest.fixture
@@ -272,85 +310,180 @@ def store(path):
         yield opened
 
 
-def _reserve(store, order_id, decision, *, exposure=0.0):
+def _decision(**overrides):
+    return sizing.allowed_order(s.risk_policy(), _input(**overrides))
+
+
+def _reserve(store, order_id, decision, *, external=0.0, at="09:00"):
     sizing.reserve(
         store,
         s.risk_policy(),
         client_order_id=order_id,
         decision=decision,
-        open_exposure_loss=exposure,
-        at=s.ts(DAY, "09:00"),
+        external_exposure_loss=external,
+        at=s.ts(DAY, at),
     )
 
 
 def test_pending_buy_reserves_the_budget_so_a_second_order_cannot_spend_it_again(store):
-    policy = s.risk_policy()
-    first = sizing.allowed_order(policy, _input())
+    first = _decision()
     _reserve(store, "buy-1", first)
-    amount, loss = sizing.reserved_totals(store)
+    use = sizing.budget_use(store, cash_as_of=CASH_AS_OF)
 
-    assert (amount, loss) == (first.amount, pytest.approx(first.loss_budget_used))
-    second = sizing.allowed_order(policy, _input(reserved_amount=amount, reserved_loss=loss))
-    assert second.qty == 0
+    assert use.loss_in_use == pytest.approx(first.loss_budget_used)
+    assert use.pending_amount == first.amount
+    assert _decision(use=use).qty == 0
 
     # 예약을 보지 않고 계산한 낡은 수량으로 들어와도 예약 단계에서 막힌다.
     with pytest.raises(sizing.LossBudgetExceeded):
         _reserve(store, "buy-2", first)
-    assert set(sizing.active_reservations(store)) == {"buy-1"}
+    assert set(sizing.orders(store)) == {"buy-1"}
 
 
-def test_same_order_id_cannot_reserve_twice_even_after_release(store):
-    decision = sizing.allowed_order(s.risk_policy(), _input(ask_depth_amount=300_000.0))
+def test_same_order_id_cannot_reserve_twice_even_after_it_is_settled(store):
+    decision = _decision(ask_depth_amount=300_000.0)
     _reserve(store, "buy-1", decision)
 
     with pytest.raises(sizing.DuplicateReservation):
         _reserve(store, "buy-1", decision)
     sizing.release(store, client_order_id="buy-1", reason="CANCEL_CONFIRMED", at=s.ts(DAY))
+    assert sizing.orders(store)["buy-1"].settled
     with pytest.raises(sizing.DuplicateReservation):
         _reserve(store, "buy-1", decision)
 
 
-def test_release_needs_a_reconciled_outcome_and_frees_the_budget(store):
-    policy = s.risk_policy()
-    first = sizing.allowed_order(policy, _input())
-    _reserve(store, "buy-1", first)
+def test_unacknowledged_order_is_subtracted_from_cash_until_the_snapshot_can_see_it(store):
+    """예약 금액의 현금 차감은 스냅샷 시각과 접수 시각으로 정한다. 무조건 빼지 않는다."""
+    decision = _decision()
+    _reserve(store, "buy-1", decision, at="09:00")
+
+    # 접수 확인 전: 어느 시점의 현금도 이 주문을 반영했다고 볼 수 없다.
+    unacked = sizing.budget_use(store, cash_as_of=s.ts(DAY, "09:05"))
+    sizing.acknowledge(store, client_order_id="buy-1", at=s.ts(DAY, "09:01"))
+    # 접수(09:01)보다 앞선 스냅샷은 이 주문을 모른다 → 현금에서 뺀다.
+    stale = sizing.budget_use(store, cash_as_of=s.ts(DAY, "09:00"))
+    # 접수 뒤의 스냅샷은 증권사가 이미 뺐다 → 또 빼지 않는다.
+    fresh = sizing.budget_use(store, cash_as_of=s.ts(DAY, "09:02"))
+    same_instant = sizing.budget_use(store, cash_as_of=s.ts(DAY, "09:01"))
+
+    assert unacked.amount_not_in_cash == decision.amount
+    assert stale.amount_not_in_cash == decision.amount
+    assert fresh.amount_not_in_cash == 0.0
+    assert same_instant.amount_not_in_cash == 0.0
+    # 손실 예산은 증권사 수치가 아니다. 스냅샷과 무관하게 늘 잡혀 있다.
+    assert unacked.loss_in_use == stale.loss_in_use == fresh.loss_in_use > 0
+    assert sizing.acknowledge(store, client_order_id="buy-1", at=s.ts(DAY, "09:03")) is False
+
+
+def test_fill_turns_the_reservation_into_exposure_without_freeing_the_budget(store):
+    decision = _decision()
+    _reserve(store, "buy-1", decision)
+    sizing.acknowledge(store, client_order_id="buy-1", at=s.ts(DAY, "09:01"))
+    before = sizing.budget_use(store, cash_as_of=CASH_AS_OF).loss_in_use
+
+    sizing.record_fill(
+        store, client_order_id="buy-1", cumulative_amount=decision.amount, at=s.ts(DAY, "09:02")
+    )
+    assert sizing.release(
+        store, client_order_id="buy-1", reason="FULLY_FILLED", at=s.ts(DAY, "09:02")
+    ) is True
+    filled = sizing.budget_use(store, cash_as_of=s.ts(DAY, "09:03"))
+
+    # 예약이 풀린 순간에도 같은 손실 예산이 노출로 남아 있다 — 사이에 틈이 없다.
+    assert filled.loss_in_use == pytest.approx(before)
+    assert filled.pending_amount == 0.0 and filled.exposure_amount == decision.amount
+    with pytest.raises(sizing.LossBudgetExceeded):
+        _reserve(store, "buy-2", decision)
+
+    assert sizing.close_exposure(store, client_order_id="buy-1", at=s.ts(DAY, "09:30")) is True
+    assert sizing.close_exposure(store, client_order_id="buy-1", at=s.ts(DAY, "09:31")) is False
+    assert sizing.budget_use(store, cash_as_of=s.ts(DAY, "09:32")).loss_in_use == 0.0
+    _reserve(store, "buy-2", decision, at="09:33")
+
+
+def test_partial_fill_then_cancel_keeps_only_the_filled_part(store):
+    decision = _decision()
+    _reserve(store, "buy-1", decision)
+    half = decision.amount / 2
+
+    sizing.record_fill(store, client_order_id="buy-1", cumulative_amount=half, at=s.ts(DAY))
+    mid = sizing.budget_use(store, cash_as_of=CASH_AS_OF)
+    sizing.release(store, client_order_id="buy-1", reason="CANCEL_CONFIRMED", at=s.ts(DAY))
+    after = sizing.budget_use(store, cash_as_of=CASH_AS_OF)
+
+    assert mid.pending_amount == pytest.approx(half) and mid.exposure_amount == pytest.approx(half)
+    assert mid.loss_in_use == pytest.approx(decision.loss_budget_used)
+    assert after.pending_amount == 0.0 and after.exposure_amount == pytest.approx(half)
+    assert after.loss_in_use == pytest.approx(decision.loss_budget_used / 2)
+
+
+def test_ledger_rejects_out_of_order_or_contradictory_records(store):
+    decision = _decision()
+    _reserve(store, "buy-1", decision)
 
     with pytest.raises(ValueError):
         sizing.release(store, client_order_id="buy-1", reason="TIMEOUT", at=s.ts(DAY))
     with pytest.raises(KeyError):
         sizing.release(store, client_order_id="nope", reason="CANCEL_CONFIRMED", at=s.ts(DAY))
-    assert sizing.reserved_totals(store)[1] > 0
+    with pytest.raises(sizing.LedgerStateError):
+        sizing.release(store, client_order_id="buy-1", reason="FULLY_FILLED", at=s.ts(DAY))
+    with pytest.raises(sizing.LedgerStateError):
+        sizing.close_exposure(store, client_order_id="buy-1", at=s.ts(DAY))
+    with pytest.raises(sizing.LedgerStateError):
+        sizing.record_fill(
+            store, client_order_id="buy-1", cumulative_amount=decision.amount + 1, at=s.ts(DAY)
+        )
+    sizing.record_fill(store, client_order_id="buy-1", cumulative_amount=50_000.0, at=s.ts(DAY))
+    with pytest.raises(sizing.LedgerStateError):
+        sizing.record_fill(store, client_order_id="buy-1", cumulative_amount=40_000.0, at=s.ts(DAY))
+    with pytest.raises(sizing.LedgerStateError):
+        sizing.release(store, client_order_id="buy-1", reason="REJECT_CONFIRMED", at=s.ts(DAY))
+    with pytest.raises(ValueError):
+        sizing.release(store, client_order_id="buy-1", reason="CANCEL_CONFIRMED", at="09:00")
+    assert sizing.budget_use(store, cash_as_of=CASH_AS_OF).loss_in_use > 0
+
+
+def test_order_that_was_never_sent_is_released_only_after_that_is_confirmed(store):
+    """예약 직후 프로세스가 죽으면 예약이 남는다. 시간이 아니라 확인으로만 푼다."""
+    _reserve(store, "buy-1", _decision())
 
     assert sizing.release(
-        store, client_order_id="buy-1", reason="CANCEL_CONFIRMED", at=s.ts(DAY)
+        store, client_order_id="buy-1", reason="NOT_SENT_CONFIRMED", at=s.ts(DAY)
     ) is True
     assert sizing.release(
-        store, client_order_id="buy-1", reason="CANCEL_CONFIRMED", at=s.ts(DAY)
+        store, client_order_id="buy-1", reason="NOT_SENT_CONFIRMED", at=s.ts(DAY)
     ) is False
-    assert sizing.reserved_totals(store) == (0, 0)
-    _reserve(store, "buy-2", first)
+    assert sizing.budget_use(store, cash_as_of=CASH_AS_OF).loss_in_use == 0.0
 
 
-def test_filled_reservation_becomes_exposure_that_still_counts(store):
-    policy = s.risk_policy()
-    first = sizing.allowed_order(policy, _input())
-    _reserve(store, "buy-1", first)
-    sizing.release(store, client_order_id="buy-1", reason="FILL_RECONCILED", at=s.ts(DAY))
-
-    with pytest.raises(sizing.LossBudgetExceeded):
-        _reserve(store, "buy-2", first, exposure=first.loss_budget_used)
-
-
-def test_reservations_survive_a_restart(path):
+def test_ledger_survives_a_restart(path):
+    decision = _decision()
     with Store.open(path, create=True) as store:
-        _reserve(store, "buy-1", sizing.allowed_order(s.risk_policy(), _input()))
+        _reserve(store, "buy-1", decision)
+        sizing.record_fill(
+            store, client_order_id="buy-1", cumulative_amount=decision.amount, at=s.ts(DAY)
+        )
 
     with Store.open(path) as reopened:
-        assert set(sizing.active_reservations(reopened)) == {"buy-1"}
+        state = sizing.orders(reopened)["buy-1"]
+        assert state.filled_amount == decision.amount and not state.settled
+        assert sizing.budget_use(reopened, cash_as_of=CASH_AS_OF).loss_in_use == pytest.approx(
+            decision.loss_budget_used
+        )
+
+
+def test_two_connections_cannot_both_reserve_the_same_budget(path):
+    """다른 프로세스가 같은 예산을 동시에 잡으려 해도 하나만 들어간다."""
+    decision = _decision()
+    with Store.open(path, create=True) as first, Store.open(path, create=True) as second:
+        _reserve(first, "buy-1", decision)
+        with pytest.raises(sizing.LossBudgetExceeded):
+            _reserve(second, "buy-2", decision)
+        assert set(sizing.orders(second)) == {"buy-1"}
 
 
 def test_blocked_decision_cannot_be_reserved(store):
-    blocked = sizing.allowed_order(s.risk_policy(), _input(available_cash=None))
+    blocked = _decision(available_cash=None)
 
     with pytest.raises(ValueError):
         _reserve(store, "buy-1", blocked)
@@ -362,7 +495,7 @@ def test_blocked_decision_cannot_be_reserved(store):
 def _state(**overrides):
     values = {
         "trading_day": DAY,
-        "realized_pnl_today": 0.0,
+        "realized_gross_pnl_today": 0.0,
         "unrealized_pnl": 0.0,
         "costs_today": 0.0,
         "equity": 10_000_000.0,
@@ -386,11 +519,27 @@ def test_healthy_account_raises_nothing():
 def test_daily_loss_halts_at_the_limit_and_counts_unrealized_loss_and_costs():
     policy = s.risk_policy()
 
-    just_under = _state(realized_pnl_today=-60_000.0, unrealized_pnl=-39_000.0, costs_today=999.0)
-    at_limit = _state(realized_pnl_today=-60_000.0, unrealized_pnl=-39_000.0, costs_today=1_000.0)
+    losses = {"realized_gross_pnl_today": -60_000.0, "unrealized_pnl": -39_000.0}
+    just_under = _state(costs_today=999.0, **losses)
+    at_limit = _state(costs_today=1_000.0, **losses)
 
     assert _kinds(policy, just_under) == ([], [])
     assert _kinds(policy, at_limit) == ([HaltKind.DAILY_LOSS], [])
+
+
+def test_costs_are_deducted_once_from_the_gross_realized_pnl():
+    """실현손익은 비용 차감 전, 비용은 따로 양수 — 순손익을 넣고 비용을 또 빼지 않는다."""
+    policy = s.risk_policy()
+    # 총손익 -98,000 + 비용 1,500 = 순손익 -99,500. 한도 100,000에 닿지 않는다.
+    as_gross = _state(realized_gross_pnl_today=-98_000.0, costs_today=1_500.0)
+    # 이미 순손익(-99,500)인 값은 비용 0으로 준다. 같은 결과여야 한다.
+    as_net = _state(realized_gross_pnl_today=-99_500.0, costs_today=0.0)
+    negative_cost = _state(realized_gross_pnl_today=-98_000.0, costs_today=-1_500.0)
+
+    assert _kinds(policy, as_gross) == ([], [])
+    assert _kinds(policy, as_net) == ([], [])
+    # 부호가 뒤집힌 비용을 절댓값으로 고쳐 쓰지 않는다.
+    assert _kinds(policy, negative_cost) == ([], ["COSTS_TODAY_NEGATIVE"])
 
 
 def test_drawdown_halts_at_the_limit_including_open_loss():
@@ -585,7 +734,7 @@ def test_drawdown_and_critical_halts_need_reconciliation_and_a_recorded_decision
 def test_halt_history_cannot_be_edited_or_deleted(path):
     with Store.open(path, create=True) as store:
         _halt(store, HaltKind.DRAWDOWN)
-        _reserve(store, "buy-1", sizing.allowed_order(s.risk_policy(), _input()))
+        _reserve(store, "buy-1", _decision())
 
     conn = sqlite3.connect(str(path))
     try:
@@ -601,7 +750,7 @@ def test_halt_history_cannot_be_edited_or_deleted(path):
         conn.close()
     assert risk_halt.halt_finding(str(path)).verdict is Verdict.FAIL
     with Store.open(path) as reopened:
-        assert set(sizing.active_reservations(reopened)) == {"buy-1"}
+        assert not sizing.orders(reopened)["buy-1"].settled
 
 
 def test_unknown_halt_state_is_not_treated_as_not_halted(tmp_path, path):

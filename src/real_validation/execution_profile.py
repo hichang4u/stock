@@ -7,6 +7,11 @@
 재생 비교는 '공통 판단 로직 + 모드별 어댑터' 구조를 전제로 한다. 판단 함수가 어댑터에서
 받은 값으로 결론을 바꾸면 그 차이가 그대로 불일치로 드러난다. 환경 차이(지연·호출 한도·
 체결 서버)는 재생으로 증명되지 않으므로 실측 표본으로 따로 판정한다.
+
+**이 재생기는 아직 실제 판단부에 연결돼 있지 않다.** `f3_entry`의 선정·락업·재검증·주문
+판단은 I/O와 섞여 있어 `decide`로 넘길 수 없다. 지금 검증된 것은 비교 절차뿐이고, 여기서
+`matched=True`가 나와도 운영 경로의 PAPER·REAL 동일성이 검증된 것이 아니다. 실제 판단부를
+연결한 재생 결과가 아니면 경로 동일성 증거로 기록하지 않는다(`replay`의 `decision_source`).
 """
 
 from __future__ import annotations
@@ -32,6 +37,16 @@ REGISTRATION_KIND = "EXECUTION_PARITY"
 ROUTES = ("LEGACY", "FAST")
 MODES = ("PAPER", "REAL")
 STAGES = ("select_to_send", "send_to_ack", "ack_to_fill")
+
+# 재생에 쓴 판단 함수의 출처. 운영 판단부를 그대로 건 재생만 경로 동일성 증거가 된다.
+DECISION_SOURCE_PRODUCTION = "PRODUCTION_DECISION_LOGIC"
+DECISION_SOURCE_PARTIAL = "PARTIAL_PURE_FUNCTIONS"
+DECISION_SOURCE_SYNTHETIC = "SYNTHETIC"
+DECISION_SOURCES = (
+    DECISION_SOURCE_PRODUCTION,
+    DECISION_SOURCE_PARTIAL,
+    DECISION_SOURCE_SYNTHETIC,
+)
 
 # 설계 §3.1이 프로필 해시에 넣으라고 한 항목. 값의 형식은 경로 확정 뒤 정한다 —
 # 여기서는 '비어 있지 않다'만 요구한다.
@@ -140,18 +155,27 @@ def replay(
     inputs: Sequence[Mapping[str, Any]],
     decide: Callable[[Mapping[str, Any], Any], OrderIntent],
     adapters: Mapping[str, Any],
+    *,
+    decision_source: str,
 ) -> dict[str, Any]:
     """같은 입력을 두 모드 어댑터로 재생해 주문 의도를 비교한다.
 
     `decide(input, adapter)`가 공통 판단 로직이다. 입력은 재생 가능한 값(JSON)이어야 하며
     그 해시를 결과에 남겨 어떤 입력으로 비교했는지 추적한다.
+
+    `decision_source`는 `decide`가 무엇인지 호출자가 밝히는 표시다. 운영 판단부를 그대로
+    건 경우에만 `DECISION_SOURCE_PRODUCTION`을 쓴다. 일부 순수 함수만 건 재생이나 합성
+    함수의 재생은 일치하더라도 `evaluate_parity`가 경로 동일성 증거로 받지 않는다.
     """
     if set(adapters) != set(MODES):
         raise ValueError("replay needs exactly the PAPER and REAL adapters")
+    if decision_source not in DECISION_SOURCES:
+        raise ValueError(f"unknown decision_source: {decision_source!r}")
     frozen = [dict(item) for item in inputs]
     intents = {mode: [decide(item, adapters[mode]) for item in frozen] for mode in MODES}
     mismatches = compare_intents(intents["PAPER"], intents["REAL"])
     return {
+        "decision_source": decision_source,
         "inputs": len(frozen),
         "inputs_hash": canonical_hash(frozen),
         "mismatches": mismatches,
@@ -264,7 +288,14 @@ def judge_parity(
     if registered is None or registered["kind"] != REGISTRATION_KIND:
         return not_evaluated("PARITY_CONTRACT_NOT_REGISTERED")
     contract = ParityContract.from_dict(registered["spec"])
-    if refs.experiment_id != experiment_id or refs.execution_profile_id != profile.profile_id():
+    bound = (
+        refs.experiment_id == experiment_id
+        and refs.execution_profile_id == profile.profile_id()
+        and refs.spec_hash == registered["spec_hash"] == contract.contract_hash()
+        and refs.rules_code_hash == evidence.rules_code_hash(evidence.KIND_EXECUTION_PARITY)
+        and refs.evaluation_rule_version == evidence.EVALUATION_RULE_VERSION
+    )
+    if not bound:
         return not_evaluated("REFS_DIFFER_FROM_REGISTERED_CONTRACT")
     finding = evaluate_parity(profile, contract, observed)
     if finding.verdict in (Verdict.PASS, Verdict.FAIL, Verdict.INSUFFICIENT):
@@ -272,25 +303,36 @@ def judge_parity(
         if evaluated is None:
             raise ValueError("evaluated_at must be an offset-aware ISO timestamp")
         expires = evaluated + timedelta(days=int(contract.revalidation_days or 0))
+        inputs = observation_inputs(observed)
         evidence.record(
             store,
             kind=evidence.KIND_EXECUTION_PARITY,
             finding=finding,
             refs=refs,
-            data_hash=canonical_hash(
-                {
-                    "replay": observed.replay,
-                    "latency_ms": {
-                        mode: {stage: list(values) for stage, values in stages.items()}
-                        for mode, stages in observed.latency_ms.items()
-                    },
-                    "observation_started_at": observed.observation_started_at,
-                }
-            ),
+            data_hash=canonical_hash(inputs),
             evaluated_at=evaluated_at,
             expires_at=expires.isoformat(),
+            inputs=inputs,
         )
     return finding
+
+
+def observation_inputs(observed: ParityObservations) -> dict[str, Any]:
+    """판정에 쓴 관측 원본. 증거에 그대로 남겨 나중에 대조할 수 있게 한다."""
+    return {
+        "observation_started_at": observed.observation_started_at,
+        "replay": observed.replay,
+        "latency_ms": {
+            mode: {stage: [float(v) for v in values] for stage, values in stages.items()}
+            for mode, stages in observed.latency_ms.items()
+        },
+        "readonly_check_passed": observed.readonly_check_passed,
+        "smoke_reconciled": observed.smoke_reconciled,
+        "profitability_with_real_latency_passed": (
+            observed.profitability_with_real_latency_passed
+        ),
+        "unexplained_differences": list(observed.unexplained_differences),
+    }
 
 
 def evaluate_parity(
@@ -339,6 +381,9 @@ def evaluate_parity(
     else:
         if replay_report.get("mismatches"):
             failures.append("REPLAY_INTENT_MISMATCH")
+        if replay_report.get("decision_source") != DECISION_SOURCE_PRODUCTION:
+            # 운영 판단부를 걸지 않은 재생은 일치해도 경로 동일성을 말해 주지 않는다.
+            shortfalls.append("REPLAY_NOT_ON_PRODUCTION_DECISION_LOGIC")
         if int(replay_report.get("inputs") or 0) < int(contract.min_replay_inputs or 0):
             shortfalls.append("REPLAY_INPUTS_BELOW_MINIMUM")
 

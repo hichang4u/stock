@@ -204,11 +204,17 @@ def halt_finding(store_path: str | None) -> Finding:
 
 @dataclass(frozen=True)
 class AccountRiskState:
-    """한도 판단에 쓰는 계좌 상태. 손익은 원, 손실은 음수다."""
+    """한도 판단에 쓰는 계좌 상태. 손익은 원, 손실은 음수다.
+
+    실현손익은 **비용 차감 전**이고 비용은 따로 양수로 준다(`trades.pnl_amount`가 수수료
+    제외 계산인 것과 같은 기준). 이미 비용을 뺀 순손익을 넣고 비용을 또 주면 두 번 빠진다
+    — 그래서 필드 이름에 gross를 박았고, 순손익만 있으면 `costs_today=0`으로 준다.
+    """
 
     trading_day: str
-    realized_pnl_today: float
+    realized_gross_pnl_today: float
     unrealized_pnl: float
+    # 오늘 발생한 수수료·세금 합(양수). 위 실현손익에 들어 있지 않은 것만.
     costs_today: float
     # 보유 중 평가손익을 포함한 현재 자산.
     equity: float
@@ -248,7 +254,7 @@ def evaluate_limits(
     halts: list[tuple[HaltKind, str]] = []
     blocks: list[str] = []
     numbers = (
-        state.realized_pnl_today,
+        state.realized_gross_pnl_today,
         state.unrealized_pnl,
         state.costs_today,
         state.equity,
@@ -256,13 +262,16 @@ def evaluate_limits(
     )
     if any(finite_number(value) is None for value in numbers):
         return [], ["ACCOUNT_RISK_STATE_UNKNOWN"]
+    if state.costs_today < 0:
+        # 부호가 뒤집힌 비용을 절댓값으로 고쳐 쓰지 않는다. 입력이 무엇인지 모르는 것이다.
+        return [], ["COSTS_TODAY_NEGATIVE"]
 
     if state.order_state_unknown:
         halts.append((HaltKind.ORDER_STATE_UNKNOWN, "unconfirmed order state"))
 
     daily_limit = policy.daily_loss_limit()
     assert daily_limit is not None
-    day_pnl = state.realized_pnl_today + state.unrealized_pnl - abs(state.costs_today)
+    day_pnl = state.realized_gross_pnl_today + state.unrealized_pnl - state.costs_today
     if -day_pnl >= daily_limit:
         halts.append((HaltKind.DAILY_LOSS, f"day pnl {day_pnl:.0f} <= -{daily_limit:.0f}"))
 

@@ -17,7 +17,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+# 2: 증거에 입력 원본·해시 사슬 추가, 예약 장부를 주문 수명주기 이벤트로 확장.
+SCHEMA_VERSION = 2
 
 _TABLES = ("registrations", "evidence", "halt_events", "reservation_events")
 
@@ -46,7 +47,10 @@ CREATE TABLE IF NOT EXISTS evidence (
     evaluated_at TEXT NOT NULL,
     expires_at   TEXT,
     reasons_json TEXT NOT NULL,
-    detail_json  TEXT NOT NULL
+    detail_json  TEXT NOT NULL,
+    inputs_json  TEXT,
+    prev_hash    TEXT NOT NULL,
+    row_hash     TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS halt_events (
@@ -63,14 +67,18 @@ CREATE TABLE IF NOT EXISTS halt_events (
 
 CREATE TABLE IF NOT EXISTS reservation_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    event           TEXT NOT NULL CHECK (event IN ('RESERVE','RELEASE')),
+    event           TEXT NOT NULL CHECK (event IN (
+                        'RESERVE','ACK','FILL','RELEASE','CLOSE'
+                    )),
     client_order_id TEXT NOT NULL,
     amount          REAL NOT NULL,
     loss_budget     REAL NOT NULL,
     reason          TEXT NOT NULL,
-    at              TEXT NOT NULL,
-    UNIQUE (client_order_id, event)
+    at              TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_reservation_events_order
+    ON reservation_events(client_order_id);
 """
 
 
@@ -108,14 +116,19 @@ class Store:
         try:
             if create:
                 target.parent.mkdir(parents=True, exist_ok=True)
+                existed = target.is_file() and target.stat().st_size > 0
                 conn = sqlite3.connect(str(target), isolation_level=None)
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA synchronous = FULL")
-                conn.executescript(_SCHEMA + _immutability_triggers())
-                conn.execute(
-                    "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
-                    (str(SCHEMA_VERSION),),
-                )
+                if existed:
+                    # 다른 버전의 저장소에 새 테이블을 덧씌우지 않는다. 먼저 확인하고 멈춘다.
+                    cls(conn, read_only=False)._check_schema()
+                else:
+                    conn.executescript(_SCHEMA + _immutability_triggers())
+                    conn.execute(
+                        "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
+                        (str(SCHEMA_VERSION),),
+                    )
             else:
                 if not target.is_file():
                     raise StoreUnavailable(f"store not found: {target}")
@@ -130,11 +143,16 @@ class Store:
             raise StoreUnavailable(f"store unreadable: {exc!r}") from exc
 
     def _check_schema(self) -> None:
-        row = self._conn.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+        except sqlite3.Error:
+            self._conn.close()
+            raise
         if row is None or str(row["value"]) != str(SCHEMA_VERSION):
             found = None if row is None else row["value"]
+            self._conn.close()
             raise StoreUnavailable(f"unexpected store schema_version: {found!r}")
 
     def close(self) -> None:
@@ -189,8 +207,8 @@ class Store:
         cur = self._conn.execute(
             """INSERT INTO evidence
                    (kind, verdict, refs_json, data_hash, evaluated_at, expires_at,
-                    reasons_json, detail_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    reasons_json, detail_json, inputs_json, prev_hash, row_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record["kind"],
                 record["verdict"],
@@ -200,17 +218,26 @@ class Store:
                 record.get("expires_at"),
                 _dump(list(record.get("reasons") or [])),
                 _dump(record.get("detail") or {}),
+                None if record.get("inputs") is None else _dump(record["inputs"]),
+                record["prev_hash"],
+                record["row_hash"],
             ),
         )
         return int(cur.lastrowid or 0)
 
-    def evidence(self, kind: str) -> list[dict[str, Any]]:
-        """기록 순서 그대로. 마지막 행이 그 종류의 현재 증거다."""
-        rows = self._rows("SELECT * FROM evidence WHERE kind=? ORDER BY id", (kind,))
-        return [
-            _decode(row, refs_json="refs", reasons_json="reasons", detail_json="detail")
-            for row in rows
-        ]
+    def evidence(self, kind: str | None = None) -> list[dict[str, Any]]:
+        """기록 순서 그대로. 종류를 주면 그 종류만, 마지막 행이 그 종류의 현재 증거다."""
+        if kind is None:
+            rows = self._rows("SELECT * FROM evidence ORDER BY id")
+        else:
+            rows = self._rows("SELECT * FROM evidence WHERE kind=? ORDER BY id", (kind,))
+        decoded = []
+        for row in rows:
+            inputs = row.pop("inputs_json")
+            item = _decode(row, refs_json="refs", reasons_json="reasons", detail_json="detail")
+            item["inputs"] = None if inputs is None else json.loads(inputs)
+            decoded.append(item)
+        return decoded
 
     # ── 위험 중단 ─────────────────────────────────────────────────────
 

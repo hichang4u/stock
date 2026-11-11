@@ -156,20 +156,29 @@ def contract(current_profile: ExecutionProfile | None = None, **overrides: Any) 
 def refs(
     experiment_id: str,
     *,
+    kind: str = evidence.KIND_PROFITABILITY,
+    spec_hash: str | None = None,
     fingerprint: str = FINGERPRINT,
     current_profile: ExecutionProfile | None = None,
     policy: RiskPolicy | None = None,
 ) -> evidence.EvidenceRefs:
     current_profile = current_profile or profile()
+    if spec_hash is None:
+        if kind == evidence.KIND_PROFITABILITY:
+            spec_hash = spec().spec_hash()
+        else:
+            spec_hash = contract(current_profile).contract_hash()
     return evidence.EvidenceRefs(
         strategy_fingerprint=fingerprint,
         experiment_id=experiment_id,
+        spec_hash=spec_hash,
         execution_profile_id=current_profile.profile_id(),
         execution_profile_hash=current_profile.profile_hash(),
         cost_policy_hash=research_scenario_policy().policy_hash(),
         fill_model_hash=canonical_hash(FILL_MODEL),
         risk_policy_hash=(policy or risk_policy()).policy_hash(),
         evaluation_rule_version=evidence.EVALUATION_RULE_VERSION,
+        rules_code_hash=evidence.rules_code_hash(kind),
     )
 
 
@@ -211,12 +220,14 @@ def passing_directory(directory: Path, *, evaluated_day: str | None = None) -> s
         )
         assert finding.verdict is Verdict.PASS, finding.reasons
         parity_id = execution_profile.register_contract(store, contract())
+        parity_inputs = {"synthetic": "parity observations"}
         evidence.record(
             store,
             kind=evidence.KIND_EXECUTION_PARITY,
             finding=Finding(Verdict.PASS),
-            refs=refs(parity_id),
-            data_hash="synthetic-parity-data",
+            refs=refs(parity_id, kind=evidence.KIND_EXECUTION_PARITY),
+            data_hash=canonical_hash(parity_inputs),
+            inputs=parity_inputs,
             evaluated_at=evaluated_at,
             expires_at=(datetime.fromisoformat(evaluated_at) + timedelta(days=30)).isoformat(),
         )

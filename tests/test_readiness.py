@@ -161,6 +161,31 @@ async def test_real_opens_only_when_all_six_conditions_pass(mem, monkeypatch, tm
     assert full["eligible_for_real"] is True
 
 
+def test_readiness_fallback_names_the_same_six_conditions_as_the_gate():
+    assert readiness.REAL_GATE_COMPONENTS == real_gate.COMPONENTS
+
+
+async def test_broken_gate_package_blocks_real_without_breaking_readiness(mem, monkeypatch):
+    """게이트 쪽 결함은 REAL을 막을 뿐, 준비도 계산(과 PAPER 기동)을 죽이지 않는다."""
+    _safe_env(monkeypatch)
+    await _twenty_clean_trades()
+
+    def boom(**_kwargs):
+        raise RuntimeError("gate package is broken")
+
+    monkeypatch.setattr(real_gate, "evaluate_from_environment", boom)
+
+    report = await readiness.calculate()
+
+    assert report["percent"] == 100
+    assert report["operational_ready"] is True
+    assert report["eligible_for_real"] is False
+    assert report["real_gate"]["components"]["operational_ready"]["passed"] is True
+    assert report["blockers"] == [
+        f"{name}=NOT_EVALUATED: REAL_GATE_UNAVAILABLE" for name in real_gate.COMPONENTS[1:]
+    ]
+
+
 async def test_gate_failure_inside_readiness_blocks_instead_of_raising(mem, monkeypatch, tmp_path):
     _safe_env(monkeypatch)
     (tmp_path / "risk_policy.json").write_bytes(b"{broken")

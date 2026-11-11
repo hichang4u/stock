@@ -12,6 +12,9 @@ import pytest
 from src.real_validation import evidence, execution_profile
 from src.real_validation.core import Verdict
 from src.real_validation.execution_profile import (
+    DECISION_SOURCE_PARTIAL,
+    DECISION_SOURCE_PRODUCTION,
+    DECISION_SOURCE_SYNTHETIC,
     MODES,
     STAGES,
     ExecutionProfile,
@@ -154,18 +157,30 @@ def _mode_dependent_decision(item, adapter):
     )
 
 
+def _replay(decide, source=DECISION_SOURCE_SYNTHETIC, adapters=None):
+    return execution_profile.replay(
+        INPUTS, decide, ADAPTERS if adapters is None else adapters, decision_source=source
+    )
+
+
 def test_replay_of_shared_logic_matches_across_mode_adapters():
-    report = execution_profile.replay(INPUTS, _shared_decision, ADAPTERS)
+    report = _replay(_shared_decision)
 
     assert report["matched"] is True
     assert report["inputs"] == 3
-    assert report["inputs_hash"] == execution_profile.replay(
-        INPUTS, _shared_decision, ADAPTERS
-    )["inputs_hash"]
+    assert report["decision_source"] == DECISION_SOURCE_SYNTHETIC
+    assert report["inputs_hash"] == _replay(_shared_decision)["inputs_hash"]
+
+
+def test_replay_must_say_what_decision_logic_it_ran():
+    with pytest.raises(TypeError):
+        execution_profile.replay(INPUTS, _shared_decision, ADAPTERS)
+    with pytest.raises(ValueError):
+        _replay(_shared_decision, source="TRUST_ME")
 
 
 def test_replay_exposes_a_decision_that_depends_on_the_mode():
-    report = execution_profile.replay(INPUTS, _mode_dependent_decision, ADAPTERS)
+    report = _replay(_mode_dependent_decision)
 
     assert report["matched"] is False
     assert {(m["input_id"], m["field"]) for m in report["mismatches"]} == {
@@ -175,7 +190,7 @@ def test_replay_exposes_a_decision_that_depends_on_the_mode():
 
 def test_replay_needs_both_mode_adapters():
     with pytest.raises(ValueError):
-        execution_profile.replay(INPUTS, _shared_decision, {"PAPER": {}})
+        _replay(_shared_decision, adapters={"PAPER": {}})
 
 
 # ── 지연 요약 ────────────────────────────────────────────────────────
@@ -206,7 +221,8 @@ def _latency(real_p95_extra=0.0, n=5):
 def _observed(**overrides):
     values = {
         "observation_started_at": OBSERVED_FROM,
-        "replay": execution_profile.replay(INPUTS, _shared_decision, ADAPTERS),
+        # 판정 절차를 시험하려고 운영 판단부 재생이라고 **가정**한 합성 결과다.
+        "replay": _replay(_shared_decision, DECISION_SOURCE_PRODUCTION),
         "latency_ms": _latency(),
         "readonly_check_passed": True,
         "smoke_reconciled": True,
@@ -262,8 +278,17 @@ def test_tolerances_registered_after_observation_started_do_not_count():
     )
 
 
+@pytest.mark.parametrize("source", [DECISION_SOURCE_SYNTHETIC, DECISION_SOURCE_PARTIAL])
+def test_matching_replay_that_did_not_run_the_production_logic_is_not_parity(source):
+    """재생기는 아직 실제 판단부에 연결돼 있지 않다. 일치해도 경로 동일성 증거가 아니다."""
+    finding = _parity(_observed(replay=_replay(_shared_decision, source)))
+
+    assert finding.verdict is Verdict.INSUFFICIENT
+    assert finding.reasons == ("REPLAY_NOT_ON_PRODUCTION_DECISION_LOGIC",)
+
+
 def test_intent_mismatch_fails():
-    mismatched = execution_profile.replay(INPUTS, _mode_dependent_decision, ADAPTERS)
+    mismatched = _replay(_mode_dependent_decision, DECISION_SOURCE_PRODUCTION)
 
     finding = _parity(_observed(replay=mismatched))
 
@@ -329,19 +354,22 @@ def test_parity_verdict_is_recorded_with_the_revalidation_period_as_expiry(tmp_p
         with pytest.raises(ValueError):
             execution_profile.register_contract(store, ParityContract())
 
+        parity_refs = s.refs(experiment_id, kind=evidence.KIND_EXECUTION_PARITY)
         finding = execution_profile.judge_parity(
             store, current, experiment_id, _observed(),
-            refs=s.refs(experiment_id), evaluated_at=s.ts("20270201"),
+            refs=parity_refs, evaluated_at=s.ts("20270201"),
         )
         rows = store.evidence(evidence.KIND_EXECUTION_PARITY)
 
         assert finding.verdict is Verdict.PASS
         assert [row["verdict"] for row in rows] == ["PASS"]
         assert rows[0]["expires_at"] == "2027-03-03T16:00:00+09:00"
+        assert rows[0]["inputs"]["replay"]["decision_source"] == DECISION_SOURCE_PRODUCTION
+        assert rows[0]["inputs"]["latency_ms"]["REAL"]["send_to_ack"] == [100.0] * 5
         with pytest.raises(evidence.DuplicateVerdictError):
             execution_profile.judge_parity(
                 store, current, experiment_id, _observed(),
-                refs=s.refs(experiment_id), evaluated_at=s.ts("20270202"),
+                refs=parity_refs, evaluated_at=s.ts("20270202"),
             )
 
 
@@ -349,15 +377,23 @@ def test_parity_is_not_judged_for_an_unregistered_contract_or_another_route(tmp_
     with Store.open(tmp_path / "gate.db", create=True) as store:
         experiment_id = execution_profile.register_contract(store, s.contract())
 
+        parity_refs = s.refs(experiment_id, kind=evidence.KIND_EXECUTION_PARITY)
         unregistered = execution_profile.judge_parity(
             store, s.profile(), "parity-unknown", _observed(),
-            refs=s.refs("parity-unknown"), evaluated_at=s.ts("20270201"),
+            refs=s.refs("parity-unknown", kind=evidence.KIND_EXECUTION_PARITY),
+            evaluated_at=s.ts("20270201"),
         )
         other_route = execution_profile.judge_parity(
             store, s.profile("FAST"), experiment_id, _observed(),
-            refs=s.refs(experiment_id), evaluated_at=s.ts("20270201"),
+            refs=parity_refs, evaluated_at=s.ts("20270201"),
+        )
+        other_contract = execution_profile.judge_parity(
+            store, s.profile(), experiment_id, _observed(),
+            refs=dataclasses.replace(parity_refs, spec_hash="0" * 64),
+            evaluated_at=s.ts("20270201"),
         )
 
         assert unregistered.reasons == ("PARITY_CONTRACT_NOT_REGISTERED",)
         assert other_route.reasons == ("REFS_DIFFER_FROM_REGISTERED_CONTRACT",)
+        assert other_contract.reasons == ("REFS_DIFFER_FROM_REGISTERED_CONTRACT",)
         assert store.evidence(evidence.KIND_EXECUTION_PARITY) == []

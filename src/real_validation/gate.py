@@ -143,11 +143,11 @@ def _risk_policy(directory: Path) -> tuple[Finding, str | None]:
 
 def _current_registration(
     store: Store, kind: str, matches: Callable[[dict[str, Any]], bool]
-) -> str | None:
-    """현재 버전에 묶인 가장 최근 등록의 실험 id. 없으면 None(미정)."""
+) -> dict[str, Any] | None:
+    """현재 버전에 묶인 가장 최근 등록. 없으면 None(미정)."""
     for row in reversed(store.registrations(kind)):
         if matches(row["spec"]):
-            return str(row["experiment_id"])
+            return row
     return None
 
 
@@ -224,7 +224,7 @@ def evaluate_from_environment(
             def bound_profit(spec: dict[str, Any]) -> bool:
                 return bound(spec) and spec.get("strategy_fingerprint") == strategy_fingerprint
 
-            experiments = {
+            registrations = {
                 evidence.KIND_PROFITABILITY: _current_registration(
                     store, profitability.REGISTRATION_KIND, bound_profit
                 ),
@@ -234,20 +234,33 @@ def evaluate_from_environment(
             }
             current: dict[str, Finding] = {}
             verdicts: dict[str, Finding] = {}
-            for kind, experiment_id in experiments.items():
+            for kind, registration in registrations.items():
                 row = evidence.latest(store, kind)
                 verdicts[kind] = evidence.verdict_of(row)
                 expected = evidence.EvidenceRefs(
                     strategy_fingerprint=strategy_fingerprint,
-                    experiment_id=experiment_id,
+                    experiment_id=None if registration is None else registration["experiment_id"],
+                    spec_hash=None if registration is None else registration["spec_hash"],
                     execution_profile_id=profile_id,
                     execution_profile_hash=profile_hash,
                     cost_policy_hash=cost_hash,
                     fill_model_hash=fill_hash,
                     risk_policy_hash=risk_hash,
                     evaluation_rule_version=evidence.EVALUATION_RULE_VERSION,
+                    rules_code_hash=evidence.rules_code_hash(kind),
                 )
                 current[kind] = evidence.check_current(row, expected, now)
+                if current[kind].passed:
+                    # 참조 문자열만 맞춘 행이 아닌지: 잠긴 등록·입력 원본·판정일과 대조한다.
+                    not_before = None
+                    if kind == evidence.KIND_PROFITABILITY and registration is not None:
+                        not_before = registration["spec"].get("judgment_date")
+                    current[kind] = evidence.check_binding(
+                        row, registration, not_before=not_before
+                    )
+            chain_problems = evidence.verify_chain(store)
+            if chain_problems:
+                current["CHAIN"] = Finding(Verdict.FAIL, tuple(chain_problems))
         return (
             verdicts[evidence.KIND_PROFITABILITY],
             verdicts[evidence.KIND_EXECUTION_PARITY],

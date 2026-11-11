@@ -34,6 +34,8 @@ def test_real_compatible_quote_freshness_cannot_be_applied_to_paper_today():
 def test_same_quote_age_gives_a_different_entry_decision_per_mode():
     report = execution_mode_diff.quote_freshness_replay(500)
 
+    # 신선도 비교 한 줄만 건 부분 재생이다. 운영 판단부 재생으로 표시되지 않는다.
+    assert report["decision_source"] == "PARTIAL_PURE_FUNCTIONS"
     assert report["matched"] is False
     disagreeing = {
         m["input_id"] for m in report["mismatches"] if m["field"] == "entry_allowed"

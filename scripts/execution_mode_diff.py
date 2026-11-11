@@ -85,7 +85,13 @@ def quote_freshness_replay(configured_ms: int = 500) -> dict[str, Any]:
         for age in QUOTE_AGES_MS
     ]
     adapters = {mode: {"mode": mode} for mode in MODES}
-    return execution_profile.replay(inputs, _quote_freshness_decision, adapters)
+    # 운영 판단부 전체가 아니라 신선도 비교 한 줄만 건 재생이다.
+    return execution_profile.replay(
+        inputs,
+        _quote_freshness_decision,
+        adapters,
+        decision_source=execution_profile.DECISION_SOURCE_PARTIAL,
+    )
 
 
 def main() -> None:

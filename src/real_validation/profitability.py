@@ -10,11 +10,17 @@
 - 입력 손익은 실제 체결 순손익(`ACTUAL_FILL_NET`)만 받는다. 슬리피지를 한 번 더 뺀
   conservative 수치를 넣으면 거부한다. 불리 시나리오는 여기서 조정폭을 한 번만 얹는다.
 
-규칙 버전 1의 고정 절차(바꾸면 `evidence.EVALUATION_RULE_VERSION`을 올린다):
-- 블록 bootstrap은 거래일(무거래일 포함) 달력 위의 원형 블록 재표집이다.
-- 신뢰구간 하한은 재표집 평균의 nearest-rank 분위수다. 표본이 빈 재표집은 평균 0으로 센다.
-- 불리 시나리오에서도 평균과 MDD·CVaR·연속손실 한도를 모두 요구한다(더 엄격한 해석).
+규칙 버전 2의 고정 절차(근거는 docs/REAL_VALIDATION_PREPARATION.md 4절):
+- 블록 bootstrap은 거래일(무거래일 포함) 달력 위의 원형 블록 재표집이다. 통계량은
+  재표집된 날들의 거래 손익률 합 ÷ 거래 수(비율 추정량)다.
+- 신뢰구간 하한은 재표집 평균의 nearest-rank 분위수(percentile 방식)다.
+- 거래가 하나도 없는 재표집은 평균이 정의되지 않는다. 값을 지어내지 않고 **모든 값보다
+  아래**에 둔다 — 그 재표집이 무엇이었든 성립하는 하한이다. 분위수 자체가 그 구간에
+  떨어지면 하한을 낼 수 없으므로 `INSUFFICIENT`다.
+- 불리 시나리오에서도 평균과 MDD·CVaR·연속손실 한도를 모두 요구한다.
 - 한도는 '이내'가 통과다(값 == 한도는 통과). 양수 조건은 0 초과다(0은 실패).
+- 입력 결함(달력 누락, 손익률·금액 불일치)과 미해결 포지션은 최종 판정이 아니라 판정
+  보류(`NOT_EVALUATED`)다. 통계를 내지 않으므로 고친 뒤 다시 판정해도 엿보기가 아니다.
 """
 
 from __future__ import annotations
@@ -254,16 +260,20 @@ def _mean(values: Sequence[float]) -> float:
 
 def _block_bootstrap_lower(
     per_day: Sequence[Sequence[float]], *, block: int, resamples: int, seed: int, alpha: float
-) -> float:
-    """거래일 원형 블록 bootstrap의 평균 하한(nearest-rank).
+) -> tuple[float | None, int]:
+    """(거래일 원형 블록 bootstrap의 평균 하한, 거래가 없던 재표집 수).
 
     난수는 `random.Random(seed).random()`만 쓴다 — 파이썬이 시드 재현을 보장하는
     유일한 메서드라 버전이 바뀌어도 같은 재표집이 나온다.
+
+    거래가 없는 재표집은 평균이 없다. 가장 낮은 순위를 차지한 것으로 세고, 하한 순위가
+    그 안에 들면 하한은 None이다.
     """
     n_days = len(per_day)
     rng = random.Random(seed)
     n_blocks = math.ceil(n_days / block)
     means: list[float] = []
+    empty = 0
     for _ in range(resamples):
         total = 0.0
         count = 0
@@ -277,10 +287,15 @@ def _block_bootstrap_lower(
                 total += sum(day)
                 count += len(day)
                 taken += 1
-        means.append(total / count if count else 0.0)
+        if count:
+            means.append(total / count)
+        else:
+            empty += 1
     means.sort()
     rank = max(1, math.ceil(alpha * resamples))
-    return means[rank - 1]
+    if rank <= empty:
+        return None, empty
+    return means[rank - empty - 1], empty
 
 
 def _drawdown_pct(capital: float, daily_pnl: Sequence[float]) -> float:
@@ -394,12 +409,7 @@ def evaluate(
         # 판정일 전에는 수익 통계를 내지 않는다.
         return Finding(Verdict.COLLECTING, ("BEFORE_JUDGMENT_DATE",), progress), None
 
-    data_hash = canonical_hash(
-        {
-            "days": [asdict(d) for d in window_days],
-            "trades": [asdict(t) for t in window_trades],
-        }
-    )
+    data_hash = canonical_hash(window_inputs(spec, days, trades))
     progress["ignored_after_judgment"] = ignored_after
 
     dates = [d.date for d in window_days]
@@ -416,9 +426,8 @@ def evaluate(
         if day.date in traded and day.no_trade_reason:
             calendar_problems.append("TRADE_DAY_MARKED_NO_TRADE")
     if calendar_problems:
-        return Finding(Verdict.INSUFFICIENT, tuple(sorted(set(calendar_problems))), progress), (
-            data_hash
-        )
+        # 입력을 고치면 되는 문제다. 실험을 태우는 최종 판정으로 남기지 않는다.
+        return not_evaluated(*sorted(set(calendar_problems)), **progress), None
 
     unresolved = [
         t for t in window_trades
@@ -427,8 +436,16 @@ def evaluate(
         or (t.invested_amount > 0 and finite_number(t.net_pnl_pct) is None)
     ]
     if unresolved:
+        # 손실이 확정되지 않은 포지션을 빼고 판정하지도, 실험을 끝내 버리지도 않는다.
+        # 확정된 뒤 판정일 기준 자료로 판정한다.
         progress["unresolved_trades"] = len(unresolved)
-        return Finding(Verdict.INSUFFICIENT, ("UNRESOLVED_POSITION_OR_PNL",), progress), data_hash
+        return not_evaluated("UNRESOLVED_POSITION_OR_PNL", **progress), None
+    inconsistent = [t for t in window_trades if not _pct_matches_amount(t)]
+    if inconsistent:
+        # 손익률과 금액의 기준이 다르면(예: 비용 차감 전 %와 차감 후 금액) 어느 쪽이
+        # 맞는지 알 수 없다.
+        progress["inconsistent_trades"] = len(inconsistent)
+        return not_evaluated("PNL_PCT_AND_AMOUNT_INCONSISTENT", **progress), None
     if len(trade_days) < int(spec.min_trade_days or 0):
         return Finding(Verdict.INSUFFICIENT, ("TRADE_DAYS_BELOW_MINIMUM",), progress), data_hash
 
@@ -439,13 +456,20 @@ def evaluate(
     for trade in window_trades:
         if trade.invested_amount > 0:
             per_day[trade.trade_date].append(float(trade.net_pnl_pct or 0.0))
-    ci_lower = _block_bootstrap_lower(
+    ci_lower, empty_resamples = _block_bootstrap_lower(
         [per_day[day] for day in dates],
         block=min(int(spec.block_length_days or 1), len(dates)),
         resamples=int(spec.n_resamples or 0),
         seed=int(spec.seed or 0),
         alpha=spec.tail_alpha(),
     )
+    progress["empty_resamples"] = empty_resamples
+    if ci_lower is None:
+        # 거래가 너무 드물어 이 블록 설계로는 하한이 정해지지 않는다.
+        return (
+            Finding(Verdict.INSUFFICIENT, ("BOOTSTRAP_LOWER_BOUND_UNDEFINED",), progress),
+            data_hash,
+        )
     ranked = sorted(
         (float(t.net_pnl_pct or 0.0) for t in window_trades if t.invested_amount > 0),
         reverse=True,
@@ -499,6 +523,32 @@ def evaluate(
     return Finding(Verdict.FAIL if failed else Verdict.PASS, failed, detail), data_hash
 
 
+def _pct_matches_amount(trade: TradeOutcome) -> bool:
+    """손익률(%)과 손익 금액이 같은 기준인지. 투입금이 없는 건은 비교할 것이 없다."""
+    if trade.invested_amount <= 0:
+        return True
+    implied = trade.invested_amount * float(trade.net_pnl_pct or 0.0) / 100
+    tolerance = max(0.5, trade.invested_amount * 1e-9)
+    return abs(float(trade.net_pnl_amount or 0.0) - implied) <= tolerance
+
+
+def window_inputs(
+    spec: ProfitabilitySpec, days: Sequence[DayRecord], trades: Sequence[TradeOutcome]
+) -> dict[str, Any]:
+    """판정에 쓰이는 자료(판정일까지). 이 값의 해시가 `data_hash`이고 증거에 원본으로 남는다."""
+    judgment = str(spec.judgment_date)
+    return {
+        "days": [
+            asdict(d) for d in sorted(days, key=lambda d: d.date) if d.date <= judgment
+        ],
+        "trades": [
+            asdict(t)
+            for t in sorted(trades, key=lambda t: t.trade_date)
+            if t.trade_date <= judgment
+        ],
+    }
+
+
 def _by_outcome(trades: Sequence[TradeOutcome]) -> dict[str, dict[str, Any]]:
     """정상·수동 청산·실패를 원인별로 공개한다. 전부 계좌 집계에 들어 있다."""
     summary: dict[str, dict[str, Any]] = {}
@@ -531,6 +581,15 @@ def _regimes(spec: ProfitabilitySpec, trades: Sequence[TradeOutcome]) -> dict[st
     return report
 
 
+_SPEC_BOUND_REFS = (
+    "experiment_id",
+    "strategy_fingerprint",
+    "execution_profile_id",
+    "cost_policy_hash",
+    "risk_policy_hash",
+)
+
+
 def judge(
     store: Store,
     experiment_id: str,
@@ -540,36 +599,38 @@ def judge(
     as_of: str,
     evaluated_at: str,
     refs: evidence.EvidenceRefs,
+    rerun_reason: str | None = None,
 ) -> Finding:
-    """잠긴 판정식으로 판정하고, 최종 판정이면 증거로 남긴다.
+    """잠긴 판정식으로 판정하고, 최종 판정이면 입력 원본과 함께 증거로 남긴다.
 
-    증거가 가리키는 버전이 잠긴 판정식과 다르면 판정하지 않는다 — 다른 전략·경로·정책의
-    표본을 이 실험의 증거로 남기지 않는다. 진행 중(`COLLECTING`)·미평가는 기록하지 않는다.
+    증거가 가리키는 버전이 잠긴 판정식·현재 판정 코드와 다르면 판정하지 않는다 — 다른
+    전략·경로·정책의 표본을 이 실험의 증거로 남기지 않는다. 진행 중(`COLLECTING`)·판정
+    보류는 기록하지 않는다.
+
+    이미 최종 판정이 있으면 통계를 다시 내 보지도 않는다. 판정 코드가 바뀐 뒤의 재판정만
+    `rerun_reason`과 함께 허용되고, 그때도 입력이 같아야 기록된다(`evidence.record`).
     """
     registered = store.registration(experiment_id)
     if registered is None or registered["kind"] != REGISTRATION_KIND:
         return not_evaluated("EXPERIMENT_NOT_REGISTERED")
     spec = ProfitabilitySpec.from_dict(registered["spec"])
-    mismatched = [
-        name
-        for name in (
-            "experiment_id",
-            "strategy_fingerprint",
-            "execution_profile_id",
-            "cost_policy_hash",
-            "risk_policy_hash",
-        )
-        if getattr(spec, name) != getattr(refs, name)
-    ]
+    current_rules = evidence.rules_code_hash(evidence.KIND_PROFITABILITY)
+    mismatched = [name for name in _SPEC_BOUND_REFS if getattr(spec, name) != getattr(refs, name)]
+    if refs.spec_hash != registered["spec_hash"] or spec.spec_hash() != registered["spec_hash"]:
+        mismatched.append("spec_hash")
+    if refs.rules_code_hash != current_rules:
+        mismatched.append("rules_code_hash")
+    if refs.evaluation_rule_version != evidence.EVALUATION_RULE_VERSION:
+        mismatched.append("evaluation_rule_version")
     if mismatched:
         return not_evaluated(*(f"REFS_DIFFER_FROM_LOCKED_SPEC_{n.upper()}" for n in mismatched))
 
-    # 이미 최종 판정이 있으면 통계를 다시 내 보지도 않는다.
-    for previous in store.evidence(evidence.KIND_PROFITABILITY):
-        final = previous["verdict"] in ("PASS", "FAIL", "INSUFFICIENT")
-        if final and previous["refs"].get("experiment_id") == experiment_id:
+    prior = evidence.last_final(store, evidence.KIND_PROFITABILITY, experiment_id)
+    if prior is not None:
+        same_rules = prior["refs"].get("rules_code_hash") == current_rules
+        if same_rules or not (rerun_reason or "").strip():
             raise evidence.DuplicateVerdictError(
-                f"{experiment_id} already judged: {previous['verdict']} (id={previous['id']})"
+                f"{experiment_id} already judged: {prior['verdict']} (id={prior['id']})"
             )
 
     finding, data_hash = evaluate(
@@ -579,6 +640,8 @@ def judge(
         evaluated = parse_aware(evaluated_at)
         if evaluated is None:
             raise ValueError("evaluated_at must be an offset-aware ISO timestamp")
+        if evaluated.astimezone(KST).strftime("%Y%m%d") < str(spec.judgment_date):
+            raise ValueError("a final verdict cannot be dated before the judgment date")
         expires = evaluated + timedelta(days=int(spec.evidence_valid_days or 0))
         evidence.record(
             store,
@@ -588,5 +651,47 @@ def judge(
             data_hash=data_hash,
             evaluated_at=evaluated_at,
             expires_at=expires.isoformat(),
+            inputs=window_inputs(spec, days, trades),
+            rerun_reason=rerun_reason,
         )
     return finding
+
+
+def audit(store: Store, evidence_id: int) -> Finding:
+    """기록된 판정을 저장된 입력 원본으로 다시 계산해 대조한다(오프라인 감사용).
+
+    재표집을 통째로 다시 돌리므로 게이트가 매번 부르지 않는다. PASS는 '지금 코드가 같은
+    입력에서 같은 판정을 낸다'는 뜻이다. 판정 코드가 그 뒤 바뀌었으면 대조할 수 없다.
+    """
+    row = next(
+        (r for r in store.evidence(evidence.KIND_PROFITABILITY) if r["id"] == evidence_id), None
+    )
+    if row is None:
+        return not_evaluated("EVIDENCE_NOT_FOUND")
+    experiment_id = str(row["refs"].get("experiment_id") or "")
+    registered = store.registration(experiment_id)
+    binding = evidence.check_binding(row, registered, not_before=None)
+    if not binding.passed or registered is None:
+        return binding
+    if row["refs"].get("rules_code_hash") != evidence.rules_code_hash(
+        evidence.KIND_PROFITABILITY
+    ):
+        return not_evaluated("RULES_CODE_CHANGED_SINCE_VERDICT")
+    spec = ProfitabilitySpec.from_dict(registered["spec"])
+    inputs = row["inputs"]
+    finding, data_hash = evaluate(
+        spec,
+        [DayRecord(**d) for d in inputs["days"]],
+        [TradeOutcome(**t) for t in inputs["trades"]],
+        as_of=str(spec.judgment_date),
+        locked_at=registered["locked_at"],
+    )
+    reasons: list[str] = []
+    if finding.verdict.value != row["verdict"]:
+        reasons.append("RECOMPUTED_VERDICT_DIFFERS")
+    if list(finding.reasons) != list(row["reasons"]):
+        reasons.append("RECOMPUTED_REASONS_DIFFER")
+    if data_hash != row["data_hash"]:
+        reasons.append("RECOMPUTED_DATA_HASH_DIFFERS")
+    detail = {"recorded": row["verdict"], "recomputed": finding.verdict.value}
+    return Finding(Verdict.FAIL if reasons else Verdict.PASS, tuple(reasons), detail)

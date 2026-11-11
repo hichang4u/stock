@@ -319,16 +319,60 @@ def test_incomplete_price_path_does_not_remove_the_trade():
     assert finding.detail["base"]["trades_in_mean"] == 60
 
 
-def test_unresolved_position_blocks_the_verdict():
+def test_unresolved_position_defers_the_verdict_without_ending_the_experiment():
+    """손실이 확정되지 않은 포지션은 빼고 판정하지도, 최종 판정으로 태우지도 않는다."""
     days, trades = s.sample(s.GOOD_PCTS)
     trades[-1] = dataclasses.replace(
         trades[-1], resolved=False, net_pnl_amount=None, net_pnl_pct=None
     )
 
-    finding, _ = _evaluate(s.spec(), days, trades)
+    finding, data_hash = _evaluate(s.spec(), days, trades)
 
-    assert finding.verdict is Verdict.INSUFFICIENT
+    assert finding.verdict is Verdict.NOT_EVALUATED
     assert finding.reasons == ("UNRESOLVED_POSITION_OR_PNL",)
+    assert finding.detail["unresolved_trades"] == 1
+    assert data_hash is None
+    assert "base" not in finding.detail
+
+
+def test_unresolved_loss_is_counted_once_it_is_known(store):
+    """보류 뒤 손실이 확정되면 그 손실을 넣어 판정한다 — 보류가 손실을 지우지 않는다."""
+    spec = s.spec()
+    profitability.register(store, spec, locked_at=s.LOCKED_AT)
+    days, trades = s.sample(s.GOOD_PCTS)
+    pending = list(trades)
+    pending[-1] = dataclasses.replace(
+        trades[-1], resolved=False, net_pnl_amount=None, net_pnl_pct=None
+    )
+    resolved = list(trades)
+    resolved[-1] = s.trade(trades[-1].trade_date, -45.0, outcome="MANUAL_CLOSE", cause="HALTED")
+    kwargs = {
+        "as_of": str(spec.judgment_date),
+        "evaluated_at": s.ts(s.next_weekday(str(spec.judgment_date))),
+        "refs": s.refs(str(spec.experiment_id)),
+    }
+
+    deferred = profitability.judge(store, str(spec.experiment_id), days, pending, **kwargs)
+    assert deferred.verdict is Verdict.NOT_EVALUATED
+    assert store.evidence(evidence.KIND_PROFITABILITY) == []
+
+    final = profitability.judge(store, str(spec.experiment_id), days, resolved, **kwargs)
+    assert final.verdict is Verdict.FAIL
+    assert "ACCOUNT_NET_NOT_POSITIVE" in final.reasons
+    assert final.detail["by_outcome"]["MANUAL_CLOSE:HALTED"]["net_amount"] == -450_000.0
+
+
+def test_pct_and_amount_on_different_bases_are_refused():
+    """비용 차감 전 손익률과 차감 후 금액을 섞으면 평균만 부풀려진다."""
+    days, trades = s.sample(s.GOOD_PCTS)
+    trades[3] = dataclasses.replace(trades[3], net_pnl_pct=trades[3].net_pnl_pct + 0.18)
+
+    finding, data_hash = _evaluate(s.spec(), days, trades)
+
+    assert finding.verdict is Verdict.NOT_EVALUATED
+    assert finding.reasons == ("PNL_PCT_AND_AMOUNT_INCONSISTENT",)
+    assert finding.detail["inconsistent_trades"] == 1
+    assert data_hash is None
 
 
 def test_no_trade_days_need_a_reason_and_count_in_the_account_calendar():
@@ -345,7 +389,8 @@ def test_no_trade_days_need_a_reason_and_count_in_the_account_calendar():
     blocked, _ = _evaluate(spec, missing_reason, trades)
     finding, _ = _evaluate(spec, with_reason, trades)
 
-    assert blocked.verdict is Verdict.INSUFFICIENT
+    # 입력 결함은 고쳐서 다시 판정할 수 있어야 한다 — 최종 판정이 아니다.
+    assert blocked.verdict is Verdict.NOT_EVALUATED
     assert blocked.reasons == ("NO_TRADE_DAY_WITHOUT_REASON",)
     assert finding.verdict is Verdict.PASS
     assert finding.detail["calendar_days"] == 62
@@ -353,13 +398,72 @@ def test_no_trade_days_need_a_reason_and_count_in_the_account_calendar():
     assert finding.detail["no_trade_days"] == {day: "NO_TARGET" for day in sorted(idle)}
 
 
-def test_trade_on_a_day_missing_from_the_calendar_is_insufficient():
+def test_trade_on_a_day_missing_from_the_calendar_defers_the_verdict():
     days, trades = s.sample(s.GOOD_PCTS)
 
-    finding, _ = _evaluate(s.spec(), days[:-1], trades)
+    finding, data_hash = _evaluate(s.spec(), days[:-1], trades)
+
+    assert finding.verdict is Verdict.NOT_EVALUATED
+    assert "TRADE_DATE_MISSING_FROM_CALENDAR" in finding.reasons
+    assert data_hash is None
+
+
+def test_no_trade_days_keep_their_place_in_the_bootstrap_calendar():
+    """무거래일도 달력에 남아 블록 재표집과 계좌 일별 수익률에 들어간다."""
+    spec = s.spec(judgment_days=90, block_length_days=5)
+    all_days = s.weekdays(s.START, 90)
+    traded = [day for i, day in enumerate(all_days) if i % 3 != 2]
+    trades = [s.trade(day, pct) for day, pct in zip(traded, s.GOOD_PCTS)]
+    full = [DayRecord(d, None if d in set(traded) else "NO_TARGET") for d in all_days]
+
+    with_idle, _ = _evaluate(spec, full, trades)
+
+    assert with_idle.detail["calendar_days"] == 90
+    assert with_idle.detail["trade_days"] == 60
+    assert with_idle.detail["empty_resamples"] == 0
+    # 계좌 일별 수익률에는 0인 날 30개가 들어간다.
+    assert with_idle.detail["base"]["account_net_amount"] == 330_000.0
+
+
+# ── 거래가 없는 재표집 ───────────────────────────────────────────────
+
+
+def test_empty_resamples_are_never_given_an_invented_value():
+    """거래 없는 재표집은 0이 아니라 '모든 값보다 아래'다. 하한은 남은 값에서 나온다."""
+    per_day = [[1.0]] + [[] for _ in range(9)]
+
+    lower, empty = profitability._block_bootstrap_lower(
+        per_day, block=1, resamples=2_000, seed=3, alpha=0.4
+    )
+    undefined, empty_again = profitability._block_bootstrap_lower(
+        per_day, block=1, resamples=2_000, seed=3, alpha=0.3
+    )
+
+    # 10일 중 1일만 거래 → 재표집의 약 35%가 비어 있다.
+    assert 600 < empty == empty_again < 800
+    assert lower == 1.0
+    # 하한 순위가 빈 재표집 구간에 들면 하한은 정해지지 않는다. 0이라고 하지 않는다.
+    assert undefined is None
+
+
+def test_dense_sample_has_no_empty_resample_and_reports_it():
+    days, trades = s.sample(s.GOOD_PCTS)
+
+    finding, _ = _evaluate(s.spec(), days, trades)
+
+    assert finding.detail["empty_resamples"] == 0
+
+
+def test_undefined_lower_bound_is_insufficient_not_a_pass_or_a_zero(monkeypatch):
+    days, trades = s.sample(s.GOOD_PCTS)
+    monkeypatch.setattr(profitability, "_block_bootstrap_lower", lambda *a, **k: (None, 399))
+
+    finding, data_hash = _evaluate(s.spec(), days, trades)
 
     assert finding.verdict is Verdict.INSUFFICIENT
-    assert "TRADE_DATE_MISSING_FROM_CALENDAR" in finding.reasons
+    assert finding.reasons == ("BOOTSTRAP_LOWER_BOUND_UNDEFINED",)
+    assert finding.detail["empty_resamples"] == 399
+    assert data_hash is not None
 
 
 def test_regime_without_its_registered_sample_gets_no_eligibility():
@@ -488,3 +592,135 @@ def test_judge_refuses_a_sample_from_another_fingerprint_or_unregistered_experim
     assert other.reasons == ("REFS_DIFFER_FROM_LOCKED_SPEC_STRATEGY_FINGERPRINT",)
     assert unknown.reasons == ("EXPERIMENT_NOT_REGISTERED",)
     assert store.evidence(evidence.KIND_PROFITABILITY) == []
+
+
+def test_judge_refuses_refs_that_do_not_name_the_locked_spec_or_current_rule_code(store):
+    spec = s.spec()
+    profitability.register(store, spec, locked_at=s.LOCKED_AT)
+    days, trades = s.sample(s.GOOD_PCTS)
+    good = s.refs(str(spec.experiment_id))
+    common = {"as_of": str(spec.judgment_date), "evaluated_at": s.ts(str(spec.judgment_date))}
+
+    wrong_spec = profitability.judge(
+        store, str(spec.experiment_id), days, trades,
+        refs=dataclasses.replace(good, spec_hash="0" * 64), **common,
+    )
+    wrong_code = profitability.judge(
+        store, str(spec.experiment_id), days, trades,
+        refs=dataclasses.replace(good, rules_code_hash="0" * 64), **common,
+    )
+
+    assert wrong_spec.reasons == ("REFS_DIFFER_FROM_LOCKED_SPEC_SPEC_HASH",)
+    assert wrong_code.reasons == ("REFS_DIFFER_FROM_LOCKED_SPEC_RULES_CODE_HASH",)
+    assert store.evidence(evidence.KIND_PROFITABILITY) == []
+
+
+def test_final_verdict_cannot_be_dated_before_the_judgment_date(store):
+    spec = s.spec()
+    profitability.register(store, spec, locked_at=s.LOCKED_AT)
+    days, trades = s.sample(s.GOOD_PCTS)
+
+    with pytest.raises(ValueError):
+        profitability.judge(
+            store, str(spec.experiment_id), days, trades,
+            as_of=str(spec.judgment_date), evaluated_at=s.ts(s.START),
+            refs=s.refs(str(spec.experiment_id)),
+        )
+    assert store.evidence(evidence.KIND_PROFITABILITY) == []
+
+
+# ── 판정 코드가 바뀐 뒤의 재판정 ─────────────────────────────────────
+
+
+def _judged(store, pcts):
+    spec = s.spec()
+    profitability.register(store, spec, locked_at=s.LOCKED_AT)
+    days, trades = s.sample(pcts)
+    kwargs = {
+        "as_of": str(spec.judgment_date),
+        "evaluated_at": s.ts(str(spec.judgment_date)),
+    }
+    profitability.judge(
+        store, str(spec.experiment_id), days, trades,
+        refs=s.refs(str(spec.experiment_id)), **kwargs,
+    )
+    return spec, days, trades, kwargs
+
+
+def _after_rule_change(monkeypatch):
+    """판정 파일이 바뀐 상황을 만든다(파일을 건드리지 않고 해시만 바꾼다)."""
+    monkeypatch.setattr(evidence, "rules_code_hash", lambda kind: f"changed-{kind}")
+
+
+def test_rule_code_change_allows_one_recorded_rejudge_on_identical_data(store, monkeypatch):
+    spec, days, trades, kwargs = _judged(store, s.GOOD_PCTS)
+    _after_rule_change(monkeypatch)
+    new_refs = s.refs(str(spec.experiment_id))
+    assert new_refs.rules_code_hash == "changed-PROFITABILITY"
+
+    with pytest.raises(evidence.DuplicateVerdictError):
+        profitability.judge(store, str(spec.experiment_id), days, trades, refs=new_refs, **kwargs)
+    finding = profitability.judge(
+        store, str(spec.experiment_id), days, trades, refs=new_refs,
+        rerun_reason="bootstrap empty-resample handling fixed", **kwargs,
+    )
+
+    rows = store.evidence(evidence.KIND_PROFITABILITY)
+    assert finding.verdict is Verdict.PASS
+    assert [row["verdict"] for row in rows] == ["PASS", "PASS"]
+    assert rows[1]["detail"]["rejudged_from"] == rows[0]["id"]
+    assert rows[1]["detail"]["previous_verdict"] == "PASS"
+    assert rows[1]["detail"]["rerun_reason"] == "bootstrap empty-resample handling fixed"
+    assert rows[1]["data_hash"] == rows[0]["data_hash"]
+    # 같은 코드로 또 돌릴 수는 없다.
+    with pytest.raises(evidence.DuplicateVerdictError):
+        profitability.judge(
+            store, str(spec.experiment_id), days, trades, refs=new_refs,
+            rerun_reason="again", **kwargs,
+        )
+
+
+def test_rejudge_cannot_swap_in_better_data(store, monkeypatch):
+    spec, _days, _trades, kwargs = _judged(store, [-1.0] * 60)
+    _after_rule_change(monkeypatch)
+    better_days, better_trades = s.sample(s.GOOD_PCTS)
+
+    with pytest.raises(evidence.DuplicateVerdictError):
+        profitability.judge(
+            store, str(spec.experiment_id), better_days, better_trades,
+            refs=s.refs(str(spec.experiment_id)), rerun_reason="rule change", **kwargs,
+        )
+    assert [r["verdict"] for r in store.evidence(evidence.KIND_PROFITABILITY)] == ["FAIL"]
+
+
+def test_same_rule_code_cannot_rejudge_even_with_a_reason(store):
+    spec, days, trades, kwargs = _judged(store, [-1.0] * 60)
+
+    with pytest.raises(evidence.DuplicateVerdictError):
+        profitability.judge(
+            store, str(spec.experiment_id), days, trades,
+            refs=s.refs(str(spec.experiment_id)), rerun_reason="I would like a pass", **kwargs,
+        )
+
+
+# ── 저장된 입력으로 다시 계산해 대조 ─────────────────────────────────
+
+
+def test_audit_recomputes_the_recorded_verdict_from_its_stored_inputs(store):
+    _judged(store, s.GOOD_PCTS)
+    row = store.evidence(evidence.KIND_PROFITABILITY)[0]
+
+    finding = profitability.audit(store, row["id"])
+
+    assert len(row["inputs"]["days"]) == 60 and len(row["inputs"]["trades"]) == 60
+    assert finding.verdict is Verdict.PASS
+    assert finding.detail == {"recorded": "PASS", "recomputed": "PASS"}
+    assert profitability.audit(store, 999).reasons == ("EVIDENCE_NOT_FOUND",)
+
+
+def test_audit_cannot_vouch_for_a_verdict_made_by_other_rule_code(store, monkeypatch):
+    _judged(store, s.GOOD_PCTS)
+    row = store.evidence(evidence.KIND_PROFITABILITY)[0]
+    _after_rule_change(monkeypatch)
+
+    assert profitability.audit(store, row["id"]).reasons == ("RULES_CODE_CHANGED_SINCE_VERDICT",)

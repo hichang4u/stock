@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import shutil
 import sqlite3
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
-from src.real_validation import evidence, gate, risk_halt
-from src.real_validation.core import Finding, Verdict
+from src.real_validation import evidence, gate, profitability, risk_halt
+from src.real_validation.core import Finding, Verdict, canonical_hash
 from src.real_validation.risk_halt import Action, HaltKind
 from src.real_validation.store import Store
 from tests import real_validation_support as s
@@ -166,23 +168,32 @@ def test_pass_evidence_cannot_be_recorded_without_references_expiry_or_data(tmp_
         "finding": PASS,
         "evaluated_at": s.ts("20270401"),
     }
+    inputs = {"synthetic": True}
+    good = {
+        "refs": s.refs("exp-1"),
+        "data_hash": canonical_hash(inputs),
+        "inputs": inputs,
+        "expires_at": s.ts("20270501"),
+    }
     with Store.open(tmp_path / "gate.db", create=True) as store:
+        for broken in (
+            {"refs": incomplete},
+            {"expires_at": None},
+            {"inputs": None},
+            {"data_hash": None, "inputs": None},
+            {"data_hash": "not-the-hash-of-the-inputs"},
+        ):
+            with pytest.raises(ValueError):
+                evidence.record(store, **{**good, **broken}, **common)
         with pytest.raises(ValueError):
             evidence.record(
-                store, refs=incomplete, data_hash="d", expires_at=s.ts("20270501"), **common
+                store, **good, kind="SOMETHING_ELSE", finding=PASS,
+                evaluated_at=s.ts("20270401"),
             )
-        with pytest.raises(ValueError):
-            evidence.record(store, refs=s.refs("exp-1"), data_hash="d", expires_at=None, **common)
-        with pytest.raises(ValueError):
-            evidence.record(
-                store, refs=s.refs("exp-1"), data_hash=None, expires_at=s.ts("20270501"), **common
-            )
-        with pytest.raises(ValueError):
-            evidence.record(
-                store, refs=s.refs("exp-1"), data_hash="d", expires_at=s.ts("20270501"),
-                kind="SOMETHING_ELSE", finding=PASS, evaluated_at=s.ts("20270401"),
-            )
-        assert store.evidence(evidence.KIND_PROFITABILITY) == []
+        assert store.evidence() == []
+
+        # 같은 값에서 깨진 것이 없으면 기록된다 — 위 거부가 다른 이유 때문이 아니다.
+        assert evidence.record(store, **good, **common) == 1
 
 
 def test_recorded_evidence_is_never_overwritten(tmp_path):
@@ -414,6 +425,233 @@ def test_missing_store_blocks_evidence_and_halt_checks(passing, wired):
     assert decision.components["evidence_current"].reasons == ("EVIDENCE_STORE_UNAVAILABLE",)
     assert decision.components["risk_not_halted"].reasons == ("HALT_STATE_UNREADABLE",)
     assert not (directory / gate.STORE_FILE).exists()
+
+
+# ── 판정 코드가 바뀌면 옛 PASS는 재사용되지 않는다 ───────────────────
+
+
+def test_rule_code_hash_follows_the_bytes_of_the_files_that_make_verdicts(tmp_path, monkeypatch):
+    package = Path(evidence.__file__).resolve().parent
+    for names in evidence.RULE_FILES.values():
+        for name in names:
+            shutil.copyfile(package / name, tmp_path / name)
+    monkeypatch.setattr(evidence, "_PACKAGE_DIR", tmp_path)
+    evidence.rules_code_hash.cache_clear()
+    try:
+        profit_before = evidence.rules_code_hash(evidence.KIND_PROFITABILITY)
+        parity_before = evidence.rules_code_hash(evidence.KIND_EXECUTION_PARITY)
+        assert profit_before == evidence.rules_code_hash(evidence.KIND_PROFITABILITY)
+
+        with (tmp_path / "profitability.py").open("ab") as handle:
+            handle.write(b"\n# one more line\n")
+        evidence.rules_code_hash.cache_clear()
+
+        assert evidence.rules_code_hash(evidence.KIND_PROFITABILITY) != profit_before
+        # 수익성 판정 파일만 바뀌었으므로 경로 증거는 낡지 않는다.
+        assert evidence.rules_code_hash(evidence.KIND_EXECUTION_PARITY) == parity_before
+
+        (tmp_path / "core.py").unlink()
+        evidence.rules_code_hash.cache_clear()
+        with pytest.raises(OSError):
+            evidence.rules_code_hash(evidence.KIND_PROFITABILITY)
+    finally:
+        evidence.rules_code_hash.cache_clear()
+
+
+def test_gate_package_files_are_covered_by_a_rule_hash_or_named_as_wiring():
+    """새 파일이 생기면 판정 파일인지 배선인지 여기서 정해야 한다."""
+    package = Path(evidence.__file__).resolve().parent
+    verdict_files = {name for names in evidence.RULE_FILES.values() for name in names}
+    wiring = {
+        "__init__.py", "evidence.py", "gate.py", "store.py",
+        # 주문 직전 계산·중단 기록: 증거 판정이 아니라 런타임 집행이다.
+        "risk_policy.py", "sizing.py", "risk_halt.py",
+    }
+
+    assert {path.name for path in package.glob("*.py")} == verdict_files | wiring
+    assert not verdict_files & wiring
+
+
+def test_changed_rule_code_makes_the_old_pass_stale_without_a_fingerprint_change(
+    passing, wired, monkeypatch
+):
+    directory, now = passing
+    assert _gate(directory, now=now).eligible_for_real is True
+    real_hash = evidence.rules_code_hash
+
+    monkeypatch.setattr(
+        evidence,
+        "rules_code_hash",
+        lambda kind: "edited" if kind == evidence.KIND_PROFITABILITY else real_hash(kind),
+    )
+    decision = _gate(directory, now=now)
+
+    assert decision.eligible_for_real is False
+    assert decision.components["evidence_current"].reasons == (
+        "PROFITABILITY:STALE_RULES_CODE_HASH",
+    )
+    # 판정 자체는 과거 사실로 남는다. 재사용만 막힌다.
+    assert decision.components["profitability_passed"].verdict is Verdict.PASS
+
+
+def test_bumped_rule_version_also_makes_old_evidence_stale(passing, wired, monkeypatch):
+    directory, now = passing
+    monkeypatch.setattr(evidence, "EVALUATION_RULE_VERSION", "real-validation-rules-next")
+
+    decision = _gate(directory, now=now)
+
+    assert decision.eligible_for_real is False
+    assert "PROFITABILITY:STALE_EVALUATION_RULE_VERSION" in (
+        decision.components["evidence_current"].reasons
+    )
+
+
+# ── 손으로 만든 증거 ─────────────────────────────────────────────────
+
+
+def _forge(directory, *, chain=True, **overrides):
+    """마지막 수익성 증거를 베껴 고친 PASS 행을 직접 끼워 넣는다(기록 함수를 거치지 않고)."""
+    with Store.open(directory / gate.STORE_FILE, create=True) as store:
+        row = dict(store.evidence(evidence.KIND_PROFITABILITY)[-1])
+        row.pop("id")
+        row["verdict"] = "PASS"
+        row["reasons"] = []
+        refs = dict(row["refs"])
+        refs.update(overrides.pop("refs", {}))
+        row.update(overrides)
+        row["refs"] = refs
+        row["prev_hash"] = evidence.chain_head(store)
+        row["row_hash"] = evidence._row_hash(row["prev_hash"], row) if chain else "f" * 64
+        store.insert_evidence(row)
+
+
+def _current(decision):
+    return decision.components["evidence_current"]
+
+
+def test_forged_pass_without_a_valid_chain_hash_is_rejected(passing, wired):
+    directory, now = passing
+    _forge(directory, chain=False)
+
+    decision = _gate(directory, now=now)
+
+    assert decision.eligible_for_real is False
+    assert any("EVIDENCE_ROW_ALTERED" in reason for reason in _current(decision).reasons)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"inputs": None}, "PROFITABILITY:INPUTS_MISSING"),
+        ({"inputs": {"days": [], "trades": []}}, "PROFITABILITY:INPUTS_DO_NOT_MATCH_DATA_HASH"),
+        ({"refs": {"spec_hash": "0" * 64}}, "PROFITABILITY:STALE_SPEC_HASH"),
+        ({"evaluated_at": s.ts("20270115")}, "PROFITABILITY:EVALUATED_BEFORE_JUDGMENT_DATE"),
+        ({"refs": {"experiment_id": "never-registered"}}, "PROFITABILITY:STALE_EXPERIMENT_ID"),
+    ],
+)
+def test_forged_pass_that_is_not_bound_to_the_locked_registration_is_rejected(
+    passing, wired, overrides, reason
+):
+    directory, now = passing
+    if "evaluated_at" in overrides:
+        overrides = {**overrides, "expires_at": s.ts("20270601")}
+    _forge(directory, **overrides)
+
+    decision = _gate(directory, now=now)
+
+    assert decision.eligible_for_real is False
+    assert reason in _current(decision).reasons
+
+
+def _without_triggers(directory, statement):
+    """추가 전용 트리거를 지우고 행을 고친다 — 파일 쓰기 권한이 있으면 할 수 있는 일이다."""
+    conn = sqlite3.connect(str(directory / gate.STORE_FILE))
+    try:
+        for table in ("evidence", "registrations"):
+            conn.execute(f"DROP TRIGGER {table}_no_update")
+        conn.execute(statement)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_verdict_edited_in_place_breaks_the_chain(passing, wired):
+    directory, now = passing
+    _without_triggers(directory, "UPDATE evidence SET expires_at='2099-01-01T00:00:00+09:00'")
+
+    decision = _gate(directory, now=now + timedelta(days=400))
+
+    assert decision.eligible_for_real is False
+    assert any("EVIDENCE_ROW_ALTERED" in reason for reason in _current(decision).reasons)
+
+
+def test_locked_spec_relaxed_in_place_is_detected(passing, wired):
+    directory, now = passing
+    relaxed = json.dumps({**s.spec().as_dict(), "max_account_mdd_pct": 99.0}, sort_keys=True)
+    _without_triggers(
+        directory,
+        f"UPDATE registrations SET spec_json='{relaxed}' WHERE kind='PROFITABILITY'",
+    )
+
+    decision = _gate(directory, now=now)
+
+    assert decision.eligible_for_real is False
+    assert "PROFITABILITY:REGISTRATION_SPEC_ALTERED" in _current(decision).reasons
+
+
+def test_consistent_forgery_passes_the_gate_and_only_the_offline_audit_catches_it(
+    passing, wired
+):
+    """게이트의 한계를 그대로 적는다: 해시까지 맞춘 가짜 PASS는 구조 검사를 통과한다.
+
+    입력 원본이 실제로는 손실 표본이면 재계산 감사가 잡는다. 입력까지 지어낸 경우는
+    저장소 밖의 대조(거래 DB, git에 남긴 사슬 머리 해시)로만 잡힌다.
+    """
+    directory, now = passing
+    days, trades = s.sample([-1.0] * 60)
+    losing = profitability.window_inputs(s.spec(), days, trades)
+    _forge(directory, inputs=losing, data_hash=canonical_hash(losing))
+
+    decision = _gate(directory, now=now)
+    with Store.open(directory / gate.STORE_FILE) as store:
+        forged_id = store.evidence(evidence.KIND_PROFITABILITY)[-1]["id"]
+        audit = profitability.audit(store, forged_id)
+
+    assert decision.eligible_for_real is True
+    assert audit.verdict is Verdict.FAIL
+    assert "RECOMPUTED_VERDICT_DIFFERS" in audit.reasons
+    assert audit.detail == {"recorded": "PASS", "recomputed": "FAIL"}
+
+
+def test_chain_head_changes_with_every_recorded_verdict(tmp_path):
+    with Store.open(tmp_path / "gate.db", create=True) as store:
+        assert evidence.chain_head(store) == evidence.GENESIS_HASH
+        assert evidence.verify_chain(store) == []
+    s.passing_directory(tmp_path / "rv")
+    with Store.open(tmp_path / "rv" / gate.STORE_FILE) as store:
+        rows = store.evidence()
+        assert [row["prev_hash"] for row in rows] == [evidence.GENESIS_HASH, rows[0]["row_hash"]]
+        assert evidence.chain_head(store) == rows[1]["row_hash"]
+        assert evidence.verify_chain(store) == []
+
+
+def test_store_from_another_schema_version_is_unavailable_and_left_untouched(tmp_path):
+    path = tmp_path / "gate.db"
+    with Store.open(path, create=True):
+        pass
+    conn = sqlite3.connect(str(path))
+    conn.execute("UPDATE meta SET value='1' WHERE key='schema_version'")
+    conn.commit()
+    conn.close()
+    before = path.read_bytes()
+
+    for create in (False, True):
+        with pytest.raises(gate.StoreUnavailable):
+            Store.open(path, create=create)
+    assert path.read_bytes() == before
+    assert _gate(tmp_path, now=_now()).components["risk_not_halted"].reasons == (
+        "HALT_STATE_UNREADABLE",
+    )
 
 
 def test_evaluating_the_gate_does_not_modify_the_directory(passing, wired):
