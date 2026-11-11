@@ -1,13 +1,21 @@
-"""실전투자 준비도 계산과 REAL 시작 게이트."""
+"""실전투자 준비도 계산과 REAL 시작 게이트.
+
+점수(`percent`)는 운영 안전성만 잰다. REAL 신규 진입 자격(`eligible_for_real`)은
+docs/REAL_VALIDATION_DESIGN.md §2.1의 AND 게이트이고, 점수 100은 그 여섯 조건 중
+하나(`operational_ready`)일 뿐이다.
+"""
 
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from src import db
 from src.modules import f3_entry
 from src.modules.exit_recovery import EXIT_RECOVERY_VERSION
+from src.real_validation import gate as real_gate
+from src.real_validation.core import Finding, Verdict
 from src.release import strategy_fingerprint
 
 
@@ -204,19 +212,54 @@ async def calculate() -> dict[str, Any]:
 
     earned = round(sum(group["earned"] for group in groups), 2)
     percent = round(earned, 2)
-    blockers = [
+    operational_blockers = [
         check["label"]
         for group in groups
         for check in group["checks"]
         if not check["passed"]
     ]
+    operational_ready = percent >= 100.0 and not operational_blockers
+    decision = _real_gate(fingerprint, operational_ready, operational_blockers)
+    # 운영 점수가 100이어도 수익성·경로·위험 증거가 없으면 차단 사유가 비지 않게 한다.
+    # main의 REAL_START_BLOCKED 로그와 대시보드가 이 목록을 그대로 보여준다.
+    gate_blockers = [
+        blocker
+        for blocker in decision.blockers()
+        if not blocker.startswith("operational_ready=")
+    ]
     return {
         "percent": percent,
-        "eligible_for_real": percent >= 100.0 and not blockers,
+        "operational_ready": operational_ready,
+        "eligible_for_real": decision.eligible_for_real,
         "strategy_fingerprint": fingerprint,
         "clean_paper_trades": clean_trades,
         "required_paper_trades": target_trades,
         "groups": groups,
-        "blockers": blockers,
-        "gate": "REAL 주문은 100%에서만 시작 가능",
+        "blockers": operational_blockers + gate_blockers,
+        "real_gate": decision.as_dict(),
+        "gate": (
+            "REAL 주문은 운영 안전성 100%와 수익성·실행 경로·위험 정책·"
+            "현재 증거·무중단을 모두 통과해야 시작 가능"
+        ),
     }
+
+
+def _now() -> datetime:
+    """증거 만료 판단의 기준 시각. 테스트가 고정할 수 있게 따로 둔다."""
+    return datetime.now(timezone.utc)
+
+
+def _real_gate(
+    fingerprint: str, operational_ready: bool, operational_blockers: list[str]
+) -> real_gate.GateDecision:
+    """운영 안전성 판정을 AND 게이트의 한 항목으로 넣는다. 읽기만 한다."""
+    operational = Finding(
+        Verdict.PASS if operational_ready else Verdict.FAIL,
+        tuple(operational_blockers),
+    )
+    return real_gate.evaluate_from_environment(
+        strategy_fingerprint=fingerprint,
+        operational_ready=operational,
+        now=_now(),
+        env=os.environ,
+    )
