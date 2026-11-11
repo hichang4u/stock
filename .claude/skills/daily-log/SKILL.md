@@ -263,6 +263,38 @@ print(dict(c)); print('한도 초과 경로', dict(paths))
   주문 중에도 건너뛴다(`reason=A_ORDER_IN_FLIGHT`). 그 뒤에도 분봉 조회가 한도에 걸리면
   적는다. 건너뛴 횟수는 위 명령의 `TRACK_B_CORRECTION_BLOCKED` 수로 본다.
 
+**REST 지연을 매일 센다**(`docs/REST_LATENCY_FOLLOWUP_20261111.md` 6절, 2026-11-11 결정 나).
+
+```bash
+cd /d/Private/stock-prod && PYTHONIOENCODING=utf-8 python -c "
+import json
+from datetime import datetime
+PRE=('inquire-psbl-order','inquire-vi-status','inquire-asking-price-exp-ccn','order-cash')
+slow=mx=n=0; pre={}; pick=sent=None
+for l in open('data/logs/<YYYYMMDD>.jsonl',encoding='utf-8'):
+    try: d=json.loads(l)
+    except ValueError: continue
+    e=d.get('event','')
+    if e=='LATENCY_HIGH':
+        ms=d.get('latency_ms',0); n+=1; slow+=ms>=6000; mx=max(mx,ms)
+        ep=str(d.get('api_endpoint','')).rsplit('/',1)[-1]
+        if ep in PRE and pick and not sent: pre[ep]=ms
+    if e=='TARGET_LOCKED' and not pick: pick=d['ts']
+    if e=='ENTRY_ORDER_SENT' and not sent: sent=d['ts']
+gap=round((datetime.fromisoformat(sent)-datetime.fromisoformat(pick)).total_seconds(),1) if pick and sent else None
+print('LATENCY_HIGH',n,'| 6초 이상',slow,'| 최대',mx,'ms')
+print('진입 전 호출(경고가 찍힌 것만)',pre,'| 선정 -> 주문 접수',gap,'초')
+"
+```
+
+- 보고에 한 줄로 적는다: 6초 이상 건수, 최대, 진입 전 네 호출(매수가능·VI·호가·주문), 종목 선정(`TARGET_LOCKED`) → 1차 주문 접수 초.
+  0건이어도 적는다. 진입 전 호출은 `LATENCY_HIGH`가 찍힌 것만 나온다. 빈 칸은 경고 기준 아래였다는 뜻이다.
+- 기준값: 11/04 ~ 11/10 다섯 거래일은 6초 이상 0 ~ 3건, 선정 → 주문 4.5 ~ 7.0초다. 11/11은 186건, 11.9초였다.
+- **6초 이상이 20건을 넘으면 맨 앞에 쓴다**(지연일). 20건은 2026-11-11에 미리 정한 값이다. 결과를 보고 바꾸지 않는다.
+- 지연일이 2026-11-12 ~ 11-18(다섯 거래일)에 하루라도 나오면 티켓 선택지 다(어느 쪽이 느린지 가르는 측정)를 다시 연다.
+- 지연일에 진입이 무산됐거나 시가보다 비싸게 진입했으면 선택지 라(진입 전 REST 줄이기)를 다시 본다고 적는다.
+- 그날 값은 티켓 7절 표에 한 줄 더한다.
+
 ### 4.1 체결 프레임 점검 — 매일 돌린다
 
 ```bash
