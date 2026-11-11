@@ -24,9 +24,14 @@ def _write_log(root: Path, events: list[dict], date: str = DATE) -> None:
     (d / f"{date}.jsonl").write_bytes(body.encode("utf-8"))
 
 
-def _rec(hms: str, price: int, qty: int, cum: int, ticker: str = "396300") -> list[str]:
+def _rec(hms: str, price: int, qty: int, cum: int, ticker: str = "396300", *,
+         open_: int | None = None, high: int | None = None, low: int | None = None) -> list[str]:
+    """체결 레코드 하나. 시가·고가·저가를 안 주면 체결가와 같다(개장 체결의 모양)."""
     raw = ["0"] * 47
     raw[0], raw[1], raw[2], raw[12], raw[13] = ticker, hms, str(price), str(qty), str(cum)
+    raw[7] = str(price if open_ is None else open_)
+    raw[8] = str(price if high is None else high)
+    raw[9] = str(price if low is None else low)
     return raw
 
 
@@ -329,3 +334,112 @@ def test_rejection_then_next_candidate_is_measured_against_the_filled_ticker(tmp
     assert [o["ticker"] for o in day["orders"]] == ["354200", "038110"]
     assert [o["lead_sec"] for o in day["orders"]] == [8.454, -1.0]
     assert branch_label(day) == "1차 첫 체결 전 · 주문 거부 → 2차 첫 체결 뒤 · 창 안 체결"
+
+
+def _missed_opening_log(sent_hms: str) -> list[dict]:
+    return [
+        _sent(sent_hms, "0000001562", 1, ticker="443670"),
+        _ev("09:00:13.948", "ENTRY_EXECUTED", ticker="443670", order_id="0000001562",
+            fill_price=6069, fill_qty=1132),
+        _timing("09:00:13.949", total_ms=13940),
+    ]
+
+
+def _missed_opening_ticks(root: Path) -> None:
+    """11/11: WS 접속이 늦어 첫 캡처 행이 개장 체결이 아니다(시가 6,150, 고 6,210, 저 6,100)."""
+    ohl = {"open_": 6150, "high": 6210, "low": 6100}
+    _write_ticks(root, [
+        ("09:00:04.987", _rec("090004", 6170, 16, 247716, "443670", **ohl)),
+        ("09:00:04.987", _rec("090004", 6140, 37, 247753, "443670", **ohl)),
+    ], ticker="443670")
+
+
+def test_first_row_at_one_price_is_the_opening_print(tmp_path):
+    """시가 = 고가 = 저가 = 체결가인 첫 행은 개장 가격의 체결이다."""
+    _write_log(tmp_path, [
+        _sent("09:00:07.832", "0000002132", 1),
+        _ev("09:00:09.238", "ENTRY_EXECUTED", order_id="0000002132", fill_price=9565,
+            fill_qty=731),
+        _timing("09:00:09.238"),
+    ])
+    _write_ticks(tmp_path, [("09:00:07.101", _rec("090007", 9470, 64184, 65113))])
+    day = analyze_day(tmp_path, DATE)
+    assert day["first_trade"]["opening_seen"] is True
+    assert day["first_trade"]["open"] == 9470
+    assert day["orders"][0]["lead_is_bound"] is False
+
+
+def test_missed_opening_measures_the_fill_against_the_open_field(tmp_path):
+    """개장 체결을 놓친 날은 첫 캡처 행 가격이 아니라 시가 필드로 잰다(2026-11-11)."""
+    _write_log(tmp_path, _missed_opening_log("09:00:13.487"))
+    _missed_opening_ticks(tmp_path)
+    day = analyze_day(tmp_path, DATE)
+    first = day["first_trade"]
+    assert first["opening_seen"] is False
+    assert first["price"] == 6170 and first["open"] == 6150
+    assert day["vs_open_per_share"] == -81
+    assert day["vs_open_amount"] == -91692
+
+
+def test_missed_opening_order_after_the_first_captured_row_is_still_after_the_open(tmp_path):
+    """주문이 첫 캡처 행보다 늦으면 개장보다도 늦다. 초는 '적어도 이만큼'이다."""
+    _write_log(tmp_path, _missed_opening_log("09:00:13.487"))
+    _missed_opening_ticks(tmp_path)
+    day = analyze_day(tmp_path, DATE)
+    [o] = day["orders"]
+    assert o["lead_sec"] == -8.5
+    assert o["lead_is_bound"] is True
+    assert branch_label(day) == "1차 첫 체결 뒤 · 창 안 체결"
+
+
+def test_missed_opening_order_before_the_first_captured_row_is_unknown(tmp_path):
+    """주문이 첫 캡처 행보다 이르면 개장 체결의 앞인지 뒤인지 알 수 없다."""
+    _write_log(tmp_path, _missed_opening_log("09:00:03.000"))
+    _missed_opening_ticks(tmp_path)
+    day = analyze_day(tmp_path, DATE)
+    [o] = day["orders"]
+    assert o["lead_sec"] is None
+    assert o["lead_is_bound"] is False
+    assert branch_label(day) == "1차 첫 체결 모름 · 창 안 체결"
+    assert day["vs_open_per_share"] == -81  # 시가는 시가 필드로 안다
+
+
+def test_table_and_summary_mark_a_missed_opening(tmp_path, capsys):
+    _write_log(tmp_path, _missed_opening_log("09:00:13.487"))
+    _missed_opening_ticks(tmp_path)
+    rc = main(["--root", str(tmp_path), "--date", DATE])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "| 09:00:04.987 이전 (개장 체결 미포착) | 6,150 | — |" in out
+    assert "· ≤-8.50 |" in out
+    assert "| -81 | -91,692 |" in out
+    assert "개장 체결 미포착 1일 (1026)" in out
+
+
+def test_summary_is_silent_about_missed_openings_when_there_are_none(tmp_path, capsys):
+    _write_log(tmp_path, [
+        _sent("09:00:07.832", "0000002132", 1),
+        _ev("09:00:09.238", "ENTRY_EXECUTED", order_id="0000002132", fill_price=9565,
+            fill_qty=731),
+        _timing("09:00:09.238"),
+    ])
+    _write_ticks(tmp_path, [("09:00:07.101", _rec("090007", 9470, 64184, 65113))])
+    main(["--root", str(tmp_path), "--date", DATE])
+    assert "미포착" not in capsys.readouterr().out
+
+
+def test_first_row_without_an_open_field_is_used_as_before(tmp_path):
+    """시가 필드가 0이거나 없으면 판정하지 못한다. 예전처럼 첫 행을 시가로 쓴다."""
+    _write_log(tmp_path, [
+        _sent("09:00:07.832", "0000002132", 1),
+        _ev("09:00:09.238", "ENTRY_EXECUTED", order_id="0000002132", fill_price=9565,
+            fill_qty=731),
+        _timing("09:00:09.238"),
+    ])
+    _write_ticks(tmp_path, [
+        ("09:00:07.101", _rec("090007", 9470, 64184, 65113, open_=0, high=0, low=0)),
+    ])
+    day = analyze_day(tmp_path, DATE)
+    assert day["first_trade"]["opening_seen"] is True
+    assert day["first_trade"]["open"] == 9470
+    assert day["vs_open_per_share"] == 95

@@ -8,6 +8,10 @@
   레코드다. 시각은 수신 시각이다. 틱이 그 종목이 아니면(관측 대상이 바뀐 날) 모른다고 적는다.
   빠른 경로(`FAST_MULTI`) 날만 본다. 레거시 경로 날 캡처는 종목 고정(09:01 이후)부터라 첫 행이
   첫 체결이 아니다.
+- 개장 체결 미포착: 첫 행에서 시가 = 고가 = 저가 = 체결가가 아니면 그 앞에 이미 다른 가격의 체결이
+  있었다. WS 접속이 개장 체결보다 늦은 날이다(`docs/ENTRY_TIMING_FIRST_TRADE_FOLLOWUP_20261111.md`).
+  그런 날 시가는 시가 필드(`raw[7]`)로 쓰고, 첫 체결 시각은 "첫 캡처 행 이전"으로만 안다. 주문이 첫
+  캡처 행보다 늦으면 "첫 체결 뒤"는 확실하고 초는 하한(`≤`)이다. 이르면 앞뒤를 모른다.
 - 주문별 갈래: `ENTRY_ORDER_SENT` 뒤의 이벤트로 가른다.
   - `IN_WINDOW`: 2초 창 안에 체결 확인
   - `LATE_CONFIRM`: 창이 닫힌 뒤 체결돼 취소가 거부됨
@@ -91,8 +95,26 @@ def _fields(raw) -> list[str] | None:
     return raw if isinstance(raw, list) else None
 
 
+def _opening(raw: list[str], price: int) -> tuple[int, bool]:
+    """(시가, 이 행이 개장 가격의 체결인가).
+
+    시가 = 고가 = 저가 = 체결가면 아직 다른 가격에 거래된 적이 없다. 시가 필드가 없으면(0 이하)
+    판정하지 못하므로 이 행을 시가로 쓴다.
+    """
+    try:
+        open_, high, low = (int(float(raw[i])) for i in (7, 8, 9))
+    except (TypeError, ValueError):
+        return price, True
+    if open_ <= 0:
+        return price, True
+    return open_, price == open_ == high == low
+
+
 def first_trade(root: Path, date: str, ticker: str) -> dict | None:
-    """그 종목의 09:00 이후 첫 ws 체결. 틱 파일이 없거나 비면 None."""
+    """그 종목의 09:00 이후 첫 ws 체결. 틱 파일이 없거나 비면 None.
+
+    `opening_seen`이 거짓이면 이 행은 개장 체결이 아니다. 그때도 `open`은 그날 시가다.
+    """
     path = root / "data" / "strategy_ticks" / date / f"{ticker}.09.jsonl.gz"
     if not path.exists():
         return None
@@ -103,15 +125,19 @@ def first_trade(root: Path, date: str, ticker: str) -> dict | None:
         if not raw or len(raw) < 14 or raw[0] != ticker or raw[1] < "090000":
             continue
         try:
-            return {
-                "received_at": row["received_at"],
-                "at": _hms(row["received_at"]),
-                "hms": raw[1],
-                "price": int(float(raw[2])),
-                "qty": int(raw[12]),
-            }
+            price, qty = int(float(raw[2])), int(raw[12])
         except (TypeError, ValueError):
             continue
+        open_, opening_seen = _opening(raw, price)
+        return {
+            "received_at": row["received_at"],
+            "at": _hms(row["received_at"]),
+            "hms": raw[1],
+            "price": price,
+            "qty": qty,
+            "open": open_,
+            "opening_seen": opening_seen,
+        }
     return None
 
 
@@ -187,8 +213,16 @@ def analyze_day(root: Path, date: str) -> dict | None:
         own_ticker = str(sent["ticker"]) if sent.get("ticker") else ticker
         own_first = first_of(own_ticker)
         lead = None
+        lead_is_bound = False
         if own_first is not None:
             lead = round((_ts(own_first["received_at"]) - _ts(sent["ts"])).total_seconds(), 3)
+            if not own_first["opening_seen"]:
+                # 개장 체결은 첫 캡처 행보다 앞이다. 주문이 그 행보다 늦으면 "뒤"는 확실하고 초는
+                # 하한이다. 이르면 개장 체결의 앞인지 뒤인지 알 수 없다.
+                if lead <= 0:
+                    lead_is_bound = True
+                else:
+                    lead = None
         orders.append({
             "order_id": sent.get("order_id"),
             "ticker": own_ticker,
@@ -197,6 +231,7 @@ def analyze_day(root: Path, date: str) -> dict | None:
             "api_ms": api_ms,
             "rate_wait_ms": wait_ms,
             "lead_sec": lead,
+            "lead_is_bound": lead_is_bound,
             # 거부된 주문은 주문번호가 빈 값이라 번호로 뒤 이벤트를 찾으면 안 된다.
             "outcome": (
                 "REJECTED" if _is_rejected(sent)
@@ -209,7 +244,7 @@ def analyze_day(root: Path, date: str) -> dict | None:
     fill_qty = executed.get("fill_qty") if executed else None
     per_share = amount = None
     if first is not None and fill_price is not None:
-        per_share = int(round(float(fill_price) - first["price"]))
+        per_share = int(round(float(fill_price) - first["open"]))
         if fill_qty is not None:
             amount = per_share * int(fill_qty)
     return {
@@ -252,6 +287,17 @@ def _fmt_signed(v) -> str:
     return "—" if v is None else f"{int(v):+,}"
 
 
+def _missed_opening(day: dict) -> bool:
+    first = day.get("first_trade")
+    return first is not None and not first["opening_seen"]
+
+
+def _fmt_lead(order: dict) -> str:
+    if order["lead_sec"] is None:
+        return "—"
+    return ("≤" if order["lead_is_bound"] else "") + format(order["lead_sec"], "+.2f")
+
+
 def format_table(days: list[dict]) -> str:
     lines = [
         "| 날짜 | 종목 | 첫 체결 | 시가 | 수량 "
@@ -261,9 +307,12 @@ def format_table(days: list[dict]) -> str:
     ]
     for d in days:
         ft = d["first_trade"] or {}
+        missed = _missed_opening(d)
+        first_at = f"{ft['at']} 이전 (개장 체결 미포착)" if missed else ft.get("at", "—")
+        first_qty = "—" if missed else _fmt_int(ft.get("qty"))
         orders = "<br>".join(
             f"{o['sent_at']} · {_fmt_int(o['api_ms'])} · {_fmt_int(o['rate_wait_ms'])} · "
-            f"{'—' if o['lead_sec'] is None else format(o['lead_sec'], '+.2f')}"
+            f"{_fmt_lead(o)}"
             for o in d["orders"]
         ) or "—"
         entered = "진입" if d["entry_ms"] is None else f"진입 {d['entry_ms'] / 1000:.2f}초"
@@ -273,8 +322,8 @@ def format_table(days: list[dict]) -> str:
             "NO_ORDER": "주문 없음",
         }[d["result"]]
         lines.append(
-            f"| {d['date'][4:]} | {d['ticker'] or '—'} | {ft.get('at', '—')} "
-            f"| {_fmt_int(ft.get('price'))} | {_fmt_int(ft.get('qty'))} "
+            f"| {d['date'][4:]} | {d['ticker'] or '—'} | {first_at} "
+            f"| {_fmt_int(ft.get('open'))} | {first_qty} "
             f"| {orders} | {branch_label(d)} | {result} "
             f"| {_fmt_signed(d['vs_open_per_share'])} | {_fmt_signed(d['vs_open_amount'])} |"
         )
@@ -296,12 +345,14 @@ def _summary(days: list[dict]) -> str:
     rejected = [d["date"][4:] for d in all_failed if d["orders"][-1]["outcome"] == "REJECTED"]
     failed = [d["date"][4:] for d in all_failed if d["orders"][-1]["outcome"] != "REJECTED"]
     known = [d["vs_open_amount"] for d in fast if d["vs_open_amount"] is not None]
+    missed = [d["date"][4:] for d in fast if _missed_opening(d)]
     return (
         f"빠른 경로 {len(fast)}일 · 주문 {sum(counts.values())}건: "
         + ", ".join(f"{_OUTCOME_KO[k]} {v}" for k, v in counts.items() if v)
         + f" · 1차 주문이 첫 체결 뒤 {after_first}일 · 시가 진입 {at_open}일"
         + f" · 무산 {len(failed)}일{' (' + ', '.join(failed) + ')' if failed else ''}"
         + (f" · 주문 거부로 무산 {len(rejected)}일 ({', '.join(rejected)})" if rejected else "")
+        + (f" · 개장 체결 미포착 {len(missed)}일 ({', '.join(missed)})" if missed else "")
         + f" · 시가 대비 합계 {_fmt_signed(sum(known)) if known else '—'}원 (추정, {len(known)}일)"
     )
 
