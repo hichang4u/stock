@@ -181,6 +181,7 @@
 - 11/06: `NOTIFICATION_RETRIED`·`NOTIFICATION_FAILED` 0건.
 - 11/09: `NOTIFICATION_FAILED` 1건. 매수 체결 알림(267850), `ConnectTimeout` 3번. 뒤 알림에 붙지 않았다(8.8절).
 - 11/10: `NOTIFICATION_RETRIED`·`NOTIFICATION_FAILED` 0건.
+- 11/11: `NOTIFICATION_RETRIED`·`NOTIFICATION_FAILED` 0건. KIS REST가 종일 느린 날이었지만 알림은 첫 시도에 나갔다.
 
 ### 8.8 2026-11-09 — 실패한 매수 알림이 재시작으로 "확인 안 됨" 목록에서 사라졌다
 
