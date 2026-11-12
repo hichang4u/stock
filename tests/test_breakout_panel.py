@@ -156,5 +156,7 @@ def test_load_panel_reads_the_cache_layout(tmp_path):
 
 def test_known_categories_match_the_spec():
     assert KNOWN_SECUGRP == {"주권", "부동산투자회사", "사회간접자본투융자회사", "투자회사",
-                             "외국주권", "주식예탁증권"}
+                             "외국주권", "주식예탁증권",
+                             # 스펙 §5.3의 2026-11-12 추가분
+                             "선박투자회사", "주식예탁증서"}
     assert KNOWN_KIND == {"보통주", "구형우선주", "신형우선주", "종류주권"}
