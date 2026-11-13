@@ -483,3 +483,43 @@ def test_retried_event_has_a_label():
     from src.utils.logger import event_label
 
     assert event_label("NOTIFICATION_RETRIED") != "NOTIFICATION_RETRIED(NOTIFICATION_RETRIED)"
+
+
+def test_send_nowait_queues_critical_alert_from_sync_code():
+    """동기 코드(`check_ntp`)가 이벤트 루프를 기다리지 않고 알림을 큐에 넣는다."""
+    notifier._queue = asyncio.Queue()
+
+    queued = notifier.send_nowait(
+        "TIME_SYNC_WARN",
+        level="CRIT",
+        message="시스템 시각 오차 1954ms(로컬 시계가 늦다). 확인 필요.",
+    )
+
+    assert queued is True
+    assert notifier._queue.get_nowait() == "\n".join([
+        "[긴급] 시스템 시각 오차",
+        "종목 : -",
+        "내용 : 시스템 시각 오차 1954ms(로컬 시계가 늦다). 확인 필요.",
+    ])
+    assert notifier._queue.empty()
+
+
+def test_send_nowait_applies_the_same_filter_as_send():
+    notifier._queue = asyncio.Queue()
+
+    assert notifier.send_nowait("TIME_SYNC_WARN", level="WARN", message="300ms") is False
+    assert notifier.send_nowait("TARGET_LOCKED", level="INFO", message="target locked") is False
+    assert notifier.send_nowait("ENTRY_EXECUTED", level="INFO", message="buy") is True
+
+    assert notifier._queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_send_and_send_nowait_queue_identical_text():
+    notifier._queue = asyncio.Queue()
+    alert = {"level": "WARN", "message": "손절", "ticker": "005930", "name": "삼성전자"}
+
+    await notifier.send("HARD_STOP", **alert)
+    notifier.send_nowait("HARD_STOP", **alert)
+
+    assert notifier._queue.get_nowait() == notifier._queue.get_nowait()

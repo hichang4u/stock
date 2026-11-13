@@ -46,6 +46,7 @@ EVENT_LABELS = {
     "TIME_SYNC_WARN": "시각 오차 경고(Time Sync Warning)",
     "TIME_SYNC_FALLBACK": "시각 동기화 서버 재시도(Time Sync Fallback)",
     "TIME_SYNC_ERROR": "시각 동기화 실패(Time Sync Error)",
+    "TIME_SYNC_ALERT_FAILED": "시각 오차 알림 실패(Time Sync Alert Failed)",
     "TOKEN_REFRESHED": "KIS 토큰 갱신(Token Refreshed)",
     "TOKEN_LOADED_FROM_CACHE": "KIS 토큰 캐시 로드(Token Loaded From Cache)",
     "TOKEN_CACHE_WRITE_SKIPPED": "KIS 토큰 캐시 쓰기 생략(Token Cache Write Skipped)",
