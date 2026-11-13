@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
+import sqlite3
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -71,6 +74,21 @@ def rules_code_hash(kind: str) -> str:
         digest.update((_PACKAGE_DIR / name).read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def runtime_info() -> dict[str, str]:
+    """판정이 돌아간 실행 환경의 기록.
+
+    판정 파일 해시가 잡지 못하는 것(인터프리터·표준 라이브러리)을 남긴다.
+
+    일치를 강제하지는 않는다 — 환경이 달라졌으면 재계산 감사로 결과가 같은지 확인한다.
+    """
+    return {
+        "python": platform.python_version(),
+        "implementation": platform.python_implementation(),
+        "platform": sys.platform,
+        "sqlite": sqlite3.sqlite_version,
+    }
 
 
 @dataclass(frozen=True)
@@ -176,6 +194,7 @@ def record(
             raise ValueError("PASS evidence needs expires_at, data_hash and the inputs")
 
     detail = dict(finding.detail)
+    detail["runtime"] = runtime_info()
     with store.transaction():
         if finding.verdict in _FINAL_VERDICTS and refs.experiment_id:
             prior = last_final(store, kind, refs.experiment_id)
