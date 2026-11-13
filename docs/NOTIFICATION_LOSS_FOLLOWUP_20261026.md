@@ -182,6 +182,10 @@
 - 11/09: `NOTIFICATION_FAILED` 1건. 매수 체결 알림(267850), `ConnectTimeout` 3번. 뒤 알림에 붙지 않았다(8.8절).
 - 11/10: `NOTIFICATION_RETRIED`·`NOTIFICATION_FAILED` 0건.
 - 11/11: `NOTIFICATION_RETRIED`·`NOTIFICATION_FAILED` 0건. KIS REST가 종일 느린 날이었지만 알림은 첫 시도에 나갔다.
+- 11/12: `NOTIFICATION_RETRIED` 1건. 매수 체결 알림(072950), `attempts=3`, `errors=['ReadTimeout','ReadTimeout']`,
+  `possible_duplicate=true`, 09:00:34.175. 체결 확정(09:00:21.298)에서 13초 뒤에 끝났다. 11/05와 같은 모양이다. 사용자가 몇 번
+  받았는지는 확인하지 않았다. 그 무렵 KIS REST는 평소 수준이었다(진입 티켓 8.25절). 청산 알림은 첫 시도에 나갔다.
+  `NOTIFICATION_FAILED` 0건, 재시작 없음.
 
 ### 8.8 2026-11-09 — 실패한 매수 알림이 재시작으로 "확인 안 됨" 목록에서 사라졌다
 
