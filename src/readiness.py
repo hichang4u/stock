@@ -1,14 +1,31 @@
-"""실전투자 준비도 계산과 REAL 시작 게이트."""
+"""실전투자 준비도 계산과 REAL 시작 게이트.
+
+점수(`percent`)는 운영 안전성만 잰다. REAL 신규 진입 자격(`eligible_for_real`)은
+docs/REAL_VALIDATION_DESIGN.md §2.1의 AND 게이트이고, 점수 100은 그 여섯 조건 중
+하나(`operational_ready`)일 뿐이다.
+"""
 
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from src import db
 from src.modules import f3_entry
 from src.modules.exit_recovery import EXIT_RECOVERY_VERSION
 from src.release import strategy_fingerprint
+
+# AND 게이트의 항목 이름. 게이트 패키지를 불러오지 못했을 때도 같은 모양으로 차단하려고
+# 여기에도 둔다(`real_validation.gate.COMPONENTS`와 같은지는 테스트가 확인한다).
+REAL_GATE_COMPONENTS = (
+    "operational_ready",
+    "profitability_passed",
+    "execution_parity_passed",
+    "risk_policy_valid",
+    "evidence_current",
+    "risk_not_halted",
+)
 
 
 def _flag(name: str, default: str = "0") -> bool:
@@ -204,19 +221,96 @@ async def calculate() -> dict[str, Any]:
 
     earned = round(sum(group["earned"] for group in groups), 2)
     percent = round(earned, 2)
-    blockers = [
+    operational_blockers = [
         check["label"]
         for group in groups
         for check in group["checks"]
         if not check["passed"]
     ]
+    operational_ready = percent >= 100.0 and not operational_blockers
+    decision = _real_gate(fingerprint, operational_ready, operational_blockers)
+    # 운영 점수가 100이어도 수익성·경로·위험 증거가 없으면 차단 사유가 비지 않게 한다.
+    # main의 REAL_START_BLOCKED 로그와 대시보드가 이 목록을 그대로 보여준다.
+    gate_blockers = [
+        blocker
+        for blocker in decision["blockers"]
+        if not blocker.startswith("operational_ready=")
+    ]
     return {
         "percent": percent,
-        "eligible_for_real": percent >= 100.0 and not blockers,
+        "operational_ready": operational_ready,
+        "eligible_for_real": decision["eligible_for_real"] is True,
         "strategy_fingerprint": fingerprint,
         "clean_paper_trades": clean_trades,
         "required_paper_trades": target_trades,
         "groups": groups,
+        "blockers": operational_blockers + gate_blockers,
+        "real_gate": decision,
+        "gate": (
+            "REAL 주문은 운영 안전성 100%와 수익성·실행 경로·위험 정책·"
+            "현재 증거·무중단을 모두 통과해야 시작 가능"
+        ),
+    }
+
+
+def _now() -> datetime:
+    """증거 만료 판단의 기준 시각. 테스트가 고정할 수 있게 따로 둔다."""
+    return datetime.now(timezone.utc)
+
+
+def _real_gate(
+    fingerprint: str, operational_ready: bool, operational_blockers: list[str]
+) -> dict[str, Any]:
+    """운영 안전성 판정을 AND 게이트의 한 항목으로 넣는다. 읽기만 한다.
+
+    게이트 패키지는 여기서 불러온다. 이 모듈은 PAPER 기동 때도 임포트되므로, 게이트 쪽
+    결함이 PAPER 프로세스의 기동을 막아서는 안 된다. 불러오기나 평가가 어떤 이유로든
+    실패하면 예외를 올리지 않고 **차단**으로 답한다 — 열리는 쪽으로는 실패하지 않는다.
+    """
+    try:
+        from src.real_validation import gate as real_gate
+        from src.real_validation.core import Finding, Verdict
+
+        operational = Finding(
+            Verdict.PASS if operational_ready else Verdict.FAIL,
+            tuple(operational_blockers),
+        )
+        return real_gate.evaluate_from_environment(
+            strategy_fingerprint=fingerprint,
+            operational_ready=operational,
+            now=_now(),
+            env=os.environ,
+        ).as_dict()
+    except Exception as exc:
+        return _blocked_gate(operational_ready, operational_blockers, repr(exc))
+
+
+def _blocked_gate(
+    operational_ready: bool, operational_blockers: list[str], error: str
+) -> dict[str, Any]:
+    components: dict[str, Any] = {
+        name: {
+            "verdict": "NOT_EVALUATED",
+            "passed": False,
+            "reasons": ["REAL_GATE_UNAVAILABLE"],
+            "detail": {"error": error},
+        }
+        for name in REAL_GATE_COMPONENTS
+    }
+    components["operational_ready"] = {
+        "verdict": "PASS" if operational_ready else "FAIL",
+        "passed": operational_ready,
+        "reasons": list(operational_blockers),
+        "detail": {},
+    }
+    blockers = [
+        f"{name}={item['verdict']}: {','.join(item['reasons']) or 'NO_REASON'}"
+        for name, item in components.items()
+        if not item["passed"]
+    ]
+    return {
+        "eligible_for_real": False,
+        "formula": " AND ".join(REAL_GATE_COMPONENTS),
+        "components": components,
         "blockers": blockers,
-        "gate": "REAL 주문은 100%에서만 시작 가능",
     }
