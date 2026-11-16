@@ -66,6 +66,7 @@ _ALERT_TITLES = {
     "VI_ENTRY_BLOCKED": "변동성완화장치(VI) 발동으로 진입 보류",
     "ENTRY_CANCEL_UNCONFIRMED": "진입 주문 취소 확인 실패",
     "BALANCE_QUERY_FAILED": "잔고 조회 실패로 진입 차단",
+    "TIME_SYNC_WARN": "시스템 시각 오차",
 }
 
 
@@ -77,11 +78,28 @@ async def send(
     name: str | None = None,
 ) -> None:
     """Queue a non-blocking Telegram alert when it is actionable."""
+    send_nowait(event, level, message, ticker=ticker, name=name)
+
+
+def send_nowait(
+    event: str,
+    level: str = "info",
+    message: str = "",
+    ticker: str | None = None,
+    name: str | None = None,
+) -> bool:
+    """`send`의 동기판. 큐에 넣었으면 True, 알림 대상이 아니라 걸렀으면 False.
+
+    코루틴이 아닌 코드(`src/utils/time_sync.check_ntp`)가 쓴다. 큐에 넣기만 하고 전송·재시도·실패
+    기록은 `worker`가 한다. 큐에 한도가 없어 기다리지 않는다. 이벤트 루프 스레드에서 부른다
+    (`asyncio.Queue`는 스레드 사이에서 안전하지 않다).
+    """
     normalized_level = normalize_level(level)
     if not _should_send_alert(event, normalized_level):
-        return
+        return False
     text = _format_alert_text(event, normalized_level, message, ticker=ticker, name=name)
-    await _queue.put(text)
+    _queue.put_nowait(text)
+    return True
 
 
 def _should_send_alert(event: str, level: str = "info") -> bool:
