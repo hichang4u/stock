@@ -40,7 +40,8 @@ def isolate_runtime_output_dirs(tmp_path_factory, monkeypatch):
     log_dir = runtime_dir / "logs"
     db_dir = runtime_dir / "db"
     auth_dir = runtime_dir / "auth"
-    for output_dir in (state_dir, probe_dir, log_dir, db_dir, auth_dir):
+    bars_dir = runtime_dir / "bars"
+    for output_dir in (state_dir, probe_dir, log_dir, db_dir, auth_dir, bars_dir):
         output_dir.mkdir()
 
     monkeypatch.setenv("STATE_DIR", str(state_dir))
@@ -48,6 +49,7 @@ def isolate_runtime_output_dirs(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("LOG_DIR", str(log_dir))
     monkeypatch.setenv("DB_DIR", str(db_dir))
     monkeypatch.setenv("AUTH_DIR", str(auth_dir))
+    monkeypatch.setenv("TRACK_B_BARS_DIR", str(bars_dir))
 
     # 수집 시점에 이미 import된 모듈의 경로 상수도 환경변수와 같은 임시
     # 루트로 맞춘다. fixture 이후 import되는 모듈은 위 env를 직접 읽는다.
@@ -59,10 +61,21 @@ def isolate_runtime_output_dirs(tmp_path_factory, monkeypatch):
     server_module = sys.modules.get("src.api.server")
     if server_module is not None:
         monkeypatch.setattr(server_module, "_LOG_DIR", Path(log_dir))
+    # 1분 봉 파일도 격리한다. /api/status가 가격흐름 앞 구간을 저장 봉에서 읽으므로
+    # (minute_price_seed) 이 줄이 없으면 status 테스트가 개발 트리의 data/bars를 읽고,
+    # 봉을 쓰는 테스트는 거기에 쓴다. 파일 캐시는 테스트 사이에 넘기지 않는다.
+    bars_module = sys.modules.get("src.bars")
+    if bars_module is not None:
+        monkeypatch.setattr(bars_module, "_BARS_DIR", bars_dir)
+    seed_cache = getattr(server_module, "_PRICE_SEED_FILE_CACHE", None)
+    if seed_cache is not None:
+        seed_cache.clear()
 
     # logger.setup()을 호출한 테스트 뒤의 무관한 로그가 그 파일 핸들러로
     # 흘러가는 캐스케이드를 테스트 경계 양쪽에서 차단한다.
     _clear_stock_log_handlers()
     _stock_log.propagate = False
     yield runtime_dir
+    if seed_cache is not None:
+        seed_cache.clear()
     _clear_stock_log_handlers()

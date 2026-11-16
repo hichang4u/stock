@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -13,7 +14,7 @@ import src.api.status_logic as status_logic  # noqa: E402
 import src.modules.f1_filter as f1_filter  # noqa: E402
 import src.modules.f3_entry as f3_entry  # noqa: E402
 import src.modules.f4_tracking as f4_tracking  # noqa: E402
-from src import db  # noqa: E402
+from src import bars, db  # noqa: E402
 from src.schedule_times import (  # noqa: E402
     F5_EXEC_H,
     F5_EXEC_M,
@@ -45,6 +46,20 @@ def _tracking_stop_request(
             "query_string": b"",
         }
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_price_flow_sources():
+    """status 테스트가 다른 테스트의 봉 계열·시드 캐시를 물려받지 않게 한다.
+
+    봉 디렉터리 자체는 conftest의 isolate_runtime_output_dirs가 임시 폴더로 돌린다.
+    여기서는 메모리에 남는 것(bars의 계열, 시드 파일 캐시)만 비운다.
+    """
+    bars.reset()
+    server._PRICE_SEED_FILE_CACHE.clear()
+    yield
+    bars.reset()
+    server._PRICE_SEED_FILE_CACHE.clear()
 
 
 def test_server_uses_f1_snapshot_dir_constant():
@@ -393,6 +408,72 @@ async def test_status_includes_tick_history_while_holding_and_closed(monkeypatch
     assert '"tick_history":[]' in body
     assert '"trade_marks":[]' in body
 
+    server.live.clear_tick_history()
+
+
+def test_bars_dir_is_isolated_from_the_real_data_dir(isolate_runtime_output_dirs):
+    # status가 저장 봉을 읽게 된 뒤(minute_price_seed) 이 격리가 없으면 아래 status 테스트들이
+    # 개발 트리의 data/bars를 그대로 읽는다(2026-11-16 검토에서 지적).
+    repo_bars = (Path(__file__).resolve().parents[1] / "data" / "bars").resolve()
+    isolated = (isolate_runtime_output_dirs / "bars").resolve()
+
+    assert bars._BARS_DIR.resolve() == isolated
+    assert bars.bars_path("20260706", "005930").resolve().parent == isolated
+    assert isolated != repo_bars and repo_bars not in isolated.parents
+    assert list(isolated.iterdir()) == []
+    assert server._PRICE_SEED_FILE_CACHE == {}
+
+
+@pytest.mark.asyncio
+async def test_status_seed_reads_only_the_isolated_bars_dir(
+    monkeypatch, isolate_runtime_output_dirs,
+):
+    """시드는 격리된 폴더의 합성 봉에서만 나온다. 실제 data/bars에는 손도 대지 않는다."""
+    # resolve()는 안에서 stat을 부르므로 기록에는 abspath를 쓴다.
+    repo_bars = Path(os.path.abspath(Path(__file__).parents[1] / "data" / "bars"))
+    isolated = Path(os.path.abspath(isolate_runtime_output_dirs / "bars"))
+    touched: list[Path] = []
+    real_stat, real_read_text = Path.stat, Path.read_text
+
+    def recording_stat(self, *args, **kwargs):
+        if self.suffix == ".json":
+            touched.append(Path(os.path.abspath(self)))
+        return real_stat(self, *args, **kwargs)
+
+    def recording_read_text(self, *args, **kwargs):
+        touched.append(Path(os.path.abspath(self)))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", recording_stat)
+    monkeypatch.setattr(Path, "read_text", recording_read_text)
+    s = server.state.get()
+    server.live.clear_tick_history()
+    monkeypatch.setattr(server, "_read_today_logs", lambda limit=None: [])
+    monkeypatch.setattr(s, "position_status", "CLOSED")
+    monkeypatch.setattr(s, "target_ticker", "005930")
+    monkeypatch.setattr(s, "entry_price", 75_000.0)
+    monkeypatch.setattr(s, "entry_at", "2026-07-06T09:10:01+09:00")
+
+    # 봉이 없을 때: 격리 폴더에서 찾다가 '없음'으로 끝난다.
+    payload = json.loads(bytes((await server.api_status()).body).decode("utf-8"))
+    assert payload["minute_price_seed"] == []
+    assert payload["minute_price_seed_meta"]["source"] == "none"
+
+    # 합성 봉을 격리 폴더에 두면 그것만 읽는다.
+    synthetic = [
+        {"date": "20260706", "time": f"09{minute:02d}00", "close": 75_000.0 + minute}
+        for minute in range(8, 14)
+    ]
+    (isolated / "20260706_005930.json").write_text(json.dumps(synthetic), encoding="utf-8")
+    payload = json.loads(bytes((await server.api_status()).body).decode("utf-8"))
+    assert [row["price"] for row in payload["minute_price_seed"]] == [
+        75_010.0, 75_011.0, 75_012.0, 75_013.0,
+    ]
+    assert payload["minute_price_seed_meta"]["source"] == "file"
+
+    bar_paths = [p for p in touched if p.name == "20260706_005930.json"]
+    assert bar_paths and all(p.parent == isolated for p in bar_paths)
+    assert not [p for p in touched if p == repo_bars or repo_bars in p.parents]
     server.live.clear_tick_history()
 
 

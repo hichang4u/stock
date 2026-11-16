@@ -32,6 +32,9 @@ from src.api.status_logic import (
 from src.api.status_logic import (
     pipeline_from_logs as _pipeline_from_logs,
 )
+from src.api.status_logic import (
+    price_seed_from_bars as _price_seed_from_bars,
+)
 from src.modules import f4_tracking, paper_fast_probe
 from src.modules.f1_filter import (
     F1_DEADLINE_H,
@@ -618,6 +621,95 @@ def _today_start() -> datetime:
     return datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+# 가격흐름 앞 구간 보완용 저장 분봉 캐시. 마지막으로 읽은 (날짜, 종목) 파일 하나만 들고,
+# 파일의 (수정시각, 크기)가 그대로면 다시 파싱하지 않는다 — /api/status는 3초마다 불린다.
+_PRICE_SEED_FILE_CACHE: dict = {}
+
+
+def _price_seed_meta(source: str, **fields: object) -> dict:
+    """source: memory(수집 중인 봉) · file(저장 파일) · none(파일 없음) · error(읽기 실패) ·
+    skipped(보완할 구간이 없거나 기준 시각을 몰라 읽지 않음)."""
+    meta: dict = {
+        "source": source, "date": None, "count": 0, "invalid": 0,
+        "missing_minutes": 0, "first": None, "last": None, "stale": False,
+    }
+    meta.update(fields)
+    return meta
+
+
+def _stored_bar_rows(trade_date: str, ticker: str) -> tuple[list, str, bool]:
+    """그날 그 종목의 1분 봉과 출처, 그리고 지난 판독을 재사용했는지(stale).
+
+    수집 중인 계열은 메모리(`bars.series`)가 파일의 원본이라 파일을 읽지 않는다. 마감된
+    계열·재시작 뒤는 파일을 읽되 캐시한다. 쓰는 중이라 잘렸거나 잠깐 없는 파일, 읽기 실패는
+    같은 (날짜, 종목)의 지난 판독이 있으면 그것을 계속 쓰고(stale=True), 없으면 none/error다.
+    """
+    rows = bars.series(trade_date, ticker)
+    if rows:
+        return rows, "memory", False
+    key = (trade_date, ticker)
+    path = bars.bars_path(trade_date, ticker)
+    cached = _PRICE_SEED_FILE_CACHE if _PRICE_SEED_FILE_CACHE.get("key") == key else None
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        # 지웠다 다시 쓰는 교체 도중에는 파일이 잠깐 없다. 같은 계열을 읽은 적이 있으면 그것을 쓴다.
+        return (cached["rows"], "file", True) if cached else ([], "none", False)
+    except OSError:
+        return (cached["rows"], "file", True) if cached else ([], "error", False)
+    signature = (stat.st_mtime_ns, stat.st_size)
+    if cached and cached.get("signature") == signature:
+        return cached["rows"], "file", False
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(parsed, list):
+            raise ValueError("bars file is not a list")
+    except (OSError, ValueError):
+        return (cached["rows"], "file", True) if cached else ([], "error", False)
+    _PRICE_SEED_FILE_CACHE.clear()
+    _PRICE_SEED_FILE_CACHE.update({"key": key, "signature": signature, "rows": parsed})
+    return parsed, "file", False
+
+
+def _price_flow_seed(
+    ticker: str | None,
+    since: datetime | None,
+    minute_rows: list[dict],
+    *,
+    need_since: bool = False,
+) -> tuple[list[dict], dict]:
+    """가격흐름 차트의 앞 구간 보완 행과 메타. 읽기 전용이고 어떤 실패도 status를 깨지 않는다.
+
+    날짜는 `since`(진입 시각 또는 오늘 0시)의 KST 날짜다. 메모리 분 이력이 이미 `since`의
+    분부터 있으면 밀려난 구간이 없으므로 봉을 읽지 않는다.
+    """
+    try:
+        if not ticker or not _BARS_TICKER_RE.match(ticker) or (need_since and since is None):
+            return [], _price_seed_meta("skipped")
+        now = datetime.now(KST)
+        anchor = since if since is not None else now
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=KST)
+        trade_date = anchor.astimezone(KST).strftime("%Y%m%d")
+        first_memory = _parse_ts(minute_rows[0].get("ts")) if minute_rows else None
+        if first_memory is not None and first_memory.tzinfo is None:
+            first_memory = first_memory.replace(tzinfo=KST)
+        if (
+            first_memory is not None
+            and since is not None
+            and first_memory.replace(second=0, microsecond=0)
+            <= anchor.replace(second=0, microsecond=0)
+        ):
+            return [], _price_seed_meta("skipped", date=trade_date)
+        bar_rows, source, stale = _stored_bar_rows(trade_date, ticker)
+        rows, stats = _price_seed_from_bars(
+            bar_rows, trade_date=trade_date, since=since, before=first_memory, now=now,
+        )
+        return rows, _price_seed_meta(source, date=trade_date, stale=stale, **stats)
+    except Exception:  # noqa: BLE001 — 차트 보완이 상태 응답을 막으면 안 된다
+        return [], _price_seed_meta("error")
+
+
 @app.get("/api/status")
 async def api_status() -> JSONResponse:
     s = state.get()
@@ -625,12 +717,18 @@ async def api_status() -> JSONResponse:
     if s.position_status in _POSITION_VIEW_STATUSES:
         tick_rows = live.tick_history(s.target_ticker, since=s.entry_at)
         minute_rows = live.minute_price_history(s.target_ticker, since=s.entry_at)
+        # 진입 시각을 모르면 진입 전 봉을 걸러낼 기준이 없다 — 그때는 보완하지 않는다.
+        seed_rows, seed_meta = _price_flow_seed(
+            s.target_ticker, _parse_ts(s.entry_at), minute_rows, need_since=True
+        )
     elif observe_ticker:
         # 버퍼는 프로세스가 살아 있는 동안 이어지므로 지난 거래일 틱은 뺀다.
         tick_rows = live.tick_history(observe_ticker, since=_today_start())
         minute_rows = live.minute_price_history(observe_ticker, since=_today_start())
+        seed_rows, seed_meta = _price_flow_seed(observe_ticker, _today_start(), minute_rows)
     else:
         tick_rows, minute_rows = [], []
+        seed_rows, seed_meta = [], _price_seed_meta("skipped")
     logs = _read_today_logs(limit=_STATUS_LOG_LIMIT)
     assets = _asset_snapshot_cached() or await _latest_asset_snapshot_from_db()
     entry = s.entry_price or 0.0
@@ -674,6 +772,10 @@ async def api_status() -> JSONResponse:
             # 미보유 중에는 관측 종목의 오늘 이력을 내려준다.
             "tick_history": tick_rows,
             "minute_price_history": minute_rows,
+            # 메모리 분 이력(최근 180분)에서 밀려난 앞 구간을 저장 분봉 종가로 보완한다.
+            # ts는 분 시작, price는 그 분의 종가. 겹치는 분은 넣지 않는다(메모리 우선).
+            "minute_price_seed": seed_rows,
+            "minute_price_seed_meta": seed_meta,
             "trade_marks": (
                 await _today_trade_marks()
                 if s.position_status in ("HOLDING", "EXITING", "CLOSED")

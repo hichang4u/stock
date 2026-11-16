@@ -1,8 +1,13 @@
 ﻿"""Pure status/F1 display helpers for the API and tests."""
 
+import math
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from src.modules.f1_filter import GAP_MAX, GAP_MIN, select_liquidity_candidates
+
+_KST = ZoneInfo("Asia/Seoul")
 
 
 def latest_today_snapshot_path(snapshot_dir: Path, today: str) -> Path | None:
@@ -270,4 +275,102 @@ def f1_summary_from_rows(rows: list[dict]) -> dict:
             {**c, "verdict": f1_verdict(c)}
             for c in display_rows[:50]
         ],
+    }
+
+
+def _floor_minute_kst(value: datetime) -> datetime:
+    """분 단위로 내린 KST 시각. tz 없는 값은 KST로 본다(live의 기록이 KST다)."""
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=_KST)
+    return aware.astimezone(_KST).replace(second=0, microsecond=0)
+
+
+def _seed_close(row: dict) -> float | None:
+    close = row.get("close")
+    if isinstance(close, bool) or not isinstance(close, (int, float)):
+        return None
+    if not math.isfinite(close) or close <= 0:
+        return None
+    return float(close)
+
+
+def price_seed_from_bars(
+    bar_rows: list,
+    *,
+    trade_date: str,
+    since: datetime | None,
+    before: datetime | None,
+    now: datetime,
+) -> tuple[list[dict], dict]:
+    """저장된 1분 봉에서 가격흐름 차트의 앞 구간을 메울 분 종가를 고른다(순수).
+
+    메모리 분 이력(`live._MINUTE_HISTORY_MAX`분)에서 밀려난 구간만 메운다. 고르는 기준:
+
+    - 창: `since`를 분으로 내린 시각 이상(진입 분 포함 — `live.minute_price_history`와 같은
+      규칙), `before`를 분으로 내린 시각 미만. `before`는 메모리 분 이력의 첫 분이라 그 뒤는
+      메모리 분과 틱이 맡는다(겹치는 분은 메모리 우선).
+    - 끝난 분만: 봉의 분이 `now`까지 끝나지 않았으면 뺀다. 진행 중인 봉의 종가는 아직
+      바뀌는 값이다.
+    - 값: 종가가 유한한 양수인 봉만. 날짜가 다르거나 시각·종가를 못 읽는 행은 버리고
+      `invalid`로 센다. 빠진 분을 앞뒤 값으로 채우지 않는다.
+    - 같은 분이 두 번 있으면 뒤 행이 이긴다. 결과는 시각 오름차순이다.
+
+    돌려주는 행의 `ts`는 분의 **시작** 시각이고(`minute_price_history`와 같은 표기) `price`는
+    그 분의 종가다. 봉의 분은 거래소 체결시각 기준이고 메모리 분은 수신 시각 기준이라
+    분 경계에 걸친 체결은 서로 다른 분에 들어갈 수 있다 — 그래서 겹치는 분은 합치지 않고
+    메모리 분을 쓴다.
+
+    `missing_minutes`는 고른 구간 안과 메모리 첫 분 사이에 봉이 없는 분의 수다. 체결이 없던
+    분과 수집이 끊긴 분을 구분하지 못하므로 그대로 내보낸다.
+    """
+    lower = _floor_minute_kst(since) if since is not None else None
+    upper = _floor_minute_kst(before) if before is not None else None
+    now_kst = now if now.tzinfo is not None else now.replace(tzinfo=_KST)
+    try:
+        day = datetime.strptime(trade_date, "%Y%m%d").replace(tzinfo=_KST)
+    except ValueError:
+        return [], {"count": 0, "invalid": 0, "missing_minutes": 0, "first": None, "last": None}
+
+    by_minute: dict[int, float] = {}
+    invalid = 0
+    for row in bar_rows if isinstance(bar_rows, list) else []:
+        if not isinstance(row, dict):
+            invalid += 1
+            continue
+        text = str(row.get("time") or "")
+        row_date = row.get("date")
+        close = _seed_close(row)
+        if (
+            len(text) < 4
+            or not text[:4].isdigit()
+            or int(text[:2]) > 23
+            or int(text[2:4]) > 59
+            or (row_date is not None and str(row_date) != trade_date)
+            or close is None
+        ):
+            invalid += 1
+            continue
+        minute = int(text[:2]) * 60 + int(text[2:4])
+        start = day + timedelta(minutes=minute)
+        if lower is not None and start < lower:
+            continue
+        if upper is not None and start >= upper:
+            continue
+        if start + timedelta(minutes=1) > now_kst:
+            continue
+        by_minute[minute] = close
+
+    minutes = sorted(by_minute)
+    rows = [
+        {"ts": (day + timedelta(minutes=m)).isoformat(), "price": by_minute[m]}
+        for m in minutes
+    ]
+    missing = sum(b - a - 1 for a, b in zip(minutes, minutes[1:]))
+    if minutes and upper is not None and upper.date() == day.date():
+        missing += max(0, upper.hour * 60 + upper.minute - minutes[-1] - 1)
+    return rows, {
+        "count": len(rows),
+        "invalid": invalid,
+        "missing_minutes": missing,
+        "first": rows[0]["ts"] if rows else None,
+        "last": rows[-1]["ts"] if rows else None,
     }

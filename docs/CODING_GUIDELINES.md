@@ -397,7 +397,8 @@ task.add_done_callback(_guard)
 - F4 WS와 REST가 공용 틱 처리 헬퍼를 통하는지, CLOSED 관측 중에는 가격만 저장하는지 각각 테스트한다.
 - `F4_POST_CLOSE_OBSERVE_UNTIL` 오타와 손상된 `entry_at`의 1회 WARN을 테스트한다.
 - F5는 잔고 0, 잔고 조회 실패, 체결조회 타임아웃, 부분체결, DB 기록 실패를 각각 회귀 테스트한다.
-- 가격흐름은 5,000 tick 초과, 분 이력 보완, 종목 필터, 청산 후 마커, 다운샘플링을 Python/Node 테스트로 나눠 검증한다.
+- 가격흐름은 5,000 tick 초과, 분 이력 보완, 저장 분봉 보완(하루 전체·겹침·빈 분·읽기 실패), 종목·거래일 전환,
+  종목 필터, 청산 후 마커, 다운샘플링을 Python/Node 테스트로 나눠 검증한다.
 
 ```python
 # Python / pytest → Step Trailing 유닛 테스트 패턴

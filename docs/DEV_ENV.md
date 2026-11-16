@@ -861,9 +861,13 @@ for line in open('data/logs/20260901.jsonl', encoding='utf-8'):
   `dnca_tot_amt`와 `prvs_rcdl_excc_amt`(가수도정산금액) 중 큰 값을 fallback으로 사용한다.
   이 값은 주문 가능 보장이 아니며, 종목별 정확한 주문가능수량/금액 판단은 F3의 매수가능조회 경로를
   우선한다.
-- 보유 후 가격흐름은 `/api/status`의 `tick_history`, `minute_price_history`, `trade_marks`를 함께 사용한다.
+- 보유 후 가격흐름은 `/api/status`의 `tick_history`, `minute_price_history`, `minute_price_seed`, `trade_marks`를 함께 사용한다.
   - 원시 tick은 최대 5,000개, 분 단위 마지막 가격은 별도 버퍼에 최대 180분 보관한다.
-  - 보유 중에는 최근 20분 슬라이딩 창, 청산 후에는 진입부터 마지막 체결/tick까지 고정 범위를 표시한다.
+  - 180분에서 밀려난 앞 구간은 저장된 1분 봉 종가(`minute_price_seed`)로 잇는다. 합치는 기준은
+    `docs/TABLE_DESIGN.md`의 "세 자료를 한 선으로 합치는 기준"에 있다(2026-11-16: 13:28에 오전 선이 없던 결함).
+  - 가로(시간)는 `최근 20분` / `진입 후 전체`(매수부터 최신 관측까지, 매도 후 관측 포함),
+    세로(가격)는 `전체 가격` / `청산선 주변`(Trail Stop·현재가·보유 고가 주변 확대, 표시 전용) 두 버튼 묶음으로 고른다.
+    저장값(`priceFlowRange`=recent/trade, `priceFlowScale`=full/trailing)은 이름을 바꾸기 전과 같다.
   - SSE tick은 증분 추가하고 렌더링은 최소 150ms 간격으로 묶는다. 화면 폭을 넘으면 구간별 최솟값/최댓값 보존 방식으로 다운샘플링한다.
   - 차트는 컨테이너 폭 100%를 사용하며 시간 범위에 따라 1/2/5/10분 격자와 적응형 라벨 간격을 선택한다.
   - 당일 체결 주문은 매수/매도 마커로 표시하고, 마지막 가격은 가격 점·현재가·마지막 매도·마지막 매수 순으로 fallback한다.
@@ -876,6 +880,8 @@ for line in open('data/logs/20260901.jsonl', encoding='utf-8'):
 .\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
 node tests\js\price_flow_checks.js
 ```
+
+`price_flow_checks.js`는 `tests/test_ui_price_flow_checks.py`가 pytest 안에서도 돌린다(node가 있을 때).
 
 운영 보강 변경만 빠르게 확인할 때:
 

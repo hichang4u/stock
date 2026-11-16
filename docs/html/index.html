@@ -5,7 +5,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/app.css?v=20260828-hts">
+<link rel="stylesheet" href="assets/app.css?v=20261116-flowseed2">
 
 <!-- TOP BAR -->
 <div class="tb">
@@ -127,24 +127,29 @@
               <div class="flow-sub" id="flow-sub">틱 수신 대기</div>
             </div>
             <div class="flow-head-right">
-              <div class="flow-scale" role="group" aria-label="가로 구간 모드">
-                <button class="fp on" id="range-recent" type="button" data-range="recent"
-                  aria-pressed="true"
-                  title="오른쪽 끝이 최신인 최근 20분 슬라이딩 창. 관측이 이어져도 구간이 늘어나지 않습니다."
-                  onclick="setPriceFlowRange('recent')">최근 20분</button>
-                <button class="fp" id="range-trade" type="button" data-range="trade"
-                  aria-pressed="false"
-                  title="진입부터 마지막까지 전체를 한 화면에 고정합니다. 매수·매도 마커를 함께 봅니다."
-                  onclick="setPriceFlowRange('trade')">거래 전체</button>
-              </div>
-              <div class="flow-scale" role="group" aria-label="세로 스케일 모드">
-                <button class="fp on" id="scale-full" type="button" data-scale="full"
-                  aria-pressed="true" title="전체 가시 가격 범위로 세로 축을 맞춥니다."
-                  onclick="setPriceFlowScale('full')">전체</button>
-                <button class="fp" id="scale-trailing" type="button" data-scale="trailing"
-                  aria-pressed="false"
-                  title="trail_stop·현재가·최고가 기준 트레일링 구간에 세로 축을 집중합니다(데이터 없으면 전체로 자동 대체)."
-                  onclick="setPriceFlowScale('trailing')">트레일링</button>
+              <div class="flow-ctls">
+                <div class="flow-scale" role="group" aria-label="시간 구간(가로축)">
+                  <span class="flow-ctl-lbl" aria-hidden="true">시간 ↔</span>
+                  <button class="fp on" id="range-recent" type="button" data-range="recent"
+                    aria-pressed="true"
+                    title="가로축: 오른쪽 끝이 최신인 최근 20분만 봅니다. 그 앞 구간은 화면 밖으로 밀려납니다."
+                    onclick="setPriceFlowRange('recent')">최근 20분</button>
+                  <button class="fp" id="range-trade" type="button" data-range="trade"
+                    aria-pressed="false"
+                    title="가로축: 매수부터 최신 관측까지 한 화면에 고정합니다. 매도 뒤에 이어진 관측도 포함합니다. 앞 구간은 저장된 1분 봉 종가로 잇습니다."
+                    onclick="setPriceFlowRange('trade')">진입 후 전체</button>
+                </div>
+                <div class="flow-scale" role="group" aria-label="가격 범위(세로축)">
+                  <span class="flow-ctl-lbl" aria-hidden="true">가격 ↕</span>
+                  <button class="fp on" id="scale-full" type="button" data-scale="full"
+                    aria-pressed="true"
+                    title="세로축: 지금 보이는 구간의 가격이 모두 들어오게 맞춥니다."
+                    onclick="setPriceFlowScale('full')">전체 가격</button>
+                  <button class="fp" id="scale-trailing" type="button" data-scale="trailing"
+                    aria-pressed="false"
+                    title="세로축: 청산선(Trail Stop)·현재가·보유 고가 주변만 확대합니다. 범위 밖의 지난 가격선은 잘려 보일 수 있습니다. 청산선이 없으면 전체 가격으로 그립니다. 화면 표시만 바뀌고 주문·손절 기준은 그대로입니다."
+                    onclick="setPriceFlowScale('trailing')">청산선 주변</button>
+                </div>
               </div>
               <div class="flow-legend">
                 <span><i class="lg-cur"></i>현재</span>
@@ -155,7 +160,14 @@
               </div>
             </div>
           </div>
-          <canvas id="price-flow" width="760" height="180"></canvas>
+          <div class="flow-hint" id="flow-hint" role="status">
+            <span class="flow-hint-item"><b>시간 ↔</b><span id="flow-hint-time">최근 20분만 표시 · 그 앞은 화면 밖</span></span>
+            <span class="flow-hint-item"><b>가격 ↕</b><span id="flow-hint-price">보이는 구간의 가격 전체</span></span>
+          </div>
+          <div class="flow-data" id="flow-data"
+            title="서버 메모리는 최근 분 가격 180개·틱 5,000개까지만 보관합니다. 그 앞 구간은 저장된 1분 봉의 종가로 잇고, 저장된 자료도 없는 구간은 비워 둡니다.">선: 틱 수신 대기</div>
+          <canvas id="price-flow" width="760" height="180" role="img"
+            aria-label="가격흐름 차트" aria-describedby="flow-sub flow-hint flow-data"></canvas>
           <div class="bars-chart">
             <div class="bars-head">
               <div class="bars-sub" id="bars-sub">봉 수집 대기</div>
@@ -414,5 +426,5 @@
   </div>
 </div>
 
-<script src="assets/app.js?v=20261023-observe"></script>
+<script src="assets/app.js?v=20261116-flowseed"></script>
 <script src="assets/bars_chart.js?v=20260828-hts"></script>

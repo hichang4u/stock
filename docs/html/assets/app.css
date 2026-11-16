@@ -3,10 +3,11 @@
   --tx:#d1d4dc;--mu:#787b86;--br:#f7a600;
   --up:#26a69a;--dn:#ef5350;--bl:#2962ff;
   --mn:'Noto Sans KR',system-ui,sans-serif;
+  --wn:#f7a600; /* 알림 글자·테두리. 라이트 테마에서는 흰 바탕 대비가 나오게 어둡게 둔다 */
 }
 [data-theme="light"]{
   --g:#ffffff;--s:#eaecf2;--s2:#d5d8e0;--bd:#c8cbd6;
-  --tx:#131722;--mu:#4f5260;
+  --tx:#131722;--mu:#4f5260;--wn:#9a5b00;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{height:100%;overflow:hidden;}
@@ -156,7 +157,18 @@ body{background:var(--g);color:var(--tx);font-family:'Noto Sans KR',system-ui,sa
 .flow-title{font-size:11px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;}
 .flow-sub{font-family:var(--mn);font-size:11px;color:var(--mu);margin-top:2px;}
 .flow-head-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;}
-.flow-scale{display:flex;gap:4px;}
+/* 가로(시간)·세로(가격) 조작을 한 줄에 나란히 두되 각 묶음 앞에 축 이름을 붙인다 */
+.flow-ctls{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px 14px;}
+.flow-scale{display:flex;align-items:center;gap:4px;}
+.flow-ctl-lbl{font-size:10px;color:var(--mu);white-space:nowrap;margin-right:2px;}
+/* '청산선 주변'을 골랐지만 청산선이 없어 전체 가격으로 그린 상태 */
+.fp.on.fb{background:transparent;border-style:dashed;border-color:var(--wn);color:var(--mu);}
+.fp:focus-visible{outline:2px solid var(--wn);outline-offset:1px;}
+.flow-hint{display:flex;flex-wrap:wrap;gap:2px 16px;font-size:11px;color:var(--mu);margin-bottom:3px;}
+.flow-hint-item{display:flex;gap:5px;min-width:0;}
+.flow-hint-item b{font-weight:600;color:var(--tx);white-space:nowrap;}
+.flow-hint .warn{color:var(--wn);}
+.flow-data{font-family:var(--mn);font-size:10px;color:var(--mu);margin-bottom:6px;overflow-wrap:anywhere;}
 .flow-legend{display:flex;align-items:center;gap:10px;font-size:10px;color:var(--mu);white-space:nowrap;}
 .flow-legend span{display:flex;align-items:center;gap:4px;}
 .flow-legend i{width:14px;height:2px;display:inline-block;}
@@ -297,6 +309,11 @@ tr:hover td{background:var(--s2);}
 .tb-theme:hover{color:var(--tx);}
 
 @media (max-width:980px){
+  .flow-head{flex-direction:column;}
+  .flow-head-right{align-items:flex-start;}
+  .flow-ctls{justify-content:flex-start;}
+  .flow-scale{flex-wrap:wrap;}
+  .flow-legend{flex-wrap:wrap;white-space:normal;}
   .asset-strip{flex-wrap:wrap;height:auto;padding:7px 16px;gap:6px 12px;}
   .asset-cell.push{margin-left:0;}
   .t-right{width:280px;}

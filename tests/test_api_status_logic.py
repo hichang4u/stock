@@ -1,4 +1,6 @@
 ﻿import os
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import src.api.status_logic as status_logic
 
@@ -266,3 +268,150 @@ def test_parse_asset_snapshot_response_rejects_invalid_number():
         assert "invalid field dnca_tot_amt" in str(exc)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+# ── 가격흐름 앞 구간 보완(price_seed_from_bars) ─────────────────────────────
+_SEED_KST = ZoneInfo("Asia/Seoul")
+_SEED_DAY = datetime(2026, 11, 16, tzinfo=_SEED_KST)
+
+
+def _seed_at(hhmm: str, second: int = 0) -> datetime:
+    return _SEED_DAY.replace(hour=int(hhmm[:2]), minute=int(hhmm[2:]), second=second)
+
+
+def _seed_bar(hhmm: str, close: object, date: str = "20261116") -> dict:
+    return {"date": date, "time": f"{hhmm}00", "open": 1.0, "high": 1.0, "low": 1.0,
+            "close": close, "volume": 1.0, "confirmed": True}
+
+
+def _seed_day_bars() -> list[dict]:
+    """정규장 하루치 390분(09:00~15:29). 종가는 분마다 1원씩 오른다."""
+    start = _seed_at("0900")
+    return [
+        _seed_bar((start + timedelta(minutes=i)).strftime("%H%M"), 13_000.0 + i)
+        for i in range(390)
+    ]
+
+
+def _seed(
+    bars: list,
+    *,
+    trade_date: str = "20261116",
+    since: datetime | None = _seed_at("0900", 28),
+    before: datetime | None = None,
+    now: datetime = _seed_at("1600"),
+) -> tuple[list[dict], dict]:
+    """기본값: 09:00:28 진입, 메모리 분 이력 없음, 장 마감 뒤(16:00)에 조회."""
+    return status_logic.price_seed_from_bars(
+        bars, trade_date=trade_date, since=since, before=before, now=now,
+    )
+
+
+def test_price_seed_fills_only_the_minutes_memory_has_dropped():
+    # 2026-11-16 13:28: 메모리 분 이력은 10:28부터였고 저장 봉은 09:00부터 있었다.
+    rows, meta = _seed(_seed_day_bars(), before=_seed_at("1028"), now=_seed_at("1328", 30))
+
+    assert rows[0] == {"ts": "2026-11-16T09:00:00+09:00", "price": 13_000.0}
+    assert rows[-1] == {"ts": "2026-11-16T10:27:00+09:00", "price": 13_087.0}
+    assert len(rows) == 88
+    assert meta == {
+        "count": 88, "invalid": 0, "missing_minutes": 0,
+        "first": "2026-11-16T09:00:00+09:00", "last": "2026-11-16T10:27:00+09:00",
+    }
+
+
+def test_price_seed_covers_a_full_session_across_noon_when_memory_is_empty():
+    rows, meta = _seed(_seed_day_bars())
+
+    assert len(rows) == 390
+    assert rows[0]["ts"] == "2026-11-16T09:00:00+09:00"
+    assert rows[-1]["ts"] == "2026-11-16T15:29:00+09:00"
+    stamps = [row["ts"] for row in rows]
+    assert stamps == sorted(stamps)
+    assert "2026-11-16T11:59:00+09:00" in stamps and "2026-11-16T12:00:00+09:00" in stamps
+    assert meta["missing_minutes"] == 0
+
+
+def test_price_seed_keeps_the_entry_minute_and_drops_every_bar_before_it():
+    # live.minute_price_history와 같은 규칙: since를 분으로 내려 진입 분은 포함한다.
+    rows, _ = _seed(_seed_day_bars(), since=_seed_at("0905", 28), before=_seed_at("0910"))
+
+    assert [row["ts"][11:16] for row in rows] == ["09:05", "09:06", "09:07", "09:08", "09:09"]
+
+
+def test_price_seed_never_returns_a_minute_that_has_not_finished():
+    # 10:15:30 — 10:15 봉은 아직 종가가 바뀐다. 그 뒤 시각의 봉은 미래다.
+    rows, _ = _seed(_seed_day_bars(), since=_seed_at("1010"), now=_seed_at("1015", 30))
+
+    assert [row["ts"][11:16] for row in rows] == ["10:10", "10:11", "10:12", "10:13", "10:14"]
+    exact, _ = _seed(_seed_day_bars(), since=_seed_at("1014"), now=_seed_at("1015"))
+    assert [row["ts"][11:16] for row in exact] == ["10:14"]
+
+
+def test_price_seed_drops_unusable_rows_and_counts_them():
+    bars = [
+        _seed_bar("0900", 13_000.0),
+        _seed_bar("0901", 0),
+        _seed_bar("0902", -5.0),
+        _seed_bar("0903", float("nan")),
+        _seed_bar("0904", float("inf")),
+        _seed_bar("0905", "13000"),
+        _seed_bar("0906", None),
+        _seed_bar("0907", True),
+        {"date": "20261116", "time": "xx0800", "close": 13_000.0},
+        {"date": "20261116", "time": "2561", "close": 13_000.0},
+        _seed_bar("0908", 13_008.0, date="20261113"),
+        "not-a-row",
+        _seed_bar("0909", 13_009),
+    ]
+
+    rows, meta = _seed(bars)
+
+    assert rows == [
+        {"ts": "2026-11-16T09:00:00+09:00", "price": 13_000.0},
+        {"ts": "2026-11-16T09:09:00+09:00", "price": 13_009.0},
+    ]
+    assert meta["invalid"] == 11
+    # 못 쓰는 분을 앞뒤 값으로 메우지 않는다 — 빈 분으로 드러낸다.
+    assert meta["missing_minutes"] == 8
+
+
+def test_price_seed_sorts_and_keeps_the_last_row_of_a_repeated_minute():
+    bars = [
+        _seed_bar("0903", 103.0),
+        _seed_bar("0901", 101.0),
+        _seed_bar("0902", 102.0),
+        _seed_bar("0901", 111.0),
+    ]
+
+    rows, meta = _seed(bars)
+
+    assert [(row["ts"][11:16], row["price"]) for row in rows] == [
+        ("09:01", 111.0), ("09:02", 102.0), ("09:03", 103.0),
+    ]
+    assert meta["count"] == 3 and meta["invalid"] == 0
+
+
+def test_price_seed_counts_missing_minutes_up_to_the_first_memory_minute():
+    bars = [_seed_bar("0900", 100.0), _seed_bar("0901", 101.0), _seed_bar("0905", 105.0)]
+
+    rows, meta = _seed(bars, before=_seed_at("0910"))
+
+    assert len(rows) == 3
+    # 09:02~09:04(3분) + 09:06~09:09(4분)
+    assert meta["missing_minutes"] == 7
+
+
+def test_price_seed_treats_naive_times_as_kst_and_rejects_a_bad_date():
+    naive_since = datetime(2026, 11, 16, 9, 2, 10)
+    naive_now = datetime(2026, 11, 16, 9, 4, 0)
+    rows, _ = status_logic.price_seed_from_bars(
+        _seed_day_bars(), trade_date="20261116", since=naive_since, before=None, now=naive_now,
+    )
+    assert [row["ts"][11:16] for row in rows] == ["09:02", "09:03"]
+
+    empty, meta = _seed(_seed_day_bars(), trade_date="2026-11-16")
+    assert empty == [] and meta["count"] == 0
+
+    not_list, meta = _seed({"time": "090000"})  # type: ignore[arg-type]
+    assert not_list == [] and meta["invalid"] == 0
