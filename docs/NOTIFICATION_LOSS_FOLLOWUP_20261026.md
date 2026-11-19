@@ -186,6 +186,11 @@
   `possible_duplicate=true`, 09:00:34.175. 체결 확정(09:00:21.298)에서 13초 뒤에 끝났다. 11/05와 같은 모양이다. 사용자가 몇 번
   받았는지는 확인하지 않았다. 그 무렵 KIS REST는 평소 수준이었다(진입 티켓 8.25절). 청산 알림은 첫 시도에 나갔다.
   `NOTIFICATION_FAILED` 0건, 재시작 없음.
+- 11/13: `NOTIFICATION_RETRIED`·`NOTIFICATION_FAILED` 0건.
+- 11/16: `NOTIFICATION_RETRIED` 1건. 매수 체결 알림(010170), `attempts=2`, `errors=['ReadTimeout']`, `possible_duplicate=true`,
+  09:00:39.657. `NOTIFICATION_FAILED` 0건, 재시작 없음.
+- 11/17 ~ 11/19: `NOTIFICATION_RETRIED`·`NOTIFICATION_FAILED` 0건. 11/19 17:17 승격 재시작 뒤 `LATE_OPEN_DAY` 알림 1건(새 이벤트,
+  `release/20261119-1`).
 
 ### 8.8 2026-11-09 — 실패한 매수 알림이 재시작으로 "확인 안 됨" 목록에서 사라졌다
 
