@@ -19,7 +19,7 @@ if os.getenv("DRY_RUN", "0") == "1":
 
 import uvicorn  # noqa: E402
 
-from src import db, live, notifier, readiness, state  # noqa: E402
+from src import db, live, market_calendar, notifier, readiness, state  # noqa: E402
 from src.api import auth, kis_rest, server  # noqa: E402
 from src.modules import (  # noqa: E402
     baseline_experiment,
@@ -80,6 +80,8 @@ _f3_started = False
 # 휴장 확인된 날짜(YYYYMMDD). 날짜를 함께 저장해 당일 확인된 휴장에만 적용 —
 # HOLDING으로 일일 리셋이 막히거나 휴장 API가 실패해도 다음 거래일을 막지 않는다.
 _market_closed_date: str | None = None
+# 10시 개장일 알림을 보낸 날짜. 08:29 잡과 기동이 둘 다 부르므로 하루 한 번만 알린다.
+_late_open_announced_date: str | None = None
 
 
 def _today() -> str:
@@ -96,6 +98,36 @@ def _is_trading_weekday() -> bool:
 
 def _is_market_closed_today() -> bool:
     return _market_closed_date == _today()
+
+
+def _is_late_open_today() -> bool:
+    """KRX가 10:00에 여는 날(`src/market_calendar.py`). 그날은 진입하지 않는다."""
+    return market_calendar.is_late_open(_today())
+
+
+def _entry_skipped_today() -> bool:
+    """진입 경로(장전 프로브·잔고 선조회·F1~F3·catchup)를 멈출 날인가.
+
+    휴장일과 10시 개장일이다. 청산(F5)은 휴장일만 멈춘다 — 10시 개장일은 장이 열리므로, 전날
+    포지션이 남는 비정상 상황에서도 청산 경로는 살아 있어야 한다.
+    """
+    return _is_market_closed_today() or _is_late_open_today()
+
+
+async def _announce_late_open() -> None:
+    """10시 개장일이면 하루 한 번 기록하고 알린다. 08:29 잡과 기동 때 부른다."""
+    global _late_open_announced_date
+    today = _today()
+    reason = market_calendar.late_open_reason(today)
+    if reason is None or _late_open_announced_date == today:
+        return
+    _late_open_announced_date = today
+    logger.log("LATE_OPEN_DAY", level="INFO", date=today, reason=reason, action="SKIP_ENTRY")
+    await notifier.send(
+        "LATE_OPEN_DAY",
+        level="INFO",
+        message=f"10시 개장일({today}, {reason}). 오늘은 진입하지 않습니다.",
+    )
 
 
 async def _ensure_trading_day() -> None:
@@ -298,6 +330,7 @@ async def job_token_refresh() -> None:
     await _ensure_trading_day()
     await auth.refresh()
     await _check_market_holiday()
+    await _announce_late_open()
 
 
 async def job_ntp_check() -> None:
@@ -330,7 +363,7 @@ async def job_f1() -> None:
     global _f1_result
     pipeline_started = time.perf_counter()
     await _ensure_trading_day()
-    if _is_market_closed_today():
+    if _entry_skipped_today():
         return
     if await _skip_entry_pipeline_if_trade_exists("JOB_F1"):
         return
@@ -449,7 +482,7 @@ async def job_f1() -> None:
 
 async def job_paper_fast_probe() -> None:
     await _ensure_trading_day()
-    if _is_market_closed_today():
+    if _entry_skipped_today():
         return
     try:
         await paper_fast_probe.prepare()
@@ -472,7 +505,7 @@ async def job_paper_fast_probe() -> None:
 async def job_balance_snapshot_prefetch() -> None:
     """Prepare PAPER entry cash independently from the Fast Path probe."""
     await _ensure_trading_day()
-    if _is_market_closed_today():
+    if _entry_skipped_today():
         return
     budget_sec = _paper_fast_balance_prefetch_budget_seconds()
     if budget_sec <= 0:
@@ -523,7 +556,7 @@ def _paper_fast_balance_prefetch_budget_seconds(
 
 async def job_f2() -> None:
     await _ensure_trading_day()
-    if _is_market_closed_today():
+    if _entry_skipped_today():
         return
     if await _skip_entry_pipeline_if_trade_exists("JOB_F2"):
         return
@@ -538,7 +571,7 @@ async def job_f2() -> None:
 async def job_f3() -> None:
     global _f3_started
     await _ensure_trading_day()
-    if _is_market_closed_today():
+    if _entry_skipped_today():
         return
     if await _skip_entry_pipeline_if_trade_exists("JOB_F3"):
         return
@@ -614,6 +647,12 @@ async def _run_catchup() -> None:
     if not force and _is_market_closed_today():
         logger.log(
             "CATCHUP_SKIP_MARKET_CLOSED", level="INFO", message="휴장일 기동 — 진입 catchup 생략"
+        )
+        return
+
+    if not force and _is_late_open_today():
+        logger.log(
+            "CATCHUP_SKIP_LATE_OPEN", level="INFO", message="10시 개장일 기동 — 진입 catchup 생략"
         )
         return
 
@@ -1392,6 +1431,7 @@ async def main() -> None:
         time_sync.check_ntp(NTP_SERVERS)
         # 휴장일에 기동해도 catchup·스케줄 잡이 돌지 않도록 시작 시점에 1회 확인
         await _check_market_holiday()
+        await _announce_late_open()
 
     # F4: 상주 루프 — 거래일마다 HOLDING을 기다렸다가 추적한다.
     # 일회성 run()을 직접 띄우면 CLOSED 상태로 복원된 뒤 영구 종료되어

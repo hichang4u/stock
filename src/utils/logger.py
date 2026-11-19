@@ -211,6 +211,8 @@ EVENT_LABELS = {
     "F3_RECHECK_QUOTE_RECOVERED": "F3 재검증 시세 복구(F3 Recheck Quote Recovered)",
     "ENTRY_FAIL": "진입 실패(Entry Failed)",
     "MARKET_CLOSED": "휴장일 감지(Market Closed)",
+    "LATE_OPEN_DAY": "10시 개장일 진입 생략(Late Open Day)",
+    "CATCHUP_SKIP_LATE_OPEN": "10시 개장일 catchup 생략(Catchup Skip Late Open)",
     "MARKET_CLOSED_RESTORED": "휴장 상태 복원(Market Closed Restored)",
     "DAY_SKIP_RESTORED": "당일 스킵 상태 복원(Day Skip Restored)",
     "SLIPPAGE_GUARD": "슬리피지 가드 발동(Slippage Guard)",

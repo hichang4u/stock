@@ -2445,3 +2445,128 @@ async def test_job_f1_ranking_shadow_failure_does_not_break_pipeline(monkeypatch
     await main.job_f1()
 
     assert calls == ["f3", "progress"]
+
+
+# ── 10시 개장일: 진입 경로만 멈춘다 (docs/DAILY_LOG_ANALYSIS_20261119.md 8절의 나) ──
+
+
+@pytest.fixture
+def late_open_today(monkeypatch):
+    """오늘을 10시 개장일로 만든다. 알림 중복 방지 날짜도 비운다."""
+    monkeypatch.setitem(main.market_calendar.LATE_OPEN_DAYS, main._today(), "테스트용 10시 개장일")
+    monkeypatch.setattr(main, "_late_open_announced_date", None)
+    return main._today()
+
+
+async def test_late_open_day_skips_every_entry_job(monkeypatch, late_open_today):
+    prepare = AsyncMock(return_value=["005930"])
+    cash = AsyncMock()
+    observe = AsyncMock(return_value=[])
+    legacy = AsyncMock(return_value=[{"ticker": "005930"}])
+    f2_run = AsyncMock()
+    f3_run = AsyncMock()
+    monkeypatch.setattr(main.paper_fast_probe, "prepare", prepare)
+    monkeypatch.setattr(main.f3_entry, "prepare_available_cash_snapshot", cash)
+    monkeypatch.setattr(main.paper_fast_probe, "observe_open_boundary", observe)
+    monkeypatch.setattr(main.f1_filter, "run", legacy)
+    monkeypatch.setattr(main.f2_lockup, "run", f2_run)
+    monkeypatch.setattr(main.f3_entry, "run", f3_run)
+    # F2·F3 예약 잡이 앞 단계 결과만으로 들어가지 않는지도 본다.
+    main._f1_result = [{"ticker": "005930"}]
+    state_mod.get().target_ticker = "005930"
+
+    await main.job_paper_fast_probe()
+    await main.job_balance_snapshot_prefetch()
+    await main.job_f1()
+    await main.job_f2()
+    await main.job_f3()
+
+    prepare.assert_not_awaited()
+    cash.assert_not_awaited()
+    observe.assert_not_awaited()
+    legacy.assert_not_awaited()
+    f2_run.assert_not_awaited()
+    f3_run.assert_not_awaited()
+    # 휴장으로 표시하지 않는다 — 장은 열린다.
+    assert main._is_market_closed_today() is False
+
+
+async def test_late_open_day_still_runs_the_close_jobs(monkeypatch, late_open_today):
+    """전날 포지션이 남는 비정상 상황에서도 청산 경로는 살아 있어야 한다."""
+    f5_precheck = AsyncMock()
+    f5_exec = AsyncMock()
+    monkeypatch.setattr(main.f5_timeout, "precheck", f5_precheck)
+    monkeypatch.setattr(main.f5_timeout, "execute", f5_exec)
+
+    await main.job_f5_precheck()
+    await main.job_f5_exec()
+
+    f5_precheck.assert_awaited_once()
+    f5_exec.assert_awaited_once()
+
+
+async def test_late_open_day_skips_catchup(monkeypatch, late_open_today):
+    f1_run = AsyncMock(return_value=[{"ticker": "005930"}])
+    events: list[str] = []
+    monkeypatch.delenv("DRY_RUN", raising=False)
+    monkeypatch.delenv("FORCE_CATCHUP", raising=False)
+    monkeypatch.setattr(main, "_is_trading_weekday", lambda: True)
+    monkeypatch.setattr(main.db, "get_trade_by_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.f1_filter, "run", f1_run)
+    monkeypatch.setattr(main.notifier, "send", AsyncMock())
+    monkeypatch.setattr(main.logger, "log", lambda event, **_: events.append(event))
+    # catchup 창(09:00 ~ 09:11) 안에서 기동한 것으로 둔다.
+    monkeypatch.setattr(
+        main, "_scheduled_at", lambda h, m, s=0: main.datetime.now(main.KST) - timedelta(minutes=1)
+        if (h, m) == (main.F1_H, main.F1_M) else main.datetime.now(main.KST) + timedelta(minutes=5)
+    )
+
+    await main._run_catchup()
+
+    f1_run.assert_not_awaited()
+    assert "CATCHUP_SKIP_LATE_OPEN" in events
+    assert main._f2_done is False and main._f3_started is False
+
+
+async def test_late_open_day_is_announced_once(monkeypatch, late_open_today):
+    send = AsyncMock()
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.logger, "log", lambda event, **f: events.append((event, f)))
+
+    await main._announce_late_open()
+    await main._announce_late_open()  # 08:29 잡과 기동이 둘 다 부른다
+
+    send.assert_awaited_once()
+    assert send.await_args.args[0] == "LATE_OPEN_DAY"
+    logged = [f for e, f in events if e == "LATE_OPEN_DAY"]
+    assert len(logged) == 1
+    assert logged[0]["date"] == late_open_today
+    assert logged[0]["action"] == "SKIP_ENTRY"
+
+
+async def test_token_refresh_job_announces_the_late_open_day(monkeypatch, late_open_today):
+    send = AsyncMock()
+    monkeypatch.setenv("KIS_MODE", "PAPER")
+    monkeypatch.setattr(main.auth, "refresh", AsyncMock())
+    monkeypatch.setattr(main.notifier, "send", send)
+
+    await main.job_token_refresh()
+
+    assert [c.args[0] for c in send.await_args_list] == ["LATE_OPEN_DAY"]
+
+
+async def test_ordinary_day_is_neither_announced_nor_skipped(monkeypatch):
+    monkeypatch.setattr(main, "_late_open_announced_date", None)
+    send = AsyncMock()
+    prepare = AsyncMock(return_value=["005930"])
+    monkeypatch.setattr(main.notifier, "send", send)
+    monkeypatch.setattr(main.paper_fast_probe, "prepare", prepare)
+    monkeypatch.setattr(main.paper_fast_probe, "market_closed_detected", lambda: False)
+
+    await main._announce_late_open()
+    await main.job_paper_fast_probe()
+
+    send.assert_not_awaited()
+    prepare.assert_awaited_once()
+    assert main._entry_skipped_today() is False

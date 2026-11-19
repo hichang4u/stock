@@ -41,8 +41,12 @@ TRACK_A_SEGMENTS: list[dict] = [
      "changed": ["개장 직후 주문의 2초 체결 확인 창을 그 종목의 첫 체결부터 센다"
                  "(F3_FIRST_TRADE_WAIT_UNTIL_SEC=45)"]},
     # 11/06 장 마감 후 승격 기준. 승격일이 밀리면 이 경계도 옮긴다. 통보 티켓 8.9절.
-    {"name": "통보 체결 확정", "start": "20261109", "end": None,
+    {"name": "통보 체결 확정", "start": "20261109", "end": "20261119",
      "changed": ["모의 23필드 체결 통보를 장부에 써서 진입 체결을 조회보다 먼저 확정한다"]},
+    # 11/19 장 마감 후 승격을 가정한 경계. 승격일이 밀리면 이 경계도 옮긴다.
+    # docs/DAILY_LOG_ANALYSIS_20261119.md 8절의 나.
+    {"name": "10시 개장일 진입 생략", "start": "20261120", "end": None,
+     "changed": ["KRX가 10:00에 여는 날(src/market_calendar.py)에는 진입하지 않는다"]},
 ]
 
 

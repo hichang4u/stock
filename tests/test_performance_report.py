@@ -93,16 +93,21 @@ def test_first_trade_wait_opens_its_own_segment():
     names = [s["name"] for s in TRACK_A_SEGMENTS]
     parser = TRACK_A_SEGMENTS[names.index("파서 수정 후")]
     wait = TRACK_A_SEGMENTS[names.index("첫 체결 대기")]
-    notice = TRACK_A_SEGMENTS[-1]
+    notice = TRACK_A_SEGMENTS[names.index("통보 체결 확정")]
+    late_open = TRACK_A_SEGMENTS[-1]
     assert parser["end"] == "20261027"
     assert wait["start"] == "20261028" and wait["end"] == "20261106"
     assert len(wait["changed"]) == 1 and "F3_FIRST_TRADE_WAIT_UNTIL_SEC" in wait["changed"][0]
 
     # 2026-11-06 장 마감 후 승격(11/09 적용): 23필드 체결 통보를 장부에 쓴다(통보 티켓 8.9절).
-    assert notice["name"] == "통보 체결 확정"
-    assert notice["start"] == "20261109" and notice["end"] is None
+    assert notice["start"] == "20261109" and notice["end"] == "20261119"
     assert len(notice["changed"]) == 1 and "23필드" in notice["changed"][0]
-    assert current_segment() is notice
+
+    # 2026-11-19 결정(11/20 적용 가정): 10시 개장일에는 진입하지 않는다.
+    assert late_open["name"] == "10시 개장일 진입 생략"
+    assert late_open["start"] == "20261120" and late_open["end"] is None
+    assert len(late_open["changed"]) == 1 and "market_calendar" in late_open["changed"][0]
+    assert current_segment() is late_open
 
 
 def test_main_writes_a_run_and_returns_zero(tmp_path, capsys):

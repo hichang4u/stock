@@ -32,6 +32,19 @@ def _clear_stock_log_handlers() -> None:
 
 
 @pytest.fixture(autouse=True)
+def no_late_open_days(monkeypatch):
+    """실제 10시 개장일 목록을 비운다.
+
+    그날 테스트를 돌리면 진입 잡이 모두 멈춰 무관한 테스트가 깨진다. 목록 자체를
+    보는 테스트는 import 시점에 잡아 둔 원본(`tests/test_market_calendar.py`)을
+    쓰고, 10시 개장일 동작을 보는 테스트는 그 테스트 안에서 날짜를 넣는다.
+    """
+    from src import market_calendar
+
+    monkeypatch.setattr(market_calendar, "LATE_OPEN_DAYS", {})
+
+
+@pytest.fixture(autouse=True)
 def isolate_runtime_output_dirs(tmp_path_factory, monkeypatch):
     """모든 프로덕션 런타임 산출물을 테스트별 임시 루트로 격리한다."""
     runtime_dir = tmp_path_factory.mktemp("runtime-output")
