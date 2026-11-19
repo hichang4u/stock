@@ -423,6 +423,10 @@ requirements-dev.txt (개발/테스트 전용)
 11-3. C1 종가 스크리닝 등록 (StockBot_OvernightScreen, 15:32)
 ──────────────────────────────────────────────────
 
+  **2026-11-19 중지.** C1 축이 n = 30 조기 중단으로 닫혔다(스펙 §7·§8). `StockBot_OvernightScreen`과
+  `StockBot_OvernightScreen1520`을 비활성화했다(삭제하지 않았다). 아래 등록 절차와 10시 개장일 처리는 C2 등으로
+  다시 켤 때를 위한 기록이다. 다시 켜기: `schtasks /Change /TN <이름> /ENABLE`.
+
   스펙: docs/superpowers/specs/2026-09-21-c1-overnight-close-hypothesis.md §3.3
   운영 트리(D:\Private\stock-prod)에서 등록한다. 마감 후라 A·F5와 유량이 겹치지 않는다.
 
