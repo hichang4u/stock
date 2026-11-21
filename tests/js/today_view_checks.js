@@ -148,6 +148,13 @@ check('TIME_SYNC_ERROR: 동기화 실패(오류), 음수 오차 숨김', hc.leve
 hc = healthModel({health: {ntp: ntpAt('TIME_SYNC_OK', 'INFO', {offset_ms: 4, status: 'ok'})}}, '20261120').ntp;
 check('위험 뒤 정상 점검: 복구', hc.level === 'ok');
 
+// 서버가 상태 로그를 읽지 못함(health.error): 앞서 읽은 ok 값이 와도 정상으로 그리지 않는다.
+hc = healthModel({health: {error: true, error_type: 'PermissionError', token: tokOk, ntp: ntpAt('TIME_SYNC_OK', 'INFO', {status: 'ok'})}}, '20261120');
+check('로그 읽기 실패: KIS·시각 오류(✕) + 사유', hc.kis.level === 'err' && hc.ntp.level === 'err'
+  && hc.kis.text.includes('상태 로그 읽기 실패(PermissionError)'));
+hc = healthModel({health: {log_date: null, token: null, ntp: null, ws: null}}, '20261120');
+check('로그 없음(정상): 기록 없음(off), 오류 아님', hc.kis.level === 'off' && hc.kis.text === '기록 없음');
+
 // ── 4c) SSE 틱은 화면 종목·시각 순서가 맞을 때만 시세를 바꾼다 ───────────
 const holdSt = {position_status: 'HOLDING', ticker: '123690', entry_price: 6650,
   observed_price: 7000, observed_last_at: '2026-11-20T10:00:00+09:00', current_price: 7000, pnl_pct: 5.26};

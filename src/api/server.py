@@ -767,19 +767,32 @@ _HEALTH_READ_MAX_BYTES = 4 * 1024 * 1024  # 한 번에 읽을 상한. 넘으면 
 
 
 def _latest_daily_log_path() -> Path | None:
-    """오늘 로그가 있으면 오늘, 없으면(주말 등) 오늘 이전의 가장 최근 일별 로그."""
+    """오늘 로그가 있으면 오늘, 없으면(주말 등) 오늘 이전의 가장 최근 일별 로그.
+
+    로그 폴더가 없으면 None(정상: 아직 기록 없음). 권한·입출력 오류는 OSError로 올린다 —
+    "기록 없음"과 "읽지 못함"을 화면이 구분해야 한다.
+    """
     try:
-        names = sorted(
-            p.name for p in _LOG_DIR.iterdir()
-            if _DAILY_LOG_NAME_RE.match(p.name) and p.name[:8] <= _today()
-        )
-    except OSError:
+        entries = list(_LOG_DIR.iterdir())
+    except FileNotFoundError:
         return None
+    names = sorted(
+        p.name for p in entries
+        if _DAILY_LOG_NAME_RE.match(p.name) and p.name[:8] <= _today()
+    )
     return _LOG_DIR / names[-1] if names else None
 
 
+def _health_empty(log_date: str | None) -> dict:
+    return {"log_date": log_date, "token": None, "ntp": None, "ws": None}
+
+
 class _HealthLogReader:
-    """일별 로그의 상태 사건을 이어 읽는다. 모든 필드는 `_lock` 안에서만 다룬다."""
+    """일별 로그의 상태 사건을 이어 읽는다. 모든 필드는 `_lock` 안에서만 다룬다.
+
+    읽기 실패(권한·입출력 오류)면 판정을 내지 않고 `error=True`를 돌려준다 — 앞서 읽은 판정을
+    "지금 값"처럼 내보내지 않는다. 읽은 위치·판정은 그대로 두어 다음 조회가 이어서 다시 읽는다.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -787,6 +800,7 @@ class _HealthLogReader:
 
     def reset(self) -> None:
         self._path: str | None = None
+        self._ident: tuple | None = None
         self._offset = 0
         self._health: dict = {"token": None, "ntp": None, "ws": None}
 
@@ -795,34 +809,41 @@ class _HealthLogReader:
             return self._snapshot_locked()
 
     def _snapshot_locked(self) -> dict:
-        path = _latest_daily_log_path()
-        if path is None:
-            self.reset()
-            return {"log_date": None, "token": None, "ntp": None, "ws": None}
+        log_date: str | None = None
         try:
-            size = path.stat().st_size
-        except OSError:
-            return {"log_date": path.name[:8], "token": None, "ntp": None, "ws": None}
-        # 날이 바뀌었거나 파일이 줄었으면(교체·잘림) 처음부터 다시 읽는다.
-        if str(path) != self._path or size < self._offset:
-            self.reset()
-            self._path = str(path)
-        if size > self._offset:
+            path = _latest_daily_log_path()
+            if path is None:
+                self.reset()
+                return _health_empty(None)
+            log_date = path.name[:8]
             try:
+                st = path.stat()
+            except FileNotFoundError:
+                # 목록과 stat 사이에 사라졌다(교체 중). 다음 조회에서 다시 찾는다.
+                return _health_empty(log_date)
+            # 같은 이름의 다른 파일(교체)이면 처음부터 — st_ino가 0인 파일 시스템에서는 크기만 본다.
+            ident = (st.st_dev, st.st_ino) if st.st_ino else None
+            if (str(path) != self._path or st.st_size < self._offset
+                    or (ident and self._ident and ident != self._ident)):
+                self.reset()
+                self._path = str(path)
+            self._ident = ident
+            if st.st_size > self._offset:
                 with open(path, "rb") as fh:
                     fh.seek(self._offset)
-                    chunk = fh.read(min(size - self._offset, _HEALTH_READ_MAX_BYTES))
-            except OSError:
-                chunk = b""
-            # 아직 쓰는 중인 마지막 줄(줄바꿈 전)은 다음 조회로 미룬다.
-            complete = chunk[: chunk.rfind(b"\n") + 1]
-            if complete:
-                self._offset += len(complete)
-                self._health = _merge_health(
-                    self._health, _health_from_logs(_health_rows_from_bytes(complete))
-                )
-        return {"log_date": path.name[:8], **{k: (dict(v) if v else None)
-                                              for k, v in self._health.items()}}
+                    chunk = fh.read(min(st.st_size - self._offset, _HEALTH_READ_MAX_BYTES))
+                # 아직 쓰는 중인 마지막 줄(줄바꿈 전)은 다음 조회로 미룬다.
+                complete = chunk[: chunk.rfind(b"\n") + 1]
+                if complete:
+                    self._offset += len(complete)
+                    self._health = _merge_health(
+                        self._health, _health_from_logs(_health_rows_from_bytes(complete))
+                    )
+        except OSError as exc:
+            # 위치·판정은 읽기 성공 뒤에만 옮긴다 — 다음 조회가 같은 곳부터 다시 읽는다.
+            return {**_health_empty(log_date), "error": True, "error_type": type(exc).__name__}
+        return {"log_date": log_date, **{k: (dict(v) if v else None)
+                                         for k, v in self._health.items()}}
 
 
 _HEALTH_READER = _HealthLogReader()
@@ -838,7 +859,7 @@ async def _health_snapshot_async() -> dict:
         return await asyncio.to_thread(_health_snapshot)
     except Exception as exc:  # noqa: BLE001 — 표시용 읽기 실패가 상태 응답을 막으면 안 된다
         log("API_STATUS_HEALTH_FAILED", level="WARN", error=repr(exc))
-        return {"log_date": None, "token": None, "ntp": None, "ws": None, "error": True}
+        return {**_health_empty(None), "error": True, "error_type": type(exc).__name__}
 
 
 def _observed_quote(flow_ticker: str | None, tick_rows: list[dict]) -> tuple:

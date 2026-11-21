@@ -350,7 +350,10 @@ function healthModel(d, today) {
   const md = ts => mmdd(dayOf(ts));
   const out = {};
   const hm = ts => hhmmss(ts).slice(0, 5);
-  const tok = h.token;
+  // 서버가 상태 로그를 읽지 못했으면(권한·입출력 오류) 판정이 없다 — 정상으로도, 기록 없음으로도 그리지 않는다.
+  const readFailed = Boolean(h.error);
+  const failText = `상태 로그 읽기 실패${h.error_type ? `(${h.error_type})` : ''} — 판정 불가`;
+  const tok = readFailed ? null : h.token;
   // 토큰: 마지막 최종 결과만 본다. 실패 뒤 성공이 와야 복구다.
   const tokFail = tok && (tok.status === 'fail' || (!tok.status && ['CRIT', 'CRITICAL', 'ERROR'].includes(String(tok.level || '').toUpperCase())));
   if(tok && dayOf(tok.ts) === today) {
@@ -361,6 +364,8 @@ function healthModel(d, today) {
     out.kis = tokFail
       ? {level: 'warn', text: `오늘 확인 전 (마지막 ${md(tok.ts)} ${hm(tok.ts)} 토큰 발급 실패)`}
       : {level: 'off', text: `오늘 확인 전 (마지막 ${md(tok.ts)} ${hm(tok.ts)})`};
+  } else if(readFailed) {
+    out.kis = {level: 'err', text: failText};
   } else {
     out.kis = {level: 'off', text: '기록 없음'};
   }
@@ -375,8 +380,10 @@ function healthModel(d, today) {
   } else {
     out.ws = {level: 'off', text: `연결 안 함(추적 대상 없음)${lastTick ? ` · 마지막 시세 ${lastTick}` : ''}`, short: 'WS 대기'};
   }
-  const ntp = h.ntp;
-  if(ntp && dayOf(ntp.ts) === today) {
+  const ntp = readFailed ? null : h.ntp;
+  if(readFailed) {
+    out.ntp = {level: 'err', text: failText};
+  } else if(ntp && dayOf(ntp.ts) === today) {
     const ms = ntp.offset_ms != null && Number(ntp.offset_ms) >= 0 ? `${Math.round(Number(ntp.offset_ms))}ms` : '';
     const st = ntpStatus(ntp);
     out.ntp = st === 'error' ? {level: 'err', text: `시각 동기화 실패 ${hm(ntp.ts)} — 모든 서버 응답 없음`}

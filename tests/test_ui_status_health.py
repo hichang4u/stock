@@ -258,3 +258,83 @@ async def test_status_observed_price_ignores_other_ticker_last_tick(monkeypatch)
     assert payload["current_price"] == 50_000.0  # 호환 필드는 그대로
     assert payload["observed_price"] is None
     assert payload["observed_last_at"] is None
+
+
+# ── 2b. 읽기 실패는 앞서 읽은 판정을 "지금 값"으로 내지 않는다 ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_read_failure_reports_error_then_retries_from_same_offset(log_dir, monkeypatch):
+    import builtins
+
+    tmp, _ = log_dir
+    path = tmp / "20261120.jsonl"
+    path.write_bytes(_line(_ev("TOKEN_REFRESHED", "08:30:00")))
+    first = await server._health_snapshot_async()
+    assert first["token"]["status"] == "ok" and "error" not in first
+
+    with open(path, "ab") as fh:
+        fh.write(_line(_ev("TOKEN_REFRESH_FAIL", "09:10:00", "CRIT")))
+    real_open = builtins.open
+
+    def denied(file, *args, **kwargs):
+        if str(file) == str(path):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", denied)
+    failed = await server._health_snapshot_async()
+    assert failed["error"] is True and failed["error_type"] == "PermissionError"
+    assert failed["token"] is None and failed["ntp"] is None  # 지난 ok를 지금 값처럼 내지 않는다
+    assert failed["log_date"] == "20261120"
+
+    monkeypatch.setattr(builtins, "open", real_open)
+    retried = await server._health_snapshot_async()
+    assert "error" not in retried
+    assert retried["token"]["status"] == "fail"  # 같은 위치부터 다시 읽어 최종 실패를 본다
+
+
+@pytest.mark.asyncio
+async def test_listing_and_stat_failures_are_errors_but_missing_dir_is_not(log_dir, monkeypatch):
+    tmp, _ = log_dir
+    (tmp / "20261120.jsonl").write_bytes(_line(_ev("TOKEN_REFRESHED", "08:30:00")))
+    real_stat = type(tmp).stat
+
+    def stat_denied(self, *args, **kwargs):
+        if self.name == "20261120.jsonl":
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(tmp), "stat", stat_denied)
+    snap = await server._health_snapshot_async()
+    assert snap["error"] is True and snap["token"] is None
+    monkeypatch.setattr(type(tmp), "stat", real_stat)
+
+    def list_denied(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(type(tmp), "iterdir", list_denied)
+    snap = await server._health_snapshot_async()
+    assert snap["error"] is True and snap["log_date"] is None
+    monkeypatch.undo()
+
+    monkeypatch.setattr(server, "_LOG_DIR", tmp / "missing")
+    snap = await server._health_snapshot_async()
+    assert "error" not in snap and snap == {"log_date": None, "token": None, "ntp": None,
+                                            "ws": None}
+
+
+def test_same_path_replacement_restarts_from_the_top(log_dir):
+    tmp, _ = log_dir
+    path = tmp / "20261120.jsonl"
+    path.write_bytes(_line(_ev("TOKEN_REFRESH_FAIL", "09:10:00", "CRIT")))
+    assert server._health_snapshot()["token"]["status"] == "fail"
+    # 같은 이름의 새 파일로 교체(더 길게): 크기만으로는 못 알아챈다
+    replacement = tmp / "new.tmp"
+    # 새 파일의 성공 줄은 옛 읽은 위치 앞에 있다 — 이어 읽으면 놓친다.
+    replacement.write_bytes(_line(_ev("TOKEN_REFRESHED", "09:20:00"))
+                            + _line(_ev("TICK", "09:20:01", price=6650)) * 3)
+    replacement.replace(path)
+    snap = server._health_snapshot()
+    if path.stat().st_ino:
+        assert snap["token"]["status"] == "ok" and snap["token"]["ts"].endswith("09:20:00+09:00")
