@@ -199,7 +199,7 @@ check('관측 중 아님: 종목 없음', !isObservingFlow({position_status: 'ID
 // ════════════════════════════════════════════════════════════════════════
 for (const name of [
   'normalizeFlowRange', 'normalizeFlowScale', 'resetPriceFlow', 'appendPriceFlowTick',
-  'normalizeFlowMinutes', 'normalizeFlowTicks', 'priceFlowSinceTs', 'updatePriceFlow',
+  'normalizeFlowMinutes', 'normalizeFlowTicks', 'priceFlowSinceTs', 'updatePriceFlow', 'observedPrice',
   'composePriceFlowPoints', 'splitFlowSegments', 'priceFlowHints', 'priceFlowDataText',
 ]) eval(extract(name));
 

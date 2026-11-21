@@ -227,22 +227,37 @@ function signedWon(n) {
   return `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toLocaleString('ko-KR', {maximumFractionDigits: 0})}원`;
 }
 
+// 화면 종목의 마지막 시세(순수). 새 서버는 종목이 맞는 틱만 observed_price로 준다(없으면 null).
+// 그 필드가 없는 옛 서버 응답만 current_price(종목을 가리지 않는 호환 값)로 대신한다.
+function observedPrice(d) {
+  const raw = d && Object.prototype.hasOwnProperty.call(d, 'observed_price') ? d.observed_price : d?.current_price;
+  const v = Number(raw || 0);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+// 진입가 대비 수익률(순수, 소수 둘째 자리). 화면 종목 시세로 계산한다.
+function pnlVsEntry(price, entry) {
+  return price && entry ? +((price / entry - 1) * 100).toFixed(2) : null;
+}
+
 // 대표 카드에 무엇을 어떤 이름으로 보일지(순수). 반환값의 cells는 6칸 고정:
 // [진입, 가격, 손익, 최고가, 수량, 투입]. text는 HTML이 아니라 글자다.
 function tradeCardModel(d) {
   const status = d?.position_status || 'IDLE';
   const observing = isObservingFlow(d);
   const entry = Number(d?.entry_price || 0) || null;
-  const cur = Number(d?.current_price || 0) || null;
+  const cur = observedPrice(d);
   const qty = d?.remaining_qty;
   const amount = entry && d?.entry_qty ? entry * d.entry_qty : null;
   const tr = d?.trade_result || null;
+  // 평가손익은 화면 종목 시세로 다시 계산한다(pnl_pct는 종목을 가리지 않는 호환 값).
+  const evalPct = cur && entry ? pnlVsEntry(cur, entry) : null;
   const tone = v => v == null ? '' : v >= 0 ? 'up' : 'dn';
   const won = v => v == null ? '—' : `${fmt(v)}원`;
   const cells = [
     {label: '진입가', text: won(entry)},
     {label: '현재가', text: won(cur), tone: cur && entry ? (cur > entry ? 'up' : 'dn') : ''},
-    {label: '평가손익(미실현)', text: fmtPct(d?.pnl_pct), tone: tone(d?.pnl_pct)},
+    {label: '평가손익(미실현)', text: fmtPct(evalPct), tone: tone(evalPct)},
     {label: '최고가', text: won(Number(d?.high_price || 0) || null)},
     {label: '잔여수량', text: qty != null ? `${fmt(qty)}주` : '—'},
     {label: '투입금액', text: amount ? fmtM(amount) : '—'},
@@ -263,11 +278,11 @@ function tradeCardModel(d) {
     cells[2] = {label: '평가손익', text: '— (체결 확인 전)'};
     model.note = '진입 주문을 처리하는 중입니다. 체결이 확인되면 보유로 바뀝니다.';
   } else if(status === 'HOLDING') {
-    model.pill = d?.pnl_pct != null ? {text: `평가 ${fmtPct(d.pnl_pct)}`, tone: tone(d.pnl_pct)} : null;
+    model.pill = evalPct != null ? {text: `평가 ${fmtPct(evalPct)}`, tone: tone(evalPct)} : null;
   } else if(status === 'EXITING') {
     cells[2].label = '평가손익(청산 중)';
     model.note = '청산 주문을 처리하는 중입니다. 잔여수량이 0이 되면 청산 완료로 바뀝니다.';
-    model.pill = d?.pnl_pct != null ? {text: `평가 ${fmtPct(d.pnl_pct)}`, tone: tone(d.pnl_pct)} : null;
+    model.pill = evalPct != null ? {text: `평가 ${fmtPct(evalPct)}`, tone: tone(evalPct)} : null;
   } else if(status === 'CLOSED') {
     if(tr && tr.available && tr.closed) {
       const reason = CLOSE_REASON_LABELS[tr.close_reason] || tr.close_reason || '';
@@ -334,13 +349,20 @@ function healthModel(d, today) {
   const dayOf = ts => String(ts || '').slice(0, 10).replace(/-/g, '');
   const md = ts => mmdd(dayOf(ts));
   const out = {};
+  const hm = ts => hhmmss(ts).slice(0, 5);
   const tok = h.token;
+  // 토큰: 마지막 최종 결과만 본다. 실패 뒤 성공이 와야 복구다.
+  const tokFail = tok && (tok.status === 'fail' || (!tok.status && ['CRIT', 'CRITICAL', 'ERROR'].includes(String(tok.level || '').toUpperCase())));
   if(tok && dayOf(tok.ts) === today) {
-    out.kis = {level: 'ok', text: `토큰 ${hhmmss(tok.ts).slice(0, 5)} 확인`, short: 'KIS'};
+    out.kis = tokFail
+      ? {level: 'err', text: `토큰 발급 실패 ${hm(tok.ts)} — 이후 성공 기록 없음`}
+      : {level: 'ok', text: `토큰 ${hm(tok.ts)} 확인`};
   } else if(tok) {
-    out.kis = {level: 'off', text: `오늘 확인 전 (마지막 ${md(tok.ts)} ${hhmmss(tok.ts).slice(0, 5)})`, short: 'KIS 확인 전'};
+    out.kis = tokFail
+      ? {level: 'warn', text: `오늘 확인 전 (마지막 ${md(tok.ts)} ${hm(tok.ts)} 토큰 발급 실패)`}
+      : {level: 'off', text: `오늘 확인 전 (마지막 ${md(tok.ts)} ${hm(tok.ts)})`};
   } else {
-    out.kis = {level: 'off', text: '기록 없음', short: 'KIS 기록 없음'};
+    out.kis = {level: 'off', text: '기록 없음'};
   }
   const active = ['HOLDING', 'EXITING', 'ENTERING'].includes(d?.position_status) || isObservingFlow(d);
   const tickDay = dayOf(d?.observed_last_at);
@@ -354,20 +376,35 @@ function healthModel(d, today) {
     out.ws = {level: 'off', text: `연결 안 함(추적 대상 없음)${lastTick ? ` · 마지막 시세 ${lastTick}` : ''}`, short: 'WS 대기'};
   }
   const ntp = h.ntp;
-  const levelOf = {TIME_SYNC_OK: 'ok', TIME_SYNC_WARN: 'warn', TIME_SYNC_ERROR: 'err'};
   if(ntp && dayOf(ntp.ts) === today) {
-    const lv = String(ntp.level || '').toLowerCase() === 'error' ? 'err' : (levelOf[ntp.event] || 'off');
-    const off = ntp.offset_ms != null ? ` 오차 ${Math.round(Number(ntp.offset_ms))}ms` : '';
-    out.ntp = {level: lv, text: `${hhmmss(ntp.ts).slice(0, 5)} 점검${off}`, short: `시각${off}`};
+    const ms = ntp.offset_ms != null && Number(ntp.offset_ms) >= 0 ? `${Math.round(Number(ntp.offset_ms))}ms` : '';
+    const st = ntpStatus(ntp);
+    out.ntp = st === 'error' ? {level: 'err', text: `시각 동기화 실패 ${hm(ntp.ts)} — 모든 서버 응답 없음`}
+      : st === 'crit' ? {level: 'err', text: `시각 오차 위험${ms ? ` ${ms}` : ''} (${hm(ntp.ts)} 점검)`}
+      : st === 'warn' ? {level: 'warn', text: `시각 오차 경고${ms ? ` ${ms}` : ''} (${hm(ntp.ts)} 점검)`}
+      : st === 'ok' ? {level: 'ok', text: `${hm(ntp.ts)} 점검${ms ? ` 오차 ${ms}` : ''}`}
+      : {level: 'off', text: `알 수 없는 기록 ${hm(ntp.ts)}`};
   } else if(ntp) {
-    out.ntp = {level: 'off', text: `오늘 점검 전 (마지막 ${md(ntp.ts)} ${hhmmss(ntp.ts).slice(0, 5)})`, short: '시각 점검 전'};
+    out.ntp = {level: 'off', text: `오늘 점검 전 (마지막 ${md(ntp.ts)} ${hm(ntp.ts)})`};
   } else {
-    out.ntp = {level: 'off', text: '기록 없음', short: '시각 기록 없음'};
+    out.ntp = {level: 'off', text: '기록 없음'};
   }
   return out;
 }
 
 const HEALTH_MARK = {ok: '✓', warn: '!', err: '✕', off: '–'};
+
+// 시각 점검 판정(순수). 서버 status가 우선이고, 없으면(옛 서버) 사건·수준으로 정한다.
+// TIME_SYNC_WARN도 수준이 CRIT/critical/ERROR면 위험(crit)이다(오차 500ms 이상, time_sync.py).
+function ntpStatus(ntp) {
+  if(!ntp) return null;
+  if(ntp.status) return ntp.status;
+  const level = String(ntp.level || '').trim().toUpperCase();
+  if(ntp.event === 'TIME_SYNC_ERROR') return 'error';
+  if(ntp.event === 'TIME_SYNC_WARN') return ['CRIT', 'CRITICAL', 'ERROR'].includes(level) ? 'crit' : 'warn';
+  if(ntp.event === 'TIME_SYNC_OK') return 'ok';
+  return null;
+}
 
 // 계좌 모드 코드값 → 한글(PAPER 모의투자 / REAL 실계좌). 모르면 코드값 그대로.
 function accountModeLabel(mode) {
@@ -885,7 +922,7 @@ function updatePriceFlow(d) {
     if(parsed.length || meta?.source !== 'error') _priceFlowSeed = parsed;
     _priceFlowSeedMeta = meta;
   }
-  const price = Number(d?.current_price || 0);
+  const price = observedPrice(d) || 0;
   if(price > 0 && ['HOLDING', 'EXITING'].includes(d?.position_status) && !_priceFlow.length) {
     appendPriceFlowTick(Date.now(), price, ticker);
   }
@@ -1296,7 +1333,7 @@ function drawPriceFlow(d) {
   const points = composePriceFlowPoints(_priceFlowSeed, _priceFlow, _priceFlowTicks, Date.now())
     .filter(p => p.ts >= startTs && p.ts <= endTs);
   const visibleMarks = marks.filter(m => m.ts >= startTs && m.ts <= endTs);
-  const refs = [d?.entry_price, d?.high_price, d?.trail_stop, d?.hard_stop, d?.current_price]
+  const refs = [d?.entry_price, d?.high_price, d?.trail_stop, d?.hard_stop, observedPrice(d)]
     .map(Number).filter(v => v > 0);
   const values = points.map(p => p.price).concat(refs).concat(visibleMarks.map(m => m.price));
 
@@ -1322,7 +1359,7 @@ function drawPriceFlow(d) {
   const lastSellPrice = [...visibleMarks].reverse().find(m => m.side === 'SELL')?.price;
   const lastBuyPrice = [...visibleMarks].reverse().find(m => m.side === 'BUY')?.price;
   const lastPrice = points[points.length - 1]?.price
-    || Number(d.current_price || 0)
+    || Number(observedPrice(d) || 0)
     || lastSellPrice || lastBuyPrice || 0;
   const timeLabel = firstTs && lastTs
     ? `자료 ${fmtFlowTime(firstTs)}-${fmtFlowTime(lastTs)}` : '자료 대기';
@@ -1337,7 +1374,7 @@ function drawPriceFlow(d) {
 
   const dom = priceFlowYDomain(_priceFlowScaleMode, values, {
     trailStop: Number(d && d.trail_stop) || 0,
-    price: lastPrice || Number(d && d.current_price) || 0,
+    price: lastPrice || observedPrice(d) || 0,
     high: Number(d && d.high_price) || 0,
   });
   const min = dom.min, max = dom.max;
@@ -1550,7 +1587,7 @@ function positionAssetValues(d) {
   if(!d) return {stockValue:null, pnlAmount:null, total:null, cash:null, buyable:null, holdings:0, holdingsList:[]};
   const assets = d.assets || _lastAssets || {};
   const qty = Number(d.remaining_qty || 0);
-  const cur = Number(d.current_price || 0);
+  const cur = observedPrice(d) || 0;
   const entry = Number(d.entry_price || 0);
   const fallbackHolding = qty > 0 && d.ticker ? [{
     ticker: d.ticker,
@@ -2180,7 +2217,7 @@ async function loadStatus() {
   try {
     const r = await fetch('/api/status');
     if(!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
+    const d = keepFresherQuote(_lastStatus, await r.json());
     _lastStatusOkAt = Date.now();
     applyStatus(d);
   } catch(e){
@@ -2576,6 +2613,44 @@ function renderSkipHold(d) {
     `<div class="factor-cell"><div class="factor-name">청산사유별 평균 보유시간</div>${holdRows}</div>`;
 }
 
+// ── SSE 틱 반영 규칙(순수) ─────────────────────────────────────────────────
+// 화면 종목(보유·청산 종목, 미보유면 관측 종목)의 틱만 시세로 쓴다. 다른 종목·종목 없는 틱·
+// 시각 없는 틱·이미 보인 시세보다 오래된 틱은 버린다. 받아들이면 바꿀 필드를 돌려준다.
+//   current_price·pnl_pct: 차트·호환용(진입가 대비, 청산 뒤에는 관측 수익률 — 서버와 같은 정의)
+//   observed_price·observed_last_at: 카드·관측 줄이 쓰는 같은 틱의 가격·시각 한 쌍
+function sseTickUpdate(st, tick) {
+  if(!st || !tick) return {accept: false, reason: 'no-status'};
+  const shown = flowTicker(st);
+  if(!shown) return {accept: false, reason: 'no-target'};
+  const ticker = tick.ticker == null || tick.ticker === '' ? null : String(tick.ticker);
+  // 서버 push_tick은 늘 종목을 붙인다. 종목 없는 틱은 어느 종목 값인지 몰라 쓰지 않는다.
+  if(!ticker) return {accept: false, reason: 'no-ticker'};
+  if(ticker !== String(shown)) return {accept: false, reason: 'other-ticker'};
+  const price = Number(tick.price);
+  if(typeof tick.price === 'boolean' || !Number.isFinite(price) || price <= 0) return {accept: false, reason: 'bad-price'};
+  const ts = typeof tick.ts === 'string' ? tick.ts : '';
+  const tsMs = Date.parse(ts);
+  if(!Number.isFinite(tsMs)) return {accept: false, reason: 'no-ts'};
+  const lastMs = Date.parse(st.observed_last_at);
+  if(Number.isFinite(lastMs) && tsMs < lastMs) return {accept: false, reason: 'stale'};
+  const entry = Number(st.entry_price || 0);
+  return {
+    accept: true, reason: 'ok', ticker, price, ts,
+    fields: {current_price: price, observed_price: price, observed_last_at: ts,
+             pnl_pct: entry > 0 ? pnlVsEntry(price, entry) : st.pnl_pct ?? null},
+  };
+}
+
+// 폴링 응답이 SSE로 이미 받은 시세보다 오래됐으면(응답을 만든 뒤 틱이 더 온 경우) 같은 종목의
+// 더 새 시세를 남긴다(순수). 종목이 바뀌었으면 새 응답을 그대로 쓴다.
+function keepFresherQuote(prev, next) {
+  if(!prev || !next || String(flowTicker(prev)) !== String(flowTicker(next))) return next;
+  const a = Date.parse(prev.observed_last_at), b = Date.parse(next.observed_last_at);
+  if(!Number.isFinite(a) || (Number.isFinite(b) && b >= a)) return next;
+  return {...next, observed_price: prev.observed_price, observed_last_at: prev.observed_last_at,
+          current_price: prev.current_price, pnl_pct: prev.pnl_pct};
+}
+
 // ── SSE 구독 ─────────────────────────────────────────────────────────────
 function connectSSE() {
   const es = new EventSource('/api/stream');
@@ -2584,20 +2659,13 @@ function connectSSE() {
     try {
       const d = JSON.parse(e.data);
       if(d.type==='tick') {
-        if(_lastStatus) {
-          const tickTs = d.ts || new Date().toISOString();
-          const tickTicker = d.ticker || flowTicker(_lastStatus);
-          const tickPrice = Number(d.price || 0);
-          _lastStatus.current_price = tickPrice;
-          if(tickPrice > 0 && String(tickTicker) === String(flowTicker(_lastStatus))) _lastStatus.observed_last_at = tickTs;
-          if(_lastStatus.entry_price)
-            _lastStatus.pnl_pct = +((tickPrice/_lastStatus.entry_price-1)*100).toFixed(2);
-          const observedTick = isObservingFlow(_lastStatus)
-            && String(tickTicker) === String(_lastStatus.observe_ticker);
-          if((['HOLDING', 'EXITING'].includes(_lastStatus.position_status) || observedTick) && tickPrice > 0) {
+        const u = sseTickUpdate(_lastStatus, d);
+        if(u.accept) {
+          Object.assign(_lastStatus, u.fields);
+          if(['HOLDING', 'EXITING'].includes(_lastStatus.position_status) || isObservingFlow(_lastStatus)) {
             // 배열 복사 없이 공유 버퍼(_priceFlowTicks/_priceFlow)에 tick 하나만 증분 추가.
             // updatePriceFlow의 신선도 가드가 이후 stale payload 덮어쓰기를 막는다.
-            appendPriceFlowTick(tickTs, tickPrice, tickTicker);
+            appendPriceFlowTick(u.ts, u.price, u.ticker);
           }
           applyStatus(_lastStatus);
         }

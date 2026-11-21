@@ -1,5 +1,6 @@
 ﻿"""Pure status/F1 display helpers for the API and tests."""
 
+import json
 import math
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -481,27 +482,79 @@ def session_view(now: datetime, *, trading_date: str | None, entry_at: str | Non
     }
 
 
+# 사건 → (종류, 판정). 판정은 화면이 그대로 쓰는 값이다: ok | warn | crit | error | fail.
+# 토큰은 최종 결과만 본다 — 시도별 실패(TOKEN_REFRESH_HTTP_ERR·ATTEMPT_FAIL)는 재시도 중이라
+# 결과가 아니고, 3회 모두 실패하면 auth.refresh가 TOKEN_REFRESH_FAIL(CRIT)을 남긴다.
 _HEALTH_EVENTS = {
-    "TOKEN_REFRESHED": "token", "TOKEN_LOADED_FROM_CACHE": "token",
-    "TIME_SYNC_OK": "ntp", "TIME_SYNC_WARN": "ntp", "TIME_SYNC_ERROR": "ntp",
-    "WS_CONNECTED": "ws", "WS_DISCONNECTED": "ws",
+    "TOKEN_REFRESHED": ("token", "ok"),
+    "TOKEN_LOADED_FROM_CACHE": ("token", "ok"),
+    "TOKEN_REFRESH_FAIL": ("token", "fail"),
+    "TOKEN_ISSUE_REFUSED_READONLY": ("token", "fail"),
+    "TIME_SYNC_OK": ("ntp", "ok"),
+    "TIME_SYNC_WARN": ("ntp", "warn"),  # 수준이 CRIT이면 crit(오차 500ms 이상)
+    "TIME_SYNC_ERROR": ("ntp", "error"),
+    "WS_CONNECTED": ("ws", "ok"),
+    "WS_DISCONNECTED": ("ws", "warn"),
 }
+_HEALTH_MARKERS = (b'"TOKEN_', b'"TIME_SYNC_', b'"WS_')
 
 
-def health_from_logs(rows: list[dict]) -> dict:
+def _normalized_level(value) -> str:
+    text = str(value or "").strip().upper()
+    return {"CRITICAL": "CRIT", "WARNING": "WARN", "ERR": "ERROR"}.get(text, text)
+
+
+def health_from_logs(rows: list) -> dict:
     """운영 로그 줄에서 마지막 토큰·시각 점검·WS 연결 사건을 뽑는다(순수).
 
     값이 없으면 None이다. 화면은 None을 "정상"으로 그리지 않고 "기록 없음"으로 그린다.
+    같은 종류는 뒤 사건이 이긴다 — 실패 뒤 성공이 오면 복구, 성공 뒤 최종 실패가 오면 실패다.
+    `status`는 사건과 로그 수준을 함께 본 판정이다. TIME_SYNC_WARN도 수준이 CRIT이면 `crit`.
+    dict가 아닌 줄은 건너뛴다.
     """
     found: dict[str, dict] = {}
     for row in rows:
-        kind = _HEALTH_EVENTS.get(str(row.get("event") or ""))
-        if kind is None:
+        if not isinstance(row, dict):
             continue
-        item = {"event": row.get("event"), "ts": row.get("ts"), "level": row.get("level")}
+        spec = _HEALTH_EVENTS.get(str(row.get("event") or ""))
+        if spec is None:
+            continue
+        kind, status = spec
+        level = _normalized_level(row.get("level"))
+        if kind == "ntp" and status == "warn" and level in ("CRIT", "ERROR"):
+            status = "crit"
+        item = {"event": row.get("event"), "ts": row.get("ts"), "level": level or None,
+                "status": status}
         if kind == "ntp":
             item["offset_ms"] = row.get("offset_ms")
         if kind == "ws":
             item["error"] = row.get("error")
         found[kind] = item
     return {"token": found.get("token"), "ntp": found.get("ntp"), "ws": found.get("ws")}
+
+
+def merge_health(previous: dict | None, newer: dict) -> dict:
+    """앞서 읽은 판정에 뒤에 붙은 줄의 판정을 덮는다(종류별로 뒤 사건이 이긴다)."""
+    merged = {k: (previous or {}).get(k) for k in ("token", "ntp", "ws")}
+    for key in ("token", "ntp", "ws"):
+        if newer.get(key) is not None:
+            merged[key] = newer[key]
+    return merged
+
+
+def health_rows_from_bytes(chunk: bytes) -> list:
+    """완결된 로그 줄 묶음(bytes)에서 상태 사건 후보만 JSON으로 읽는다(순수).
+
+    깨진 UTF-8·잘린 줄·JSON 아닌 줄은 버린다. 결과는 dict만 남긴다.
+    """
+    rows = []
+    for raw in chunk.splitlines():
+        if not any(marker in raw for marker in _HEALTH_MARKERS):
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows

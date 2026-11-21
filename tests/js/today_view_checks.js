@@ -32,7 +32,8 @@ function extractConst(name) {
 
 for (const c of ['fmt', 'fmtPct', 'fmtM', 'tickerName', 'stockText', 'TICKER_NAMES',
                  'CLOSE_REASON_LABELS', 'F1_STATUS_LABEL', 'HEALTH_MARK']) eval(extractConst(c));
-for (const f of ['mmdd', 'dateWithWeekday', 'hhmmss', 'signedWon', 'isObservingFlow',
+for (const f of ['mmdd', 'dateWithWeekday', 'hhmmss', 'signedWon', 'isObservingFlow', 'flowTicker',
+                 'observedPrice', 'pnlVsEntry', 'ntpStatus', 'sseTickUpdate', 'keepFresherQuote',
                  'tradeCardModel', 'dayStripModel', 'ageText', 'healthModel', 'pctFromRatio',
                  'f1ViewModel', 'unresolvedOrderCount', 'logLevelCounts', 'shortTime',
                  'kstNowParts', 'assetSnapshotLabel', 'accountModeLabel']) eval(extract(f));
@@ -120,6 +121,75 @@ check('오늘 시각 경고: warn + 오차', h.ntp.level === 'warn' && h.ntp.tex
 h = healthModel({position_status: 'CLOSED', ws_connected: false, observed_last_at: '2026-11-20T15:19:58+09:00', health: {}}, '20261121');
 check('지난 날 마지막 시세에는 날짜를 붙인다', h.ws.text.includes('11/20 15:19:58'));
 check('상태 기호가 색과 함께 간다', HEALTH_MARK.ok === '✓' && HEALTH_MARK.err === '✕' && HEALTH_MARK.off === '–');
+
+// ── 4b) 토큰 최종 실패·시각 CRIT (2026-11-21 리뷰) ─────────────────────
+const tokOk = {event: 'TOKEN_LOADED_FROM_CACHE', ts: '2026-11-20T08:30:00+09:00', level: 'INFO', status: 'ok'};
+const tokFail = {event: 'TOKEN_REFRESH_FAIL', ts: '2026-11-20T09:10:00+09:00', level: 'CRIT', status: 'fail'};
+const tokAgain = {event: 'TOKEN_REFRESHED', ts: '2026-11-20T09:20:00+09:00', level: 'INFO', status: 'ok'};
+h = healthModel({health: {token: tokFail}}, '20261120');
+check('토큰 최종 실패(같은 날 성공 뒤): KIS 오류', h.kis.level === 'err' && h.kis.text.includes('토큰 발급 실패 09:10'));
+h = healthModel({health: {token: tokAgain}}, '20261120');
+check('실패 뒤 성공: KIS 복구', h.kis.level === 'ok' && h.kis.text.includes('09:20'));
+h = healthModel({health: {token: tokFail}}, '20261121');
+check('지난 날 최종 실패: 정상 아님(warn)+실패 문구', h.kis.level === 'warn' && h.kis.text.includes('토큰 발급 실패'));
+h = healthModel({health: {token: tokOk}}, '20261121');
+check('지난 날 성공: 오늘 확인 전(off)', h.kis.level === 'off');
+h = healthModel({health: {token: {event: 'TOKEN_REFRESH_FAIL', ts: '2026-11-20T09:10:00+09:00', level: 'CRIT'}}}, '20261120');
+check('옛 서버(status 없음) 최종 실패도 오류', h.kis.level === 'err');
+const ntpAt = (event, level, extra = {}) => ({event, level, ts: '2026-11-20T08:40:00+09:00', offset_ms: 620, ...extra});
+check('TIME_SYNC_WARN + CRIT → 위험(오류)', healthModel({health: {ntp: ntpAt('TIME_SYNC_WARN', 'CRIT')}}, '20261120').ntp.level === 'err');
+check('TIME_SYNC_WARN + critical(소문자) → 위험', ntpStatus(ntpAt('TIME_SYNC_WARN', 'critical')) === 'crit');
+check('TIME_SYNC_WARN + error → 위험', ntpStatus(ntpAt('TIME_SYNC_WARN', 'error')) === 'crit');
+check('TIME_SYNC_WARN + WARN → 경고(warn)', healthModel({health: {ntp: ntpAt('TIME_SYNC_WARN', 'WARN', {offset_ms: 230})}}, '20261120').ntp.level === 'warn');
+let hc = healthModel({health: {ntp: ntpAt('TIME_SYNC_WARN', 'CRIT', {status: 'crit'})}}, '20261120').ntp;
+check('CRIT 문구: 위험·오차', hc.text.includes('시각 오차 위험') && hc.text.includes('620ms'));
+hc = healthModel({health: {ntp: ntpAt('TIME_SYNC_ERROR', 'CRIT', {offset_ms: -1, status: 'error'})}}, '20261120').ntp;
+check('TIME_SYNC_ERROR: 동기화 실패(오류), 음수 오차 숨김', hc.level === 'err' && hc.text.includes('동기화 실패') && !hc.text.includes('-1'));
+hc = healthModel({health: {ntp: ntpAt('TIME_SYNC_OK', 'INFO', {offset_ms: 4, status: 'ok'})}}, '20261120').ntp;
+check('위험 뒤 정상 점검: 복구', hc.level === 'ok');
+
+// ── 4c) SSE 틱은 화면 종목·시각 순서가 맞을 때만 시세를 바꾼다 ───────────
+const holdSt = {position_status: 'HOLDING', ticker: '123690', entry_price: 6650,
+  observed_price: 7000, observed_last_at: '2026-11-20T10:00:00+09:00', current_price: 7000, pnl_pct: 5.26};
+let u = sseTickUpdate(holdSt, {ticker: '005930', price: 50000, ts: '2026-11-20T10:00:05+09:00'});
+check('다른 종목 틱: 거부', !u.accept && u.reason === 'other-ticker');
+u = sseTickUpdate(holdSt, {price: 50000, ts: '2026-11-20T10:00:05+09:00'});
+check('종목 없는 틱: 거부(종목을 모른다)', !u.accept && u.reason === 'no-ticker');
+u = sseTickUpdate(holdSt, {ticker: '123690', price: 6990, ts: '2026-11-20T09:59:59+09:00'});
+check('이미 본 시세보다 오래된 틱: 거부', !u.accept && u.reason === 'stale');
+u = sseTickUpdate(holdSt, {ticker: '123690', price: 6990});
+check('시각 없는 틱: 거부', !u.accept && u.reason === 'no-ts');
+u = sseTickUpdate(holdSt, {ticker: '123690', price: 0, ts: '2026-11-20T10:00:05+09:00'});
+check('0원 틱: 거부', !u.accept);
+u = sseTickUpdate(holdSt, {ticker: '123690', price: 7315, ts: '2026-11-20T10:00:05+09:00'});
+check('같은 종목 새 틱: 가격·시각 한 쌍과 평가손익', u.accept && u.fields.observed_price === 7315
+  && u.fields.observed_last_at === '2026-11-20T10:00:05+09:00' && u.fields.pnl_pct === 10 && u.fields.current_price === 7315);
+const closedSt = {...holdSt, position_status: 'CLOSED', remaining_qty: 0};
+u = sseTickUpdate(closedSt, {ticker: '123690', price: 6420, ts: '2026-11-20T15:19:58+09:00'});
+check('청산 뒤 같은 종목 틱: 관측값만(거래 결과는 trade_result)', u.accept && u.fields.pnl_pct === -3.46);
+const cm = tradeCardModel({...closed, ...u.fields});
+check('청산 카드는 SSE 뒤에도 +5.22% 그대로', cellText(cm, '거래 손익(비용 전)').startsWith('+5.22%') && cm.obs.includes('6,420원'));
+const obsSt = {position_status: 'IDLE', observe_ticker: '010170', observed_price: null, observed_last_at: null};
+u = sseTickUpdate(obsSt, {ticker: '010170', price: 13670, ts: '2026-11-20T09:01:00+09:00'});
+check('미보유 관측 종목 틱: 받아들임, 평가손익 없음', u.accept && u.fields.pnl_pct === null);
+check('표시 종목 없음: 거부', !sseTickUpdate({position_status: 'IDLE'}, {ticker: '010170', price: 1, ts: '2026-11-20T09:01:00+09:00'}).accept);
+// 종목 전환: 새 종목 틱은 폴링이 새 종목을 알려주기 전까지 버리고, 알려준 뒤에는 받는다.
+const switched = {position_status: 'HOLDING', ticker: '005930', entry_price: 50000, observed_last_at: null};
+check('종목 전환 전: 새 종목 틱 거부', !sseTickUpdate(holdSt, {ticker: '005930', price: 50100, ts: '2026-11-20T10:01:00+09:00'}).accept);
+check('종목 전환 후: 새 종목 틱 수락', sseTickUpdate(switched, {ticker: '005930', price: 50100, ts: '2026-11-20T10:01:00+09:00'}).accept);
+// 폴링 응답이 SSE보다 오래됐으면 같은 종목의 더 새 시세를 남긴다
+const fresher = {...holdSt, observed_price: 7315, observed_last_at: '2026-11-20T10:00:05+09:00', current_price: 7315, pnl_pct: 10};
+let merged = keepFresherQuote(fresher, {...holdSt, high_price: 7400});
+check('오래된 폴링: 새 시세 유지, 다른 필드는 새 응답', merged.observed_price === 7315 && merged.high_price === 7400);
+merged = keepFresherQuote(fresher, {...holdSt, observed_price: 7320, observed_last_at: '2026-11-20T10:00:06+09:00'});
+check('새 폴링: 응답 그대로', merged.observed_price === 7320);
+merged = keepFresherQuote(fresher, switched);
+check('종목 바뀐 폴링: 응답 그대로', merged.ticker === '005930' && merged.observed_price === undefined);
+// 서버가 종목이 맞는 시세를 못 찾으면(observed_price null) 다른 종목의 current_price를 쓰지 않는다
+const wrongCur = tradeCardModel({position_status: 'HOLDING', ticker: '123690', entry_price: 6650,
+  current_price: 50000, pnl_pct: 651.88, observed_price: null});
+check('관측가 없음: 현재가·평가손익 —(다른 종목 값 안 씀)', wrongCur.cells[1].text === '—' && wrongCur.cells[2].text === '—');
+check('옛 서버 응답(observed_price 필드 없음): current_price로 대신', observedPrice({current_price: 7000}) === 7000);
 
 // ── 5) F1: 지난 거래를 오늘 후보 확정으로 그리지 않는다 ──────────────────
 let f = f1ViewModel({status: 'IDLE', selection_source: 'PREVIOUS_TRADE', selection_trade_date: '20261120',

@@ -188,7 +188,7 @@ async def test_status_without_position_has_no_trade_result(monkeypatch):
 def test_health_snapshot_reads_latest_isolated_log(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_LOG_DIR", tmp_path)
     monkeypatch.setattr(server, "_today", lambda: "20261121")
-    server._HEALTH_LOG_CACHE.clear()
+    server._HEALTH_READER.reset()
     (tmp_path / "20261120.jsonl").write_bytes(
         b'{"event":"TIME_SYNC_OK","ts":"2026-11-20T08:30:01+09:00","offset_ms":3}\n'
         b'{"event":"TICK","ts":"2026-11-20T09:00:00+09:00"}\n'

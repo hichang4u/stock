@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +28,13 @@ from src.api.status_logic import (
     health_from_logs as _health_from_logs,
 )
 from src.api.status_logic import (
+    health_rows_from_bytes as _health_rows_from_bytes,
+)
+from src.api.status_logic import (
     latest_today_snapshot_path as _latest_today_snapshot_path,
+)
+from src.api.status_logic import (
+    merge_health as _merge_health,
 )
 from src.api.status_logic import (
     parse_asset_snapshot_response as _parse_asset_snapshot_response,
@@ -750,9 +757,13 @@ async def _trade_result_for_state(s: state.State) -> dict:
         return _trade_result_view(None, query_failed=True)
 
 
-# 최근 운영 로그의 마지막 토큰·시각 점검·WS 사건. 파일이 그대로면 다시 읽지 않는다.
-_HEALTH_LOG_CACHE: dict = {}
+# 최근 운영 로그의 마지막 토큰·시각 점검·WS 사건.
+# /api/status는 봇의 매매 루프 위에서 돈다(main.py가 uvicorn을 loop="none"으로 띄운다). 일별 로그는
+# 750KB까지 커지므로 이 읽기는 작업 스레드에서 하고(asyncio.to_thread), 파일을 통째로 다시 읽지 않고
+# 지난번 읽은 곳 뒤에 붙은 완결된 줄만 읽는다. 상태(경로·읽은 위치·판정)는 한 잠금 안에서만 바꾸고
+# 읽어서, 동시에 들어온 조회가 서로 다른 파일의 위치와 판정을 섞지 못한다.
 _DAILY_LOG_NAME_RE = re.compile(r"^\d{8}\.jsonl$")
+_HEALTH_READ_MAX_BYTES = 4 * 1024 * 1024  # 한 번에 읽을 상한. 넘으면 다음 조회에서 이어 읽는다
 
 
 def _latest_daily_log_path() -> Path | None:
@@ -767,31 +778,81 @@ def _latest_daily_log_path() -> Path | None:
     return _LOG_DIR / names[-1] if names else None
 
 
+class _HealthLogReader:
+    """일별 로그의 상태 사건을 이어 읽는다. 모든 필드는 `_lock` 안에서만 다룬다."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        self._path: str | None = None
+        self._offset = 0
+        self._health: dict = {"token": None, "ntp": None, "ws": None}
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> dict:
+        path = _latest_daily_log_path()
+        if path is None:
+            self.reset()
+            return {"log_date": None, "token": None, "ntp": None, "ws": None}
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return {"log_date": path.name[:8], "token": None, "ntp": None, "ws": None}
+        # 날이 바뀌었거나 파일이 줄었으면(교체·잘림) 처음부터 다시 읽는다.
+        if str(path) != self._path or size < self._offset:
+            self.reset()
+            self._path = str(path)
+        if size > self._offset:
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(self._offset)
+                    chunk = fh.read(min(size - self._offset, _HEALTH_READ_MAX_BYTES))
+            except OSError:
+                chunk = b""
+            # 아직 쓰는 중인 마지막 줄(줄바꿈 전)은 다음 조회로 미룬다.
+            complete = chunk[: chunk.rfind(b"\n") + 1]
+            if complete:
+                self._offset += len(complete)
+                self._health = _merge_health(
+                    self._health, _health_from_logs(_health_rows_from_bytes(complete))
+                )
+        return {"log_date": path.name[:8], **{k: (dict(v) if v else None)
+                                              for k, v in self._health.items()}}
+
+
+_HEALTH_READER = _HealthLogReader()
+
+
 def _health_snapshot() -> dict:
-    path = _latest_daily_log_path()
-    if path is None:
-        return {"log_date": None, "token": None, "ntp": None, "ws": None}
+    """작업 스레드에서 부른다(파일 읽기). 매매 루프에서 직접 부르지 않는다."""
+    return _HEALTH_READER.snapshot()
+
+
+async def _health_snapshot_async() -> dict:
     try:
-        stat = path.stat()
-    except OSError:
-        return {"log_date": path.name[:8], "token": None, "ntp": None, "ws": None}
-    signature = (str(path), stat.st_mtime_ns, stat.st_size)
-    if _HEALTH_LOG_CACHE.get("signature") == signature:
-        return _HEALTH_LOG_CACHE["value"]
-    rows: list[dict] = []
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if '"TOKEN_' in line or '"TIME_SYNC_' in line or '"WS_' in line:
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    continue
-    except OSError:
-        return {"log_date": path.name[:8], "token": None, "ntp": None, "ws": None}
-    value = {"log_date": path.name[:8], **_health_from_logs(rows)}
-    _HEALTH_LOG_CACHE.clear()
-    _HEALTH_LOG_CACHE.update({"signature": signature, "value": value})
-    return value
+        return await asyncio.to_thread(_health_snapshot)
+    except Exception as exc:  # noqa: BLE001 — 표시용 읽기 실패가 상태 응답을 막으면 안 된다
+        log("API_STATUS_HEALTH_FAILED", level="WARN", error=repr(exc))
+        return {"log_date": None, "token": None, "ntp": None, "ws": None, "error": True}
+
+
+def _observed_quote(flow_ticker: str | None, tick_rows: list[dict]) -> tuple:
+    """화면 종목의 마지막 시세(가격, 시각). 다른 종목의 틱은 쓰지 않는다.
+
+    `current_price`(live.last_tick_price)는 종목을 가리지 않는 호환 필드라 그대로 두고,
+    화면은 이 값을 쓴다. 틱 이력이 없으면 마지막 틱이 같은 종목일 때만 가격을 쓴다(시각 모름).
+    """
+    if tick_rows:
+        last = tick_rows[-1]
+        return last.get("price"), last.get("ts")
+    if flow_ticker and live.last_tick_price and str(live.last_tick_ticker) == str(flow_ticker):
+        return live.last_tick_price, None
+    return None, None
 
 
 @app.get("/api/status")
@@ -816,6 +877,10 @@ async def api_status() -> JSONResponse:
     logs = _read_today_logs(limit=_STATUS_LOG_LIMIT)
     assets = _asset_snapshot_cached() or await _latest_asset_snapshot_from_db()
     entry = s.entry_price or 0.0
+    observed_price, observed_last_at = _observed_quote(
+        s.target_ticker if s.position_status in _POSITION_VIEW_STATUSES else
+        (observe_ticker or s.target_ticker), tick_rows,
+    )
     cur = live.last_tick_price
     pnl_pct = round((cur / entry - 1) * 100, 2) if (cur and entry) else None
 
@@ -869,8 +934,9 @@ async def api_status() -> JSONResponse:
                 entry_at=s.entry_at,
                 late_open=market_calendar.is_late_open(_today()),
             ),
-            "observed_last_at": tick_rows[-1].get("ts") if tick_rows else None,
-            "health": _health_snapshot(),
+            "observed_price": observed_price,
+            "observed_last_at": observed_last_at,
+            "health": await _health_snapshot_async(),
             "trade_marks": (
                 await _today_trade_marks()
                 if s.position_status in ("HOLDING", "EXITING", "CLOSED")

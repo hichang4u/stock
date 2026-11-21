@@ -325,6 +325,20 @@ src/web/
   WS는 미보유·미관측이면 `연결 안 함(추적 대상 없음)`, 보유·관측 중 끊기면 `✕ 끊김`. 마지막 시세 시각은 `status.observed_last_at`.
 - 화면 갱신: `/api/status` 마지막 성공 경과(15초 넘으면 `!`), 실패면 `✕ 상태 조회 실패 · 마지막 성공 n초 전`,
   SSE가 끊기면 `실시간 알림 끊김(재연결 중)`을 덧붙인다.
+- 판정(`health.*.status`, 2026-11-21 리뷰 보완): 토큰은 최종 결과만 본다 — `TOKEN_REFRESHED`·`TOKEN_LOADED_FROM_CACHE`는 `ok`,
+  3회 재시도 끝의 `TOKEN_REFRESH_FAIL`(CRIT)·`TOKEN_ISSUE_REFUSED_READONLY`는 `fail`. 뒤 사건이 이기므로 같은 날 성공 뒤 최종 실패는
+  `✕ 토큰 발급 실패 09:10 — 이후 성공 기록 없음`(탑바 `KIS ✕`), 이후 성공이 오면 복구. 시도별 실패(`*_HTTP_ERR`·`*_ATTEMPT_FAIL`)는 결과가 아니다.
+  시각은 `TIME_SYNC_WARN`이라도 수준이 CRIT/critical/ERROR(오차 500ms 이상)면 `crit` → `✕ 시각 오차 위험 623ms`, WARN이면 `! 시각 오차 경고`,
+  `TIME_SYNC_ERROR`는 `✕ 시각 동기화 실패`. 인증·NTP 로직과 알림 정책은 그대로다.
+- 상태 로그 읽기: `/api/status`는 봇의 매매 루프 위에서 돈다(uvicorn `loop="none"`). 연결 판정 읽기는 `asyncio.to_thread`로 작업
+  스레드에서, 지난번 읽은 곳 뒤에 붙은 **완결된 줄만** 읽는다(쓰는 중인 마지막 줄은 다음 조회로). 경로·읽은 위치·판정은 한 잠금 안에서만
+  바꾼다. 날이 바뀌거나 파일이 줄면 처음부터. 깨진 UTF-8·잘린 줄·객체 아닌 줄은 버리고, 읽기 자체가 실패해도 응답은 `health.error=true`로 계속된다.
+- 화면 시세: `/api/status.observed_price`·`observed_last_at`은 **화면 종목의 같은 틱** 한 쌍이다(보유·청산은 거래 종목, 미보유는 관측 종목).
+  틱 이력이 없으면 `live.last_tick_ticker`가 같은 종목일 때만 가격을 쓰고 시각은 비운다. `current_price`·`pnl_pct`는 종목을 가리지 않는
+  호환 필드로 그대로 둔다(카드·차트·자산 보조값은 `observed_price`를 쓰고, 평가손익은 그 값으로 다시 계산한다).
+- SSE 틱(`sseTickUpdate`): 화면 종목과 같은 종목·유효한 가격·시각이 있고, 이미 보인 시세보다 오래되지 않은 틱만 반영한다. 다른 종목·
+  종목 없는 틱(서버 `push_tick`은 늘 종목을 붙인다)·시각 없는 틱·역순 틱은 버린다. 종목이 바뀌면 폴링이 새 종목을 알려준 뒤부터 받는다.
+  폴링 응답이 SSE로 받은 시세보다 오래됐으면 같은 종목의 더 새 시세를 남긴다(`keepFresherQuote`).
 
 ### 이벤트 로그
 
