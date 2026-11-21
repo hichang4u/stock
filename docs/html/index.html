@@ -5,7 +5,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="assets/app.css?v=20261116-flowseed2">
+<link rel="stylesheet" href="assets/app.css?v=20261121-ui">
 
 <!-- TOP BAR -->
 <div class="tb">
@@ -23,10 +23,10 @@
   </div>
   <div class="tb-console">자동매매 콘솔</div>
   <div class="tb-gap"></div>
-  <div class="tb-si" id="si-kis"><span class="dot off" id="dot-kis"></span>KIS</div>
-  <div class="tb-si" id="si-ws"><span class="dot off" id="dot-ws"></span>WS</div>
-  <div class="tb-si" id="si-ntp"><span class="dot off" id="dot-ntp"></span><span id="ntp-lbl">NTP</span></div>
-  <div class="tb-paper" id="tb-mode">PAPER</div>
+  <div class="tb-si" id="si-kis" title="KIS 증권사 API: 확인 전"><span class="dot off" id="dot-kis"></span><span id="kis-lbl">KIS –</span></div>
+  <div class="tb-si" id="si-ws" title="실시간 시세(WebSocket): 확인 전"><span class="dot off" id="dot-ws"></span><span id="ws-lbl">시세 –</span></div>
+  <div class="tb-si" id="si-ntp" title="PC 시각 동기화: 확인 전"><span class="dot off" id="dot-ntp"></span><span id="ntp-lbl">시각 –</span></div>
+  <div class="tb-paper" id="tb-mode" title="계좌 모드">모의투자</div>
   <button class="tb-theme" id="theme-btn" title="라이트/다크 모드 전환" onclick="toggleTheme()">☀</button>
   <div class="tb-clk" id="clk">--:--:-- KST</div>
 </div>
@@ -44,9 +44,9 @@
     <button class="li menu-item" title="개선" onclick="go('improve',this)"><span class="li-dot"></span><span>개선</span></button>
     <button class="li menu-item" title="설정" onclick="go('settings',this)"><span class="li-dot"></span><span>설정</span></button>
     <div class="li-sep legacy"></div>
-    <div class="li off" id="li-kis"><div class="li-dot"></div>KIS</div>
-    <div class="li off" id="li-ws"><div class="li-dot"></div>WS</div>
-    <div class="li off" id="li-ntp"><div class="li-dot"></div>NTP</div>
+    <div class="li off" id="li-kis" title="KIS 증권사 API"><div class="li-dot"></div>KIS</div>
+    <div class="li off" id="li-ws" title="실시간 시세(WebSocket)"><div class="li-dot"></div>시세</div>
+    <div class="li off" id="li-ntp" title="PC 시각 동기화"><div class="li-dot"></div>시각</div>
     <div class="li-sep"></div>
   </div>
 
@@ -57,7 +57,31 @@
       <div class="t-left">
         <div class="wm">日</div>
 
-        <div class="arc-strip">
+        <!-- 1. 거래일 · 운영 상태 -->
+        <section class="day-strip" id="day-strip" aria-label="거래일과 운영 상태">
+          <div class="day-row">
+            <span class="day-today" id="day-today">오늘 —</span>
+            <span class="day-data" id="day-data" hidden></span>
+            <span class="day-note" id="day-note" hidden></span>
+            <a class="day-f1" id="day-f1" href="#f1-panel" onclick="openF1Panel()" hidden></a>
+          </div>
+          <div class="day-row day-session">
+            <span class="sess-lbl">세션</span>
+            <div class="sess-bar" id="sess-bar" role="progressbar" aria-label="오늘 세션 진행(08:40 장전 시작 ~ 세션 종료)"
+              aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="sess-fill" id="sess-fill"></span></div>
+            <span class="sess-text" id="sess-text">—</span>
+            <button class="text-btn" id="arc-toggle" type="button" aria-expanded="false" aria-controls="arc-strip"
+              onclick="toggleArc()">게이지</button>
+          </div>
+          <div class="day-row day-health" id="day-health" aria-label="연결 상태와 마지막 확인 시각">
+            <span class="hl" id="hl-kis"><b>KIS</b><span id="hl-kis-v">확인 전</span></span>
+            <span class="hl" id="hl-ws"><b>실시간 시세(WS)</b><span id="hl-ws-v">확인 전</span></span>
+            <span class="hl" id="hl-ntp"><b>시각 동기화</b><span id="hl-ntp-v">확인 전</span></span>
+            <span class="hl" id="hl-poll"><b>화면 갱신</b><span id="hl-poll-v">대기</span></span>
+          </div>
+        </section>
+
+        <div class="arc-strip" id="arc-strip" hidden>
           <canvas id="arc" width="280" height="145"></canvas>
           <div class="arc-row">
             <div><div class="a-lbl">08:40</div><div class="a-sub">장전 시작</div></div>
@@ -66,10 +90,12 @@
           </div>
         </div>
 
+        <!-- 2. 대표 거래 · 보유/주문 상태 -->
         <div class="state-strip">
           <span class="st-badge IDLE" id="st-badge">대기중</span>
           <span class="st-tk" id="st-tk"></span>
           <span class="st-name" id="st-name"></span>
+          <span class="st-date" id="st-date" hidden></span>
           <div class="tv-pills" id="tv-pills"></div>
           <button
             class="tracking-stop-btn"
@@ -80,37 +106,17 @@
           >추적 종료</button>
         </div>
 
-        <div class="asset-strip" id="asset-strip">
-          <div class="asset-cell"><div class="asset-k">총평가</div><div class="asset-v" id="as-total">—</div></div>
-          <div class="asset-cell"><div class="asset-k">예수금</div><div class="asset-v" id="as-cash">—</div></div>
-          <div class="asset-cell"><div class="asset-k">보유</div><div class="asset-v" id="as-holdings">0종목</div></div>
-          <div class="asset-cell"><div class="asset-k">평가손익</div><div class="asset-v" id="as-pnl">—</div></div>
-          <div class="asset-cell push"><div class="asset-k">주문가능</div><div class="asset-v" id="as-buyable">—</div><div class="asset-sub" id="as-source">자산 메뉴에서 상세</div></div>
-        </div>
-
-        <div class="f1-panel" id="f1-panel">
-          <div class="f1-head">
-            <div class="f1-title">F1 스캔</div>
-            <div class="f1-state IDLE" id="f1-state">대기</div>
-            <div class="f1-meta" id="f1-meta">스냅샷 대기중</div>
-          </div>
-          <div class="f1-steps" id="f1-steps"></div>
-          <div class="f1-grid" id="f1-summary"></div>
-          <div class="today-note">
-            <div class="f1-size-chart" id="f1-size-chart" aria-label="F1 후보 사이즈 그래프"><div class="f1-size-empty">후보 전체 목록은 선정 메뉴에서 확인</div></div>
-            <button class="text-btn" onclick="go('selection')">선정 보기</button>
-          </div>
-        </div>
-
         <div class="pos-wrap">
           <div class="pgrid">
-            <div><div class="plbl">진입가</div><div class="pval" id="pv-entry">—</div></div>
-            <div><div class="plbl">현재가</div><div class="pval" id="pv-cur">—</div></div>
-            <div><div class="plbl">평가손익</div><div class="pval" id="pv-pnl">—</div></div>
-            <div><div class="plbl">최고가</div><div class="pval" id="pv-high">—</div></div>
-            <div><div class="plbl">잔여수량</div><div class="pval" id="pv-qty">—</div></div>
-            <div><div class="plbl">투입금액</div><div class="pval" id="pv-amount">—</div></div>
+            <div><div class="plbl" id="pl-entry">진입가</div><div class="pval" id="pv-entry">—</div></div>
+            <div><div class="plbl" id="pl-cur">현재가</div><div class="pval" id="pv-cur">—</div></div>
+            <div><div class="plbl" id="pl-pnl">평가손익</div><div class="pval" id="pv-pnl">—</div></div>
+            <div><div class="plbl" id="pl-high">최고가</div><div class="pval" id="pv-high">—</div></div>
+            <div><div class="plbl" id="pl-qty">잔여수량</div><div class="pval" id="pv-qty">—</div></div>
+            <div><div class="plbl" id="pl-amount">투입금액</div><div class="pval" id="pv-amount">—</div></div>
           </div>
+          <div class="pos-note" id="pos-note" hidden></div>
+          <div class="obs-strip" id="obs-strip" hidden></div>
           <div class="pdiv"></div>
           <div class="flags" id="flags">
             <div class="flag" id="fl-pyramid"><span class="dot off"></span>피라미딩</div>
@@ -120,6 +126,15 @@
           </div>
         </div>
 
+        <div class="asset-strip" id="asset-strip" aria-label="계좌 요약">
+          <div class="asset-cell"><div class="asset-k">계좌 총평가</div><div class="asset-v" id="as-total">—</div></div>
+          <div class="asset-cell"><div class="asset-k">예수금</div><div class="asset-v" id="as-cash">—</div></div>
+          <div class="asset-cell"><div class="asset-k">보유</div><div class="asset-v" id="as-holdings">0종목</div></div>
+          <div class="asset-cell"><div class="asset-k">계좌 평가손익</div><div class="asset-v" id="as-pnl">—</div></div>
+          <div class="asset-cell push"><div class="asset-k">주문가능</div><div class="asset-v" id="as-buyable">—</div><div class="asset-sub" id="as-source">자산 메뉴에서 상세</div></div>
+        </div>
+
+        <!-- 3. 가격 차트 -->
         <div class="price-flow">
           <div class="flow-head">
             <div>
@@ -181,14 +196,34 @@
               title="휠: 확대·축소 · 드래그: 좌우 이동 · 더블클릭: 최근 120봉으로"></canvas>
           </div>
         </div>
+
+        <!-- 4. F1 상세 (요약 줄은 늘 보이고, 본문은 접는다) -->
+        <details class="f1-panel" id="f1-panel">
+          <summary class="f1-head">
+            <span class="f1-title">F1 종목 선정</span>
+            <span class="f1-state IDLE" id="f1-state">대기</span>
+            <span class="f1-brief" id="f1-brief"></span>
+            <span class="f1-meta" id="f1-meta">스냅샷 대기중</span>
+          </summary>
+          <div class="f1-steps" id="f1-steps"></div>
+          <div class="f1-grid" id="f1-summary"></div>
+          <div class="today-note">
+            <div class="f1-size-chart" id="f1-size-chart" aria-label="F1 후보 사이즈 그래프"><div class="f1-size-empty">후보 전체 목록은 선정 메뉴에서 확인</div></div>
+            <button class="text-btn" onclick="go('selection')">선정 보기</button>
+          </div>
+        </details>
       </div>
 
-      <div class="t-right">
-        <div class="ev-hdr">이벤트 로그</div>
+      <aside class="t-right" id="ev-panel" aria-label="이벤트 로그">
+        <div class="ev-hdr">
+          <button class="ev-toggle" id="ev-toggle" type="button" aria-expanded="true" aria-controls="ev-scroll"
+            onclick="toggleEventPanel()" title="이벤트 로그 접기/펴기"><span class="ev-toggle-i" aria-hidden="true">▸</span><span class="ev-title">이벤트 로그</span></button>
+          <span class="ev-sum" id="ev-sum" role="status"></span>
+        </div>
         <div class="ev-scroll" id="ev-scroll">
           <div class="empty">로딩 중...</div>
         </div>
-      </div>
+      </aside>
     </div>
 
     <!-- ══ SELECTION ══ -->
@@ -277,7 +312,7 @@
     <div id="sc-settings" class="sc sc-hist">
       <div class="hist-inner">
         <div class="scards">
-          <div class="sc2"><div class="sc2-lbl">계좌 모드</div><div class="sc2-val" id="set-mode" style="color:var(--br)">PAPER</div></div>
+          <div class="sc2"><div class="sc2-lbl">계좌 모드</div><div class="sc2-val" id="set-mode" style="color:var(--br)">모의투자(PAPER)</div></div>
           <div class="sc2"><div class="sc2-lbl">실행 모드</div><div class="sc2-val" id="set-runtime">—</div></div>
           <div class="sc2"><div class="sc2-lbl">실전 준비도</div><div class="sc2-val" id="set-readiness">0%</div></div>
           <div class="sc2"><div class="sc2-lbl">REAL 게이트</div><div class="sc2-val" id="set-real-gate">차단</div></div>
@@ -408,7 +443,7 @@
 <div class="btm">
   <div class="b-seg">
     <span class="dot" id="btm-mode-dot" style="background:var(--br)"></span>
-    <span id="btm-mode" style="color:var(--tx)">PAPER TRADING</span>
+    <span id="btm-mode" style="color:var(--tx)">모의투자 매매</span>
   </div>
   <div class="b-seg" id="btm-pipeline">
     <span class="b-dim">F1 스캔</span><span class="b-arr">›</span>
@@ -426,5 +461,5 @@
   </div>
 </div>
 
-<script src="assets/app.js?v=20261116-flowseed"></script>
+<script src="assets/app.js?v=20261121-ui"></script>
 <script src="assets/bars_chart.js?v=20260828-hts"></script>

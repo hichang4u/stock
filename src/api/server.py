@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
-from src import bars, db, indicators, live, perf_costs, readiness, release, state
+from src import bars, db, indicators, live, market_calendar, perf_costs, readiness, release, state
 from src import warmup as warmup_mod
 from src.api import kis_rest
 from src.api.status_logic import (
@@ -22,6 +22,9 @@ from src.api.status_logic import (
 )
 from src.api.status_logic import (
     f3_detail_from_event as _f3_detail_from_event,
+)
+from src.api.status_logic import (
+    health_from_logs as _health_from_logs,
 )
 from src.api.status_logic import (
     latest_today_snapshot_path as _latest_today_snapshot_path,
@@ -34,6 +37,12 @@ from src.api.status_logic import (
 )
 from src.api.status_logic import (
     price_seed_from_bars as _price_seed_from_bars,
+)
+from src.api.status_logic import (
+    session_view as _session_view,
+)
+from src.api.status_logic import (
+    trade_result_view as _trade_result_view,
 )
 from src.modules import f4_tracking, paper_fast_probe
 from src.modules.f1_filter import (
@@ -710,6 +719,81 @@ def _price_flow_seed(
         return [], _price_seed_meta("error")
 
 
+async def _trade_result_for_state(s: state.State) -> dict:
+    """화면용 거래 결과(읽기 전용). 현재 상태가 가리키는 거래 한 건만 본다.
+
+    상태의 `trade_id`가 있으면 그 행, 없으면 진입일·종목으로 찾는다. 조회 실패는 0원이 아니라
+    `available=False, reason=QUERY_FAILED`로 돌려준다.
+    """
+    if not s.target_ticker or s.position_status not in _POSITION_VIEW_STATUSES:
+        return {"available": False, "reason": "NO_POSITION"}
+    params: tuple[object, ...]
+    try:
+        conn = db.get()
+        if s.trade_id:
+            query, params = "SELECT * FROM trades WHERE id = ?", (s.trade_id,)
+        else:
+            entry = _parse_ts(s.entry_at)
+            if entry is None:
+                return _trade_result_view(None)
+            day = (entry.astimezone(KST) if entry.tzinfo else entry).strftime("%Y%m%d")
+            query = (
+                "SELECT * FROM trades WHERE date = ? AND ticker = ? AND track = 'A' "
+                "ORDER BY id DESC LIMIT 1"
+            )
+            params = (day, s.target_ticker)
+        async with conn.execute(query, params) as cur:
+            row = await cur.fetchone()
+        return _trade_result_view(dict(row) if row is not None else None)
+    except Exception as exc:  # noqa: BLE001 — 표시용 조회 실패가 상태 응답을 막으면 안 된다
+        log("API_STATUS_TRADE_RESULT_FAILED", level="WARN", error=repr(exc))
+        return _trade_result_view(None, query_failed=True)
+
+
+# 최근 운영 로그의 마지막 토큰·시각 점검·WS 사건. 파일이 그대로면 다시 읽지 않는다.
+_HEALTH_LOG_CACHE: dict = {}
+_DAILY_LOG_NAME_RE = re.compile(r"^\d{8}\.jsonl$")
+
+
+def _latest_daily_log_path() -> Path | None:
+    """오늘 로그가 있으면 오늘, 없으면(주말 등) 오늘 이전의 가장 최근 일별 로그."""
+    try:
+        names = sorted(
+            p.name for p in _LOG_DIR.iterdir()
+            if _DAILY_LOG_NAME_RE.match(p.name) and p.name[:8] <= _today()
+        )
+    except OSError:
+        return None
+    return _LOG_DIR / names[-1] if names else None
+
+
+def _health_snapshot() -> dict:
+    path = _latest_daily_log_path()
+    if path is None:
+        return {"log_date": None, "token": None, "ntp": None, "ws": None}
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"log_date": path.name[:8], "token": None, "ntp": None, "ws": None}
+    signature = (str(path), stat.st_mtime_ns, stat.st_size)
+    if _HEALTH_LOG_CACHE.get("signature") == signature:
+        return _HEALTH_LOG_CACHE["value"]
+    rows: list[dict] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if '"TOKEN_' in line or '"TIME_SYNC_' in line or '"WS_' in line:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        return {"log_date": path.name[:8], "token": None, "ntp": None, "ws": None}
+    value = {"log_date": path.name[:8], **_health_from_logs(rows)}
+    _HEALTH_LOG_CACHE.clear()
+    _HEALTH_LOG_CACHE.update({"signature": signature, "value": value})
+    return value
+
+
 @app.get("/api/status")
 async def api_status() -> JSONResponse:
     s = state.get()
@@ -776,6 +860,17 @@ async def api_status() -> JSONResponse:
             # ts는 분 시작, price는 그 분의 종가. 겹치는 분은 넣지 않는다(메모리 우선).
             "minute_price_seed": seed_rows,
             "minute_price_seed_meta": seed_meta,
+            # 화면 표시용(읽기 전용). 위 current_price·pnl_pct는 차트·SSE 호환을 위해 그대로 두고,
+            # 청산 뒤에는 이 거래 결과를 대표값으로, 위 값은 "청산 후 관측"으로 따로 보여준다.
+            "trade_result": await _trade_result_for_state(s),
+            "session": _session_view(
+                datetime.now(KST),
+                trading_date=s.trading_date,
+                entry_at=s.entry_at,
+                late_open=market_calendar.is_late_open(_today()),
+            ),
+            "observed_last_at": tick_rows[-1].get("ts") if tick_rows else None,
+            "health": _health_snapshot(),
             "trade_marks": (
                 await _today_trade_marks()
                 if s.position_status in ("HOLDING", "EXITING", "CLOSED")
@@ -1088,9 +1183,19 @@ async def api_f1() -> JSONResponse:
         rows = _fast_candidates_from_logs(logs)
         if rows:
             selection_data_source = "PAPER_FAST_LOG"
-    summary = _summary_with_trade_anchor(_f1_summary_from_rows(rows), logs, state.get())
+    current = state.get()
+    summary = _summary_with_trade_anchor(_f1_summary_from_rows(rows), logs, current)
     if rows and status in {"IDLE", "NO_TARGET"}:
         status = "DONE" if summary["gap_pass"] else "NO_TARGET"
+    # 오늘 로그에 진입이 없어 상태 파일의 거래로 후보를 채웠는데 그 거래가 오늘 것이 아니면, 오늘의
+    # 선정 결과처럼 보이면 안 된다(주말·장 전에 지난 거래가 "후보 확정"으로 보이던 문제).
+    trade_date = _session_view(
+        datetime.now(KST), trading_date=current.trading_date, entry_at=current.entry_at,
+        late_open=False,
+    )["data_date"]
+    if summary.get("selection_source") == "STATE_TRADE" and trade_date and trade_date != _today():
+        summary = {**summary, "selection_source": "PREVIOUS_TRADE",
+                   "selection_trade_date": trade_date}
 
     return JSONResponse(
         {
@@ -1103,6 +1208,8 @@ async def api_f1() -> JSONResponse:
                 else None
             ),
             "selection_data_source": selection_data_source,
+            "today": _today(),
+            "snapshot_date": snapshot_path.name[:8] if snapshot_path else None,
             "selection_process": _selection_process_from_logs(summary, logs),
             **summary,
         }

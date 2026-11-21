@@ -374,3 +374,134 @@ def price_seed_from_bars(
         "first": rows[0]["ts"] if rows else None,
         "last": rows[-1]["ts"] if rows else None,
     }
+
+
+# ── 화면 표시용 거래 결과 · 거래일 · 상태 신선도 (읽기 전용 모델) ──────────────
+# `/api/status`의 기존 필드(current_price·pnl_pct·tick_history 등)는 차트·SSE·마커가 쓰므로
+# 그대로 둔다. 아래는 화면이 "이 숫자가 무엇의 값인가"를 틀리지 않게 하는 별도 필드다.
+
+_WEEKDAYS_KO = ("월", "화", "수", "목", "금", "토", "일")
+
+
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def trade_result_view(row: dict | None, *, query_failed: bool = False) -> dict:
+    """DB `trades` 한 행을 화면용 거래 결과로 바꾼다(순수).
+
+    - `available=False`면 화면은 손익을 그리지 않는다. 조회 실패는 `reason="QUERY_FAILED"`,
+      행이 없으면 `"NO_TRADE"`다. 0원으로 채우지 않는다.
+    - 손익은 체결가 × 수량으로 계산된 비용 전(gross) 값이다(`trades.pnl_amount`·`pnl_pct`).
+      수수료·세금이 빠진 순손익이 아니다(`cost_basis="GROSS"`). 실제 정산값은 이 모델에 없다.
+    - 청산 전(`status != "CLOSED"`)이면 청산가·손익을 내지 않는다(`closed=False`).
+    """
+    if query_failed:
+        return {"available": False, "reason": "QUERY_FAILED"}
+    if not row:
+        return {"available": False, "reason": "NO_TRADE"}
+    closed = (
+        str(row.get("status") or "") == "CLOSED"
+        and _finite_number(row.get("exit_price")) is not None
+    )
+    view = {
+        "available": True,
+        "trade_id": row.get("id"),
+        "trade_date": row.get("date"),
+        "ticker": row.get("ticker"),
+        "name": row.get("name"),
+        "status": row.get("status"),
+        "closed": closed,
+        "entry_price": _finite_number(row.get("entry_price")),
+        "entry_qty": row.get("entry_qty"),
+        "entry_at": row.get("entry_at"),
+        "exit_price": None,
+        "exit_qty": None,
+        "exit_at": None,
+        "close_reason": None,
+        "pnl_amount": None,
+        "pnl_pct": None,
+        "cost_basis": "GROSS",
+    }
+    if closed:
+        view.update({
+            "exit_price": _finite_number(row.get("exit_price")),
+            "exit_qty": row.get("exit_qty"),
+            "exit_at": row.get("exit_at"),
+            "close_reason": row.get("close_reason"),
+            "pnl_amount": _finite_number(row.get("pnl_amount")),
+            "pnl_pct": _finite_number(row.get("pnl_pct")),
+        })
+    return view
+
+
+def session_view(now: datetime, *, trading_date: str | None, entry_at: str | None,
+                 late_open: bool) -> dict:
+    """오늘 달력 날짜와 화면 자료의 거래일을 나눠 준다(순수).
+
+    `data_date`는 화면의 거래 자료가 속한 날이다: 진입 시각의 날짜, 없으면 상태 파일의 거래일.
+    오늘과 다르면 `is_previous_day=True` — 화면은 "직전 거래 기록"으로 표시한다. 주말은 달력으로
+    확실하지만 공휴일은 이 모델이 모른다(`holiday_known=False`). 시장 일정을 추정해 만들지 않는다.
+    """
+    local = now.astimezone(_KST) if now.tzinfo else now.replace(tzinfo=_KST)
+    today = local.strftime("%Y%m%d")
+    data_date = None
+    if entry_at:
+        try:
+            parsed = datetime.fromisoformat(str(entry_at))
+            data_date = (parsed.astimezone(_KST) if parsed.tzinfo else parsed).strftime("%Y%m%d")
+        except ValueError:
+            data_date = None
+    trading_text = str(trading_date or "")
+    if data_date is None and len(trading_text) == 8 and trading_text.isdigit():
+        data_date = trading_text
+
+    def weekday_of(date: str | None) -> str | None:
+        if not date:
+            return None
+        try:
+            return _WEEKDAYS_KO[datetime.strptime(date, "%Y%m%d").weekday()]
+        except ValueError:
+            return None
+
+    return {
+        "today": today,
+        "today_weekday": _WEEKDAYS_KO[local.weekday()],
+        "is_weekend": local.weekday() >= 5,
+        "late_open": bool(late_open),
+        "holiday_known": False,
+        "trading_date": trading_date,
+        "data_date": data_date,
+        "data_weekday": weekday_of(data_date),
+        "is_previous_day": bool(data_date) and data_date != today,
+        "now": local.isoformat(timespec="seconds"),
+    }
+
+
+_HEALTH_EVENTS = {
+    "TOKEN_REFRESHED": "token", "TOKEN_LOADED_FROM_CACHE": "token",
+    "TIME_SYNC_OK": "ntp", "TIME_SYNC_WARN": "ntp", "TIME_SYNC_ERROR": "ntp",
+    "WS_CONNECTED": "ws", "WS_DISCONNECTED": "ws",
+}
+
+
+def health_from_logs(rows: list[dict]) -> dict:
+    """운영 로그 줄에서 마지막 토큰·시각 점검·WS 연결 사건을 뽑는다(순수).
+
+    값이 없으면 None이다. 화면은 None을 "정상"으로 그리지 않고 "기록 없음"으로 그린다.
+    """
+    found: dict[str, dict] = {}
+    for row in rows:
+        kind = _HEALTH_EVENTS.get(str(row.get("event") or ""))
+        if kind is None:
+            continue
+        item = {"event": row.get("event"), "ts": row.get("ts"), "level": row.get("level")}
+        if kind == "ntp":
+            item["offset_ms"] = row.get("offset_ms")
+        if kind == "ws":
+            item["error"] = row.get("error")
+        found[kind] = item
+    return {"token": found.get("token"), "ntp": found.get("ntp"), "ws": found.get("ws")}

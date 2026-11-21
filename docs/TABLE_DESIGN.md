@@ -34,6 +34,8 @@ asset_snapshots  # 조회 시각 기준 누적 이력, FK 없음
 | 화면 | 주 원천 | 보조 원천 |
 |---|---|---|
 | 오늘 | `/api/status`, JSONL 로그, 원시 tick/분 단위 메모리 버퍼 | `trade_marks`, `asset_snapshots` fallback |
+| 오늘 · 대표 거래 결과 | `/api/status.trade_result` = `trades` 한 행(상태의 `trade_id`, 없으면 진입일·종목·트랙 A). 비용 전(`cost_basis=GROSS`) | 조회 실패는 `QUERY_FAILED`, 행 없음은 `NO_TRADE` — 0으로 채우지 않는다 |
+| 오늘 · 연결 상태 | `/api/status.health` = 최근 일별 JSONL의 마지막 `TOKEN_*`·`TIME_SYNC_*`·`WS_*` | 없으면 null(화면은 `기록 없음`) |
 | 자산 | KIS 잔고 조회 `/api/assets` | 마지막 `asset_snapshots` |
 | 주문 | `orders` + `trades` JOIN | JSONL 로그 이벤트 |
 | 이력 | `trades` | `orders`, `partial_exits` |

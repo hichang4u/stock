@@ -62,6 +62,8 @@ let _arcAnims = [];
 // 종료는 /api/settings(f5.timeout_time)에서 받아 갱신하고, 미수신 시 15:15로 폴백한다.
 const SESSION_START_MIN = 8 * 60 + 40;
 let _sessionEndMin = 15 * 60 + 15;  // F5 마감 청산 폴백(15:15)
+// 주말 등 오늘 세션이 없는 날(서버 session.is_weekend). 세션 막대를 0으로 둔다.
+let _sessionless = false;
 
 // "HH:MM" / "HH:MM:SS" → 자정 기준 분. 파싱 실패 시 null.
 function parseClockMin(str) {
@@ -95,7 +97,8 @@ function sessionArcTicks(startMin, endMin) {
     const p = n=>String(n).padStart(2,'0');
     $('clk').textContent = p(kst.getUTCHours())+':'+p(kst.getUTCMinutes())+':'+p(kst.getUTCSeconds())+' KST';
     $('btm-now').textContent = p(kst.getUTCHours())+':'+p(kst.getUTCMinutes());
-    updateArc(kst);
+    if(!$('arc-strip')?.hidden) updateArc(kst);
+    renderSessionBar();
   } catch(e) {}
 })();
 
@@ -135,7 +138,7 @@ function drawArc(prog) {
   sessionArcTicks(SESSION_START_MIN, _sessionEndMin).forEach((lbl,i)=>{
     const p=(i+1)/4, a=Math.PI*(1-p), ri=r-22;
     const x=cx+ri*Math.cos(a), y=cy+ri*Math.sin(a);
-    ctx.fillStyle=themeVal('#363a45','#4f5260'); ctx.font='10px Noto Sans KR,sans-serif';
+    ctx.fillStyle=themeVal('#9598a1','#4f5260'); ctx.font='11px Noto Sans KR,sans-serif';
     ctx.textAlign='center'; ctx.textBaseline='middle';
     ctx.fillText(lbl,x,y);
   });
@@ -190,6 +193,311 @@ function normalizeFlowScale(value) { return value === 'trailing' ? 'trailing' : 
 let _priceFlowRangeMode = normalizeFlowRange(lsGet(PRICE_FLOW_RANGE_KEY));
 let _priceFlowScaleMode = normalizeFlowScale(lsGet(PRICE_FLOW_SCALE_KEY));
 
+// ── 화면 표시 모델(순수) ───────────────────────────────────────────────────
+// 서버의 current_price·pnl_pct는 차트·SSE·마커가 쓰는 "지금 시세" 값이다. 청산 뒤에는 그 값이
+// 청산 후 관측가와 그에 따른 수익률이라, 거래 결과처럼 보이면 안 된다. 거래 결과는
+// status.trade_result(서버가 DB trades에서 읽은 읽기 전용 값)로만 그린다.
+
+const POSITION_LABELS = {
+  IDLE: '대기중', ENTERING: '진입 주문 중', HOLDING: '보유중', EXITING: '청산 주문 중', CLOSED: '청산 완료',
+};
+const CLOSE_REASON_LABELS = {
+  TRAILING: '트레일링 청산', HARD_STOP: '손절 청산', GAP_HARD_STOP: '시가 손절', TIMEOUT: '마감 청산',
+  MANUAL: '수동 청산', SLIPPAGE_GUARD: '슬리피지 청산',
+};
+
+function mmdd(date) {
+  const s = String(date || '');
+  return /^\d{8}$/.test(s) ? `${s.slice(4, 6)}/${s.slice(6, 8)}` : '';
+}
+
+function dateWithWeekday(date, weekday) {
+  const md = mmdd(date);
+  return md ? (weekday ? `${md}(${weekday})` : md) : '—';
+}
+
+function hhmmss(ts) {
+  const m = String(ts || '').match(/T(\d{2}:\d{2}:\d{2})/);
+  return m ? m[1] : '';
+}
+
+function signedWon(n) {
+  if(n == null || !Number.isFinite(Number(n))) return '—';
+  const v = Number(n);
+  return `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toLocaleString('ko-KR', {maximumFractionDigits: 0})}원`;
+}
+
+// 대표 카드에 무엇을 어떤 이름으로 보일지(순수). 반환값의 cells는 6칸 고정:
+// [진입, 가격, 손익, 최고가, 수량, 투입]. text는 HTML이 아니라 글자다.
+function tradeCardModel(d) {
+  const status = d?.position_status || 'IDLE';
+  const observing = isObservingFlow(d);
+  const entry = Number(d?.entry_price || 0) || null;
+  const cur = Number(d?.current_price || 0) || null;
+  const qty = d?.remaining_qty;
+  const amount = entry && d?.entry_qty ? entry * d.entry_qty : null;
+  const tr = d?.trade_result || null;
+  const tone = v => v == null ? '' : v >= 0 ? 'up' : 'dn';
+  const won = v => v == null ? '—' : `${fmt(v)}원`;
+  const cells = [
+    {label: '진입가', text: won(entry)},
+    {label: '현재가', text: won(cur), tone: cur && entry ? (cur > entry ? 'up' : 'dn') : ''},
+    {label: '평가손익(미실현)', text: fmtPct(d?.pnl_pct), tone: tone(d?.pnl_pct)},
+    {label: '최고가', text: won(Number(d?.high_price || 0) || null)},
+    {label: '잔여수량', text: qty != null ? `${fmt(qty)}주` : '—'},
+    {label: '투입금액', text: amount ? fmtM(amount) : '—'},
+  ];
+  const model = {status, cells, note: '', obs: '', pill: null};
+
+  if(status === 'IDLE') {
+    if(observing) {
+      cells[1].label = '관측가';
+      cells[2] = {label: '평가손익', text: '— (미보유)'};
+      model.note = '미보유 관측 중 — 이 종목을 보유하지 않았습니다.';
+    } else {
+      cells.forEach((c, i) => { if(i !== 3) c.text = '—'; });
+      cells[2].label = '평가손익';
+      model.note = '보유 포지션 없음';
+    }
+  } else if(status === 'ENTERING') {
+    cells[2] = {label: '평가손익', text: '— (체결 확인 전)'};
+    model.note = '진입 주문을 처리하는 중입니다. 체결이 확인되면 보유로 바뀝니다.';
+  } else if(status === 'HOLDING') {
+    model.pill = d?.pnl_pct != null ? {text: `평가 ${fmtPct(d.pnl_pct)}`, tone: tone(d.pnl_pct)} : null;
+  } else if(status === 'EXITING') {
+    cells[2].label = '평가손익(청산 중)';
+    model.note = '청산 주문을 처리하는 중입니다. 잔여수량이 0이 되면 청산 완료로 바뀝니다.';
+    model.pill = d?.pnl_pct != null ? {text: `평가 ${fmtPct(d.pnl_pct)}`, tone: tone(d.pnl_pct)} : null;
+  } else if(status === 'CLOSED') {
+    if(tr && tr.available && tr.closed) {
+      const reason = CLOSE_REASON_LABELS[tr.close_reason] || tr.close_reason || '';
+      cells[0] = {label: '진입가', text: won(tr.entry_price)};
+      cells[1] = {label: '청산가', text: won(tr.exit_price)};
+      cells[2] = {
+        label: '거래 손익(비용 전)',
+        text: `${fmtPct(tr.pnl_pct)} · ${signedWon(tr.pnl_amount)}`,
+        tone: tone(tr.pnl_pct),
+      };
+      cells[4] = {label: '청산 수량', text: tr.exit_qty != null ? `${fmt(tr.exit_qty)}주 · 잔여 ${fmt(qty ?? 0)}주` : '—'};
+      const at = hhmmss(tr.exit_at);
+      model.note = `${reason}${at ? ` · ${at}` : ''} · 수수료·세금 차감 전(실제 정산은 확인 전)`;
+      model.pill = {text: `거래 ${fmtPct(tr.pnl_pct)} 비용 전`, tone: tone(tr.pnl_pct)};
+    } else {
+      const why = tr && tr.reason === 'QUERY_FAILED' ? '거래 결과 조회 실패' : '거래 결과 확인 전';
+      cells[1] = {label: '청산가', text: why};
+      cells[2] = {label: '거래 손익(비용 전)', text: why};
+      model.note = '청산은 완료됐지만 거래 결과를 아직 읽지 못했습니다. 아래 관측가는 거래 결과가 아닙니다.';
+      model.pill = {text: why, tone: ''};
+    }
+    if(cur) {
+      const vsEntry = entry ? (cur / entry - 1) * 100 : null;
+      const exitPrice = tr && tr.closed ? tr.exit_price : null;
+      const vsExit = exitPrice ? (cur / exitPrice - 1) * 100 : null;
+      const at = hhmmss(d?.observed_last_at);
+      model.obs = `청산 후 관측(거래 결과 아님) · 마지막 ${fmt(cur)}원${at ? ` (${at})` : ''}`
+        + (vsEntry != null ? ` · 진입가 대비 ${fmtPct(vsEntry)}` : '')
+        + (vsExit != null ? ` · 청산가 대비 ${fmtPct(vsExit)}` : '');
+    }
+  }
+  return model;
+}
+
+// 거래일 줄(순수). session은 서버 /api/status의 session, nowKstDate는 브라우저 KST 날짜(YYYYMMDD).
+function dayStripModel(session, nowKstDate) {
+  const s = session || {};
+  const today = s.today || nowKstDate || '';
+  const todayText = `오늘 ${dateWithWeekday(today, s.today_weekday)}`;
+  let data = '';
+  let note = '';
+  if(s.is_previous_day && s.data_date) {
+    data = `표시 자료: ${dateWithWeekday(s.data_date, s.data_weekday)} 거래 — 직전 거래 기록`;
+  }
+  if(s.is_weekend) note = '주말 — 오늘은 장이 열리지 않습니다';
+  else if(s.late_open) note = '10시 개장일 — 오늘은 진입하지 않습니다';
+  return {todayText, data, note, sessionless: Boolean(s.is_weekend)};
+}
+
+function ageText(ms) {
+  if(ms == null || !Number.isFinite(ms) || ms < 0) return '';
+  const sec = Math.round(ms / 1000);
+  if(sec < 60) return `${sec}초 전`;
+  const min = Math.round(sec / 60);
+  if(min < 60) return `${min}분 전`;
+  const hour = Math.round(min / 60);
+  return hour < 48 ? `${hour}시간 전` : `${Math.round(hour / 24)}일 전`;
+}
+
+// 연결·시각 상태(순수). 기록이 없거나 오늘 것이 아니면 "정상"으로 그리지 않는다.
+//   level: ok | warn | err | off(미관측·해당 없음)
+function healthModel(d, today) {
+  const h = d?.health || {};
+  const dayOf = ts => String(ts || '').slice(0, 10).replace(/-/g, '');
+  const md = ts => mmdd(dayOf(ts));
+  const out = {};
+  const tok = h.token;
+  if(tok && dayOf(tok.ts) === today) {
+    out.kis = {level: 'ok', text: `토큰 ${hhmmss(tok.ts).slice(0, 5)} 확인`, short: 'KIS'};
+  } else if(tok) {
+    out.kis = {level: 'off', text: `오늘 확인 전 (마지막 ${md(tok.ts)} ${hhmmss(tok.ts).slice(0, 5)})`, short: 'KIS 확인 전'};
+  } else {
+    out.kis = {level: 'off', text: '기록 없음', short: 'KIS 기록 없음'};
+  }
+  const active = ['HOLDING', 'EXITING', 'ENTERING'].includes(d?.position_status) || isObservingFlow(d);
+  const tickDay = dayOf(d?.observed_last_at);
+  const lastTick = d?.observed_last_at
+    ? `${tickDay && tickDay !== today ? `${md(d.observed_last_at)} ` : ''}${hhmmss(d.observed_last_at)}` : '';
+  if(d?.ws_connected) {
+    out.ws = {level: 'ok', text: `연결됨${lastTick ? ` · 마지막 시세 ${lastTick}` : ''}`, short: 'WS 연결'};
+  } else if(active) {
+    out.ws = {level: 'err', text: `끊김${lastTick ? ` · 마지막 시세 ${lastTick}` : ''}`, short: 'WS 끊김'};
+  } else {
+    out.ws = {level: 'off', text: `연결 안 함(추적 대상 없음)${lastTick ? ` · 마지막 시세 ${lastTick}` : ''}`, short: 'WS 대기'};
+  }
+  const ntp = h.ntp;
+  const levelOf = {TIME_SYNC_OK: 'ok', TIME_SYNC_WARN: 'warn', TIME_SYNC_ERROR: 'err'};
+  if(ntp && dayOf(ntp.ts) === today) {
+    const lv = String(ntp.level || '').toLowerCase() === 'error' ? 'err' : (levelOf[ntp.event] || 'off');
+    const off = ntp.offset_ms != null ? ` 오차 ${Math.round(Number(ntp.offset_ms))}ms` : '';
+    out.ntp = {level: lv, text: `${hhmmss(ntp.ts).slice(0, 5)} 점검${off}`, short: `시각${off}`};
+  } else if(ntp) {
+    out.ntp = {level: 'off', text: `오늘 점검 전 (마지막 ${md(ntp.ts)} ${hhmmss(ntp.ts).slice(0, 5)})`, short: '시각 점검 전'};
+  } else {
+    out.ntp = {level: 'off', text: '기록 없음', short: '시각 기록 없음'};
+  }
+  return out;
+}
+
+const HEALTH_MARK = {ok: '✓', warn: '!', err: '✕', off: '–'};
+
+// 계좌 모드 코드값 → 한글(PAPER 모의투자 / REAL 실계좌). 모르면 코드값 그대로.
+function accountModeLabel(mode) {
+  if(!mode || mode === 'PAPER') return '모의투자(PAPER)';
+  if(mode === 'REAL') return '실계좌(REAL)';
+  return String(mode);
+}
+let _lastStatusOkAt = 0;
+let _lastStatusFailAt = 0;
+let _sseState = 'connecting';
+
+function setHealthItem(id, item) {
+  const el = $(id);
+  if(!el) return;
+  el.className = `hl ${item.level}`;
+  const v = $(`${id}-v`);
+  if(v) v.textContent = `${HEALTH_MARK[item.level] || ''} ${item.text}`.trim();
+}
+
+function renderPollHealth() {
+  const now = Date.now();
+  let item;
+  if(_lastStatusFailAt && _lastStatusFailAt > _lastStatusOkAt) {
+    item = {level: 'err', text: `상태 조회 실패 · 마지막 성공 ${_lastStatusOkAt ? ageText(now - _lastStatusOkAt) : '없음'}`};
+  } else if(!_lastStatusOkAt) {
+    item = {level: 'off', text: '대기'};
+  } else {
+    const age = now - _lastStatusOkAt;
+    item = {level: age > 15000 ? 'warn' : 'ok', text: `${ageText(age)} 갱신`};
+  }
+  if(_sseState === 'down') item = {level: item.level === 'ok' ? 'warn' : item.level, text: `${item.text} · 실시간 알림 끊김(재연결 중)`};
+  setHealthItem('hl-poll', item);
+}
+
+function kstNowParts() {
+  const kst = new Date(Date.now() + 9 * 3600 * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return {date: `${kst.getUTCFullYear()}${p(kst.getUTCMonth() + 1)}${p(kst.getUTCDate())}`,
+          min: kst.getUTCHours() * 60 + kst.getUTCMinutes() + kst.getUTCSeconds() / 60,
+          hhmm: `${p(kst.getUTCHours())}:${p(kst.getUTCMinutes())}`};
+}
+
+function renderDayStrip(d) {
+  const m = dayStripModel(d?.session, kstNowParts().date);
+  setFlowText('day-today', m.todayText);
+  const data = $('day-data');
+  if(data) { data.hidden = !m.data; data.textContent = m.data; }
+  const note = $('day-note');
+  if(note) { note.hidden = !m.note; note.textContent = m.note; }
+  _sessionless = m.sessionless;
+  const flowTitle = document.querySelector('.flow-title');
+  if(flowTitle) {
+    const s = d?.session || {};
+    flowTitle.textContent = s.is_previous_day && s.data_date
+      ? `가격흐름 · ${dateWithWeekday(s.data_date, s.data_weekday)} (직전 거래일)`
+      : '오늘 가격흐름';
+  }
+}
+
+function renderSessionBar() {
+  const now = kstNowParts();
+  const bar = $('sess-bar'), fill = $('sess-fill'), text = $('sess-text');
+  if(!bar || !fill || !text) return;
+  const end = _sessionEndMin;
+  const p2 = n => String(n).padStart(2, '0');
+  const endText = `${p2(Math.floor(end / 60))}:${p2(end % 60)}`;
+  if(_sessionless) {
+    fill.style.width = '0%';
+    bar.setAttribute('aria-valuenow', '0');
+    text.textContent = `현재 ${now.hhmm} · 오늘 세션 없음`;
+    return;
+  }
+  const prog = sessionArcProgress(SESSION_START_MIN, end, now.min);
+  fill.style.width = `${Math.round(prog * 100)}%`;
+  bar.setAttribute('aria-valuenow', String(Math.round(prog * 100)));
+  const phase = now.min < SESSION_START_MIN ? '장전 시작 전'
+    : now.min >= end ? '세션 종료' : `${Math.round(now.min - SESSION_START_MIN)}분 경과`;
+  text.textContent = `08:40 장전 시작 → ${endText} 세션 종료 · 현재 ${now.hhmm} (${phase})`;
+}
+
+function toggleArc(force) {
+  const strip = $('arc-strip'), btn = $('arc-toggle');
+  if(!strip || !btn) return;
+  const open = force == null ? strip.hidden : Boolean(force);
+  strip.hidden = !open;
+  btn.setAttribute('aria-expanded', String(open));
+  if(force == null) lsSet('arcOpen', open ? '1' : '0');
+  if(open) updateArc(new Date(Date.now() + 9 * 3600 * 1000));
+}
+
+function renderTradeCard(d) {
+  const m = tradeCardModel(d);
+  const ids = [['pl-entry', 'pv-entry'], ['pl-cur', 'pv-cur'], ['pl-pnl', 'pv-pnl'],
+               ['pl-high', 'pv-high'], ['pl-qty', 'pv-qty'], ['pl-amount', 'pv-amount']];
+  ids.forEach(([l, v], i) => {
+    const cell = m.cells[i];
+    setFlowText(l, cell.label);
+    const el = $(v);
+    if(!el) return;
+    if(el.textContent !== cell.text) el.textContent = cell.text;
+    el.className = 'pval' + (cell.tone === 'up' ? ' pup' : cell.tone === 'dn' ? ' pdn' : '');
+  });
+  const note = $('pos-note');
+  if(note) { note.hidden = !m.note; setFlowText('pos-note', m.note); }
+  const obs = $('obs-strip');
+  if(obs) { obs.hidden = !m.obs; setFlowText('obs-strip', m.obs); }
+  const pills = $('tv-pills');
+  if(pills) {
+    pills.innerHTML = m.pill
+      ? `<span class="tv-pnl ${m.pill.tone || 'flat'}">${esc(m.pill.text)}</span>` : '';
+  }
+}
+
+function renderHealth(d) {
+  const today = d?.session?.today || kstNowParts().date;
+  const h = healthModel(d, today);
+  setHealthItem('hl-kis', h.kis);
+  setHealthItem('hl-ws', h.ws);
+  setHealthItem('hl-ntp', h.ntp);
+  const top = [['kis', h.kis], ['ws', h.ws], ['ntp', h.ntp]];
+  top.forEach(([id, item]) => {
+    setLiStatus(id, item.level);
+    const lbl = $(`${id}-lbl`);
+    if(lbl) lbl.textContent = `${{kis: 'KIS', ws: '시세', ntp: '시각'}[id]} ${HEALTH_MARK[item.level] || ''}`;
+    const si = $(`si-${id}`);
+    if(si) si.title = `${{kis: 'KIS 증권사 API', ws: '실시간 시세(WebSocket)', ntp: 'PC 시각 동기화'}[id]}: ${item.text}`;
+  });
+  renderPollHealth();
+}
+
 function applyStatus(d) {
   if(d.assets) _lastAssets = d.assets;
   if(_lastAssets && !d.assets) d.assets = _lastAssets;
@@ -201,32 +509,32 @@ function applyStatus(d) {
   $('tb-sname').textContent = d.ticker ? tickerName(d.ticker, d.name)
     : observing ? `${tickerName(d.observe_ticker, d.observe_name)} · 관측 중` : '대기중';
 
-  // 모드 뱃지
-  const isReal = d.mode!=='PAPER';
-  $('tb-mode').textContent = d.mode||'PAPER';
-  $('tb-mode').style.color = isReal ? 'var(--dn)' : 'var(--br)';
+  // 계좌 모드 — 코드값(PAPER/REAL) 대신 뜻을 쓴다.
+  const isReal = d.mode === 'REAL';
+  $('tb-mode').textContent = isReal ? '실계좌' : '모의투자';
+  $('tb-mode').title = isReal ? '실계좌(REAL) — 실제 주문이 나갑니다' : '모의투자 계좌(PAPER) — 모의 서버로 주문합니다';
+  $('tb-mode').classList.toggle('real', isReal);
+  const btmMode = $('btm-mode');
+  if(btmMode) btmMode.textContent = isReal ? '실계좌 매매' : '모의투자 매매';
 
-  // KIS 상태 (WS 연결이 되거나 mode가 있으면 OK로 간주)
-  const kisOk = d.ws_connected || d.position_status!=='IDLE';
-  setLiStatus('kis', kisOk?'ok':'off');
-
-  // WS 상태
-  setLiStatus('ws', d.ws_connected?'ok':'off');
-
-  // NTP 상태
-  const ntpCls = {OK:'ok',WARN:'warn',CRIT:'err',ERROR:'err'}[d.ntp_level]||'off';
-  setLiStatus('ntp', ntpCls);
-  const ntpTxt = d.ntp_offset_ms>0 ? `NTP +${Math.round(d.ntp_offset_ms)}ms` : 'NTP';
-  $('si-ntp').querySelector('span:last-child').textContent = ntpTxt;
-  $('ntp-lbl').textContent = ntpTxt;
+  renderHealth(d);
+  renderDayStrip(d);
+  renderSessionBar();
 
   // 상태 스트립
   const badge = $('st-badge');
-  badge.textContent = {IDLE:'대기중',ENTERING:'진입중',HOLDING:'보유중',CLOSED:'청산됨'}[d.position_status]||d.position_status;
+  badge.textContent = POSITION_LABELS[d.position_status] || d.position_status || '대기중';
   badge.className = 'st-badge '+(d.position_status||'IDLE');
   $('st-tk').textContent  = flowTicker(d) || '';
   $('st-name').textContent = d.ticker ? tickerName(d.ticker, d.name)
     : observing ? `${tickerName(d.observe_ticker, d.observe_name)} · 미보유 관측 중` : '';
+  const stDate = $('st-date');
+  if(stDate) {
+    const s = d.session || {};
+    const show = Boolean(s.is_previous_day && s.data_date && (d.ticker || observing));
+    stDate.hidden = !show;
+    stDate.textContent = show ? `${dateWithWeekday(s.data_date, s.data_weekday)} 거래 · 직전 거래 기록` : '';
+  }
   const trackingStopBtn = $('tracking-stop-btn');
   if(trackingStopBtn) {
     const closed = d.position_status === 'CLOSED';
@@ -242,27 +550,7 @@ function applyStatus(d) {
     }
   }
 
-  // PnL 필
-  const pills = $('tv-pills');
-  if(d.pnl_pct!=null){
-    const up = d.pnl_pct>=0;
-    pills.innerHTML = `<span class="tv-pnl ${up?'up':'dn'}">${fmtPct(d.pnl_pct)}</span>`;
-  } else {
-    pills.innerHTML = '';
-  }
-
-  // 포지션 그리드
-  $('pv-entry').innerHTML = d.entry_price ? fmt(d.entry_price)+'<span class="u">원</span>' : '—';
-  const curEl = $('pv-cur');
-  curEl.innerHTML = d.current_price ? fmt(d.current_price)+'<span class="u">원</span>' : '—';
-  curEl.className = 'pval'+(d.current_price&&d.entry_price ? (d.current_price>d.entry_price?' pup':' pdn') : '');
-  const pnlEl = $('pv-pnl');
-  pnlEl.textContent = fmtPct(d.pnl_pct);
-  pnlEl.className = 'pval'+(d.pnl_pct==null?'':d.pnl_pct>=0?' pup':' pdn');
-  $('pv-high').innerHTML = d.high_price ? fmt(d.high_price)+'<span class="u">원</span>' : '—';
-  $('pv-qty').innerHTML  = d.remaining_qty!=null ? fmt(d.remaining_qty)+'<span class="u">주</span>' : '—';
-  const amt = d.entry_price&&d.entry_qty ? d.entry_price*d.entry_qty : null;
-  $('pv-amount').innerHTML = amt ? fmtM(amt) : '—';
+  renderTradeCard(d);
   updatePriceFlow(d);
 
   // 플래그
@@ -283,11 +571,10 @@ function applyStatus(d) {
 
 function setLiStatus(id, cls) {
   const li = $('li-'+id);
-  li.className = 'li '+cls;
+  if(li) li.className = 'li '+cls;
   const dot = $('dot-'+id);
-  dot.className = 'dot'+(cls==='ok'?'':cls==='warn'?' warn':cls==='err'?' err':' off');
+  if(dot) dot.className = 'dot'+(cls==='ok'?'':cls==='warn'?' warn':cls==='err'?' err':' off');
 }
-
 function updateFlag(id, on, label, dotColor) {
   const el=$(id);
   el.className='flag'+(on?' on':'');
@@ -363,44 +650,105 @@ function renderF1SizeChart(candidates, selectedTicker) {
   }).join('');
 }
 
+// F1 요약(순수). 오늘 스냅샷·로그가 없는데 상태 파일의 지난 거래로 후보가 채워졌으면
+// (selection_source PREVIOUS_TRADE) 오늘의 "후보 확정"으로 그리지 않는다.
+//   open: 'auto-open'(진행·실패라 펼쳐 보일 것) | 'auto-closed'
+function f1ViewModel(d) {
+  const status = d?.status || 'IDLE';
+  const previous = d?.selection_source === 'PREVIOUS_TRADE';
+  const selected = previous ? null : (d?.selected || null);
+  const hasSnapshot = Boolean(d?.snapshot_name);
+  const updated = d?.updated_at ? String(d.updated_at).substring(11, 19) : '';
+  const attempt = d?.last_event?.attempt ? ` · ${d.last_event.attempt}회 시도` : '';
+  const snapDate = d?.snapshot_date && d?.today && d.snapshot_date !== d.today ? ` (${mmdd(d.snapshot_date)})` : '';
+  const meta = hasSnapshot
+    ? `스냅샷 ${updated || '—'}${snapDate}${attempt}`
+    : `오늘 스냅샷 없음${attempt}`;
+  let brief;
+  if(status === 'FAILED') brief = '선정 오류 — 로그 확인 필요';
+  else if(status === 'RUNNING' || status === 'RETRYING') brief = '선정 진행 중';
+  else if(selected) {
+    const gap = selected.gap_pct != null ? ` · 갭 ${fmtPct(pctFromRatio(selected.gap_pct))}` : '';
+    brief = `후보 ${stockText(selected.ticker, selected.name)}${gap}`;
+  }
+  else if(status === 'NO_TARGET') brief = '조건을 통과한 후보 없음';
+  else if(previous) {
+    const s = d?.selected || {};
+    brief = `오늘 선정 기록 없음 · 직전 거래 ${mmdd(d.selection_trade_date)} ${stockText(s.ticker, s.name)}`;
+  } else brief = '오늘 선정 기록 없음';
+  const noData = !hasSnapshot && !selected && status === 'IDLE';
+  // 스냅샷·후보 수가 없으면 단계 수는 모른다 — 0으로 그리지 않는다.
+  const countsUnknown = noData || (!hasSnapshot && !Number(d?.raw_count));
+  const val = v => countsUnknown ? '—' : (v ?? 0);
+  const steps = [
+    ['Ranking 조회', val(d?.raw_count)],
+    ['예상체결 보강', val(d?.expected_valid)],
+    ['Gap 3~7%', val(d?.gap_pass)],
+    ['유동성 정렬', val(d?.liquidity_pass)],
+    ['후보 확정', selected ? stockText(selected.ticker, selected.name) : '—'],
+  ];
+  return {
+    status, stateText: F1_STATUS_LABEL[status] || status, meta, brief, steps, selected, previous,
+    noData, countsUnknown,
+    open: ['RUNNING', 'RETRYING', 'FAILED'].includes(status) ? 'auto-open' : 'auto-closed',
+  };
+}
+
+let _f1UserOpen = null;  // 사용자가 직접 펼치거나 접었으면 그 선택을 유지한다(새로고침 전까지).
+
 function renderF1(d) {
   _lastF1 = d;
-  const status = d.status || 'IDLE';
+  const m = f1ViewModel(d);
   const state = $('f1-state');
-  state.textContent = F1_STATUS_LABEL[status] || status;
-  state.className = 'f1-state ' + status;
+  state.textContent = m.stateText;
+  state.className = 'f1-state ' + m.status;
+  $('f1-meta').textContent = m.meta;
+  setFlowText('f1-brief', m.brief);
+  // 진행·재시도·실패는 접힌 F1 상세까지 내려가지 않아도 보이게 거래일 줄에 띄운다.
+  const dayF1 = $('day-f1');
+  if(dayF1) {
+    const chip = {RUNNING: ['run', '▶ F1 선정 진행 중'], RETRYING: ['run', '! F1 선정 재시도 중'],
+                  FAILED: ['err', '✕ F1 선정 오류 — F1 상세 보기']}[m.status];
+    dayF1.hidden = !chip;
+    if(chip) { dayF1.className = `day-f1 ${chip[0]}`; dayF1.textContent = chip[1]; }
+  }
+  const panel = $('f1-panel');
+  if(panel && panel.tagName === 'DETAILS') {
+    const wantOpen = _f1UserOpen != null ? _f1UserOpen : m.open === 'auto-open';
+    if(panel.open !== wantOpen) panel.open = wantOpen;
+  }
 
-  const updated = d.updated_at ? d.updated_at.substring(11,19) : '—';
-  const snapshot = d.snapshot_name ? `스냅샷 ${d.snapshot_name}` : '스냅샷 없음';
-  const attempt = d.last_event?.attempt ? ` · ${d.last_event.attempt}회 시도` : '';
-  $('f1-meta').textContent = `${snapshot} · ${updated}${attempt}`;
-
-  const steps = [
-    ['Ranking 조회', d.raw_count ?? 0],
-    ['예상체결 보강', d.expected_valid ?? 0],
-    ['Gap 3~7%', d.gap_pass ?? 0],
-    ['유동성 정렬', d.liquidity_pass ?? 0],
-    ['후보 확정', stockText(d.selected?.ticker, d.selected?.name)],
-  ];
-  $('f1-steps').innerHTML = steps.map((s,i)=>`
-    <div class="f1-step ${f1StepClass(status, i)}">
+  $('f1-steps').innerHTML = m.steps.map((s,i)=>`
+    <div class="f1-step ${m.noData ? '' : f1StepClass(m.status, i)}">
       <div class="f1-step-top"><span class="f1-dot"></span>${esc(s[0])}</div>
       <div class="f1-step-val">${esc(s[1])}</div>
     </div>
   `).join('');
 
-  const selected = d.selected;
+  const selected = m.selected;
   $('f1-summary').innerHTML = `
     <div><div class="f1-k">최종 후보</div><div class="f1-v ${selected?'up':''}">${selected ? esc(`${selected.ticker} ${selected.name||''}`) : '—'}</div></div>
     <div><div class="f1-k">최종 갭</div><div class="f1-v ${selected?'up':''}">${selected ? fmtPct(pctFromRatio(selected.gap_pct)) : '—'}</div></div>
     <div><div class="f1-k">예상체결 대금</div><div class="f1-v">${selected ? (Number(selected.expected_amount||0)/1e8).toFixed(1)+'억' : '—'}</div></div>
-    <div><div class="f1-k">구간 보정</div><div class="f1-v br">${esc(`CORE ${d.core_gap||0} · HIGH ${d.high_gap_allowed||0}`)}</div></div>
+    <div><div class="f1-k">구간 보정</div><div class="f1-v br">${m.noData ? '—' : esc(`CORE ${d.core_gap||0} · HIGH ${d.high_gap_allowed||0}`)}</div></div>
   `;
 
   renderF1SizeChart(d.candidates, selected?.ticker);
   renderSelection(d);
 }
 
+function openF1Panel() {
+  const panel = $('f1-panel');
+  if(panel) { panel.open = true; _f1UserOpen = true; }
+}
+
+function initF1Panel() {
+  const panel = $('f1-panel');
+  const summary = panel?.querySelector('summary');
+  if(!summary) return;
+  // summary 클릭(키보드 Enter/Space 포함) 직후 열림 상태가 바뀐다 — 그 값을 사용자 선택으로 기억한다.
+  summary.addEventListener('click', () => setTimeout(() => { _f1UserOpen = panel.open; }, 0));
+}
 function resetPriceFlow(ticker) {
   _priceFlowTicker = ticker;
   _priceFlow = [];
@@ -538,7 +886,7 @@ function updatePriceFlow(d) {
     _priceFlowSeedMeta = meta;
   }
   const price = Number(d?.current_price || 0);
-  if(price > 0 && d?.position_status === 'HOLDING' && !_priceFlow.length) {
+  if(price > 0 && ['HOLDING', 'EXITING'].includes(d?.position_status) && !_priceFlow.length) {
     appendPriceFlowTick(Date.now(), price, ticker);
   }
   requestPriceFlowDraw(d);
@@ -867,7 +1215,8 @@ function drawPriceFlow(d) {
   const {startTs, endTs} = priceFlowViewWindow(d || {}, marks, _priceFlowRangeMode);
   const xAtTs = ts => pad.l + Math.max(0, Math.min(1, (Number(ts) - startTs) / (endTs - startTs || 1))) * chartW;
   const sub = $('flow-sub');
-  const holding = d?.position_status === 'HOLDING';
+  // 청산 주문 중(EXITING)은 아직 잔여수량을 들고 있다 — 보유와 같이 그린다.
+  const holding = d?.position_status === 'HOLDING' || d?.position_status === 'EXITING';
   const closed = d?.position_status === 'CLOSED';
   const observing = isObservingFlow(d);
   const live = holding || observing;
@@ -886,7 +1235,7 @@ function drawPriceFlow(d) {
       const y = pad.t + chartH * i / 3;
       ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
     }
-    ctx.fillStyle = themeVal('#787b86', '#4f5260');
+    ctx.fillStyle = themeVal('#9598a1', '#4f5260');
     ctx.font = '10px Noto Sans KR,sans-serif';
     ctx.textBaseline = 'top';
     const gridStepMs = gridMin * 60 * 1000;
@@ -958,7 +1307,7 @@ function drawPriceFlow(d) {
       rangeMode: _priceFlowRangeMode, scaleMode: _priceFlowScaleMode, appliedScale: 'full',
       observing, clipped: false, viewMin: PRICE_FLOW_VIEW_MIN,
     }), '선: 표시할 가격 자료 없음');
-    ctx.fillStyle = themeVal('#787b86', '#4f5260');
+    ctx.fillStyle = themeVal('#9598a1', '#4f5260');
     ctx.font = '12px Noto Sans KR,sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1100,7 +1449,7 @@ function drawPriceFlow(d) {
   ctx.textBaseline = 'alphabetic';
   ctx.restore();  // 데이터 레이어 클리핑 해제 — 축 라벨은 플롯 밖(pad.l 좌측)에 그린다
 
-  ctx.fillStyle = themeVal('#787b86', '#4f5260');
+  ctx.fillStyle = themeVal('#9598a1', '#4f5260');
   ctx.font = '10px Noto Sans KR,sans-serif';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'alphabetic';
@@ -1116,7 +1465,9 @@ function renderSelection(d) {
   $('sel-status').className = 'sc2-val ' + (status === 'DONE' ? 'pup' : status === 'NO_TARGET' || status === 'FAILED' ? 'pdn' : '');
   $('sel-raw').textContent = d?.raw_count ?? 0;
   $('sel-expected').textContent = d?.expected_valid ?? 0;
-  $('sel-selected').textContent = stockText(d?.selected?.ticker, d?.selected?.name);
+  $('sel-selected').textContent = d?.selection_source === 'PREVIOUS_TRADE'
+    ? `오늘 없음 (직전 거래 ${mmdd(d.selection_trade_date)} ${stockText(d?.selected?.ticker, d?.selected?.name)})`
+    : stockText(d?.selected?.ticker, d?.selected?.name);
 
   const rows = d?.candidates || [];
   const processRows = d?.selection_process || [];
@@ -1233,15 +1584,19 @@ function buyableSourceLabel(source) {
   return '출처 대기';
 }
 
-function assetSnapshotLabel(assets, freshLabel='자산 메뉴에서 상세') {
+// 자산 기준 시각 문구(순수). 오늘(KST) 것이 아니면 날짜를 붙여 지난 자료임을 드러낸다.
+function assetSnapshotLabel(assets, freshLabel='자산 메뉴에서 상세', today=null) {
   if(!assets) return freshLabel;
+  const day = String(assets.captured_at || '').slice(0, 10).replace(/-/g, '');
+  const todayKey = today || kstNowParts().date;
+  const datePart = /^\d{8}$/.test(day) && day !== todayKey ? `${mmdd(day)} ` : '';
   if(assets.snapshot_source === 'DB') {
     const t = shortTime(assets.captured_at);
-    return t === '—' ? '마지막 저장 스냅샷' : `마지막 저장 ${t}`;
+    return t === '—' ? '마지막 저장 스냅샷' : `마지막 저장 ${datePart}${t}`;
   }
   if(assets.snapshot_source === 'KIS') {
     const t = shortTime(assets.captured_at);
-    return t === '—' ? freshLabel : `KIS 조회 ${t}`;
+    return t === '—' ? freshLabel : `KIS 조회 ${datePart}${t}`;
   }
   return freshLabel;
 }
@@ -1285,7 +1640,7 @@ function renderAssets(d) {
     rows.push('<tr><td>보유종목</td><td>0종목</td><td>—</td><td>—</td><td><span class="badge b-to">대기중</span></td></tr>');
   }
   $('asset-tbody').innerHTML = rows.join('');
-  $('set-mode').textContent = d?.mode || 'PAPER';
+  $('set-mode').textContent = accountModeLabel(d?.mode);
 }
 function shortTime(s) {
   if(!s) return '—';
@@ -1319,6 +1674,8 @@ function renderOrders(rows) {
   if($('order-pending')) $('order-pending').textContent = fmt(orders.filter(o=>o.status === 'PENDING' || o.status === 'PARTIAL_FILL').length);
   if($('order-closed')) $('order-closed').textContent = fmt(orders.filter(o=>o.status === 'CANCELLED' || o.status === 'FAILED').length);
   if($('order-uncertain')) $('order-uncertain').textContent = fmt(orders.filter(o=>o.status === 'UNCERTAIN').length);
+  _unresolvedOrders = unresolvedOrderCount(orders);
+  renderEventSummary();
 
   const body = $('orders-tbody');
   if(!body) return;
@@ -1398,9 +1755,66 @@ const LOG_EVENT_MAP = {
   ORDER_SMOKE_SELL_FILLED:{n:'주문 테스트 매도 체결(Order Smoke Sell Filled)',cls:''},
 };
 
+// 미해결 주문 수(순수): 접수·부분체결·결과 불명. 접힌 로그 패널에서도 보이게 센다.
+function unresolvedOrderCount(orders) {
+  return (Array.isArray(orders) ? orders : [])
+    .filter(o => o && ['PENDING', 'PARTIAL_FILL', 'UNCERTAIN'].includes(o.status)).length;
+}
+
+// 로그 수준별 건수(순수).
+function logLevelCounts(logs) {
+  const out = {error: 0, warn: 0, total: 0};
+  for(const l of Array.isArray(logs) ? logs : []) {
+    out.total += 1;
+    const level = String(l?.level || 'info').toLowerCase();
+    if(level === 'crit' || level === 'critical' || level === 'error') out.error += 1;
+    else if(level === 'warn' || level === 'warning') out.warn += 1;
+  }
+  return out;
+}
+
+let _logCounts = null;
+let _unresolvedOrders = 0;
+
+function renderEventSummary() {
+  const el = $('ev-sum');
+  if(!el) return;
+  const parts = [];
+  const c = _logCounts;
+  if(_unresolvedOrders > 0) parts.push(`<span class="ev-chip err">✕ 미해결 주문 ${fmt(_unresolvedOrders)}</span>`);
+  if(c && c.error > 0) parts.push(`<span class="ev-chip err">✕ 오류 ${fmt(c.error)}</span>`);
+  if(c && c.warn > 0) parts.push(`<span class="ev-chip warn">! 경고 ${fmt(c.warn)}</span>`);
+  if(!parts.length) parts.push(c ? `<span class="ev-chip">${c.total ? `${fmt(c.total)}건` : '없음'}</span>` : '');
+  el.innerHTML = parts.join('');
+  const panel = $('ev-panel');
+  if(panel) panel.classList.toggle('has-alert', _unresolvedOrders > 0 || Boolean(c && c.error > 0));
+}
+
+// 이벤트 패널 접기. 사용자가 고른 값은 localStorage 'evPanel'(open|closed)에 남긴다.
+// 고른 적이 없으면 비어 있거나 화면이 좁을 때 접는다.
+function toggleEventPanel(force) {
+  const panel = $('ev-panel'), btn = $('ev-toggle');
+  if(!panel || !btn) return;
+  const open = force == null ? panel.classList.contains('collapsed') : Boolean(force);
+  panel.classList.toggle('collapsed', !open);
+  btn.setAttribute('aria-expanded', String(open));
+  if(force == null) lsSet('evPanel', open ? 'open' : 'closed');
+}
+
+function syncEventPanelDefault() {
+  const saved = lsGet('evPanel');
+  if(saved === 'open' || saved === 'closed') { toggleEventPanel(saved === 'open'); return; }
+  const empty = !_logCounts || _logCounts.total === 0;
+  const narrow = window.matchMedia && window.matchMedia('(max-width: 1100px)').matches;
+  toggleEventPanel(!(empty || narrow));
+}
+
 function renderLogs(logs) {
   const scroll = $('ev-scroll');
-  if(!logs.length){ scroll.innerHTML='<div class="empty">이벤트 없음</div>'; return; }
+  _logCounts = logLevelCounts(logs);
+  renderEventSummary();
+  syncEventPanelDefault();
+  if(!logs.length){ scroll.innerHTML='<div class="empty">오늘 이벤트 없음</div>'; return; }
   scroll.innerHTML = logs.map((l,i)=>{
     const info = LOG_EVENT_MAP[l.event]||{n:l.event,cls:''};
     const eventName = l.event_label || info.n;
@@ -1576,7 +1990,7 @@ function drawBar(byReason) {
   const keys = Object.keys(byReason || {}).sort((a,b)=>(order.indexOf(a)<0?99:order.indexOf(a))-(order.indexOf(b)<0?99:order.indexOf(b)));
   const data = keys.map((key,i)=>({lbl:reasonLabel[key]||key, val:byReason[key]?.avg_pnl||0, color:reasonColor[key]||['#26a69a','#787b86','#ef5350','#f7a600','#7b9ef9'][i%5], n:byReason[key]?.n||0}));
   if(!data.length) {
-    ctx.fillStyle = themeVal('#787b86','#4f5260');
+    ctx.fillStyle = themeVal('#9598a1','#4f5260');
     ctx.font='12px Noto Sans KR,sans-serif';
     ctx.textAlign='center';
     ctx.fillText('데이터 없음',210,96);
@@ -1601,11 +2015,11 @@ function drawBar(byReason) {
     ctx.font='bold 13px Noto Sans KR,sans-serif'; ctx.textAlign='center';
     ctx.fillStyle=d.color;
     ctx.fillText((d.val>=0?'+':'')+d.val.toFixed(2)+'%',x+bW/2,d.val>=0?y-8:y+bH+13);
-    ctx.font='10px Noto Sans KR,sans-serif'; ctx.fillStyle=themeVal('#787b86','#4f5260');
+    ctx.font='10px Noto Sans KR,sans-serif'; ctx.fillStyle=themeVal('#9598a1','#4f5260');
     ctx.fillText(d.lbl,x+bW/2,H-pad.b+13);
     ctx.fillText('('+d.n+'건)',x+bW/2,H-pad.b+25);
   });
-  ctx.textAlign='right'; ctx.font='10px Noto Sans KR,sans-serif'; ctx.fillStyle=themeVal('#787b86','#4f5260');
+  ctx.textAlign='right'; ctx.font='10px Noto Sans KR,sans-serif'; ctx.fillStyle=themeVal('#9598a1','#4f5260');
   [-maxA,-maxA/2,0,maxA/2,maxA].forEach(v=>{
     const yp=pad.t+(maxA-v)/(2*maxA)*cH;
     ctx.fillText((v>0?'+':'')+v.toFixed(maxA>=10?0:1)+'%',pad.l-6,yp+3);
@@ -1658,9 +2072,9 @@ function settingBox(title, rows) {
 function renderSettings(s) {
   if(!s) return;
   applySchedule(s);  // 설정 탭을 나중에 열 때도 세션 종료 시각을 재반영(중복 요청 없이 재사용)
-  $('set-mode').textContent = s.mode || 'PAPER';
+  $('set-mode').textContent = accountModeLabel(s.mode);
   $('set-mode').className = 'sc2-val ' + (s.mode === 'REAL' ? 'pdn' : '');
-  $('set-runtime').textContent = s.dry_run ? 'DRY_RUN' : 'LIVE';
+  $('set-runtime').textContent = s.dry_run ? '주문 전송 안 함(DRY_RUN)' : '주문 전송 사용';
   $('set-runtime').className = 'sc2-val ' + (s.dry_run ? 'pup' : '');
   const readiness = s.real_readiness || {};
   const latchOpen = Boolean(readiness.runtime_entry_latch_open);
@@ -1765,9 +2179,15 @@ async function loadSettings() {
 async function loadStatus() {
   try {
     const r = await fetch('/api/status');
-    if(!r.ok) return;
-    applyStatus(await r.json());
-  } catch(e){}
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    _lastStatusOkAt = Date.now();
+    applyStatus(d);
+  } catch(e){
+    // 조회 실패를 숨기지 않는다 — 화면 갱신 칸에 실패와 마지막 성공 시각을 보인다.
+    _lastStatusFailAt = Date.now();
+    renderPollHealth();
+  }
 }
 
 function trackingStopTooltip(trackingActive) {
@@ -2159,6 +2579,7 @@ function renderSkipHold(d) {
 // ── SSE 구독 ─────────────────────────────────────────────────────────────
 function connectSSE() {
   const es = new EventSource('/api/stream');
+  es.onopen = () => { _sseState = 'up'; renderPollHealth(); };
   es.onmessage = e => {
     try {
       const d = JSON.parse(e.data);
@@ -2168,11 +2589,12 @@ function connectSSE() {
           const tickTicker = d.ticker || flowTicker(_lastStatus);
           const tickPrice = Number(d.price || 0);
           _lastStatus.current_price = tickPrice;
+          if(tickPrice > 0 && String(tickTicker) === String(flowTicker(_lastStatus))) _lastStatus.observed_last_at = tickTs;
           if(_lastStatus.entry_price)
             _lastStatus.pnl_pct = +((tickPrice/_lastStatus.entry_price-1)*100).toFixed(2);
           const observedTick = isObservingFlow(_lastStatus)
             && String(tickTicker) === String(_lastStatus.observe_ticker);
-          if((_lastStatus.position_status === 'HOLDING' || observedTick) && tickPrice > 0) {
+          if((['HOLDING', 'EXITING'].includes(_lastStatus.position_status) || observedTick) && tickPrice > 0) {
             // 배열 복사 없이 공유 버퍼(_priceFlowTicks/_priceFlow)에 tick 하나만 증분 추가.
             // updatePriceFlow의 신선도 가드가 이후 stale payload 덮어쓰기를 막는다.
             appendPriceFlowTick(tickTs, tickPrice, tickTicker);
@@ -2188,7 +2610,7 @@ function connectSSE() {
       }
     } catch(err){}
   };
-  es.onerror = () => { es.close(); setTimeout(connectSSE, 5000); };
+  es.onerror = () => { _sseState = 'down'; renderPollHealth(); es.close(); setTimeout(connectSSE, 5000); };
 }
 
 // ── 테마 ─────────────────────────────────────────────────────────────────
@@ -2200,7 +2622,7 @@ function toggleTheme() {
   $('theme-btn').textContent = next === 'light' ? '☀' : '🌙';
   localStorage.setItem('theme', next);
   // canvas는 CSS 변수를 읽지 못하므로 재렌더
-  drawArc(0);
+  if(!$('arc-strip')?.hidden) updateArc(new Date(Date.now() + 9 * 3600 * 1000));
   drawPriceFlow(_lastStatus);
   if (_statsData) renderStats(_statsData);
 }
@@ -2219,6 +2641,9 @@ function toggleTheme() {
 // ── 초기 로드 ────────────────────────────────────────────────────────────
 syncPriceFlowScaleButtons();  // 저장된 세로 스케일 모드로 버튼 상태 동기화
 syncPriceFlowRangeButtons();  // 저장된 가로 구간 모드로 버튼 상태 동기화
+initF1Panel();
+if(lsGet('arcOpen') === '1') toggleArc(true);
+syncEventPanelDefault();
 loadSchedule();
 loadStatus();
 loadF1();
